@@ -1237,6 +1237,11 @@ assert_file "$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release/mani
 # real Pi rollback path; executable commit and rollback paths use root:root
 # mode-0600 config/tryboot files under the unprivileged remote account.
 remote_helper="$repo_root/scripts/lifecycle-remote.sh"
+grep -Fq 'dkms_command=/usr/sbin/dkms' "$remote_helper" ||
+  fail 'production lifecycle must resolve DKMS through the fixed Trixie sbin path'
+if grep -Fq 'command -v dkms' "$remote_helper"; then
+  fail 'lifecycle must not infer DKMS absence from the unprivileged SSH PATH'
+fi
 grep -q '^privileged_snapshot()' "$remote_helper" || fail 'missing privileged snapshot primitive'
 grep -q '^new_transaction_workspace()' "$remote_helper" || fail 'missing private transaction workspace primitive'
 grep -Fq 'workspace="$(sudo mktemp -d "$state_dir/.hp2r-transaction.XXXXXX")"' "$remote_helper" ||

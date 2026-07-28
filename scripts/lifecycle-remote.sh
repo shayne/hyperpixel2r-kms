@@ -14,6 +14,11 @@ normal_config="${root}/boot/firmware/config.txt"
 tryboot_config="${root}/boot/firmware/tryboot.txt"
 artifact_root="${root}/usr/lib/hyperpixel2r-kms"
 dkms_root="${root}/usr/src"
+if test -n "$root"; then
+  dkms_command=dkms
+else
+  dkms_command=/usr/sbin/dkms
+fi
 
 source_files=(
   Kbuild Makefile dkms.conf hyperpixel2r_kms_main.c hyperpixel2r_kms_gpio.c
@@ -34,6 +39,18 @@ state_keys=(
 die() {
   printf '%s\n' "$*" >&2
   exit 1
+}
+
+dkms_available() {
+  if test -n "$root"; then
+    command -v "$dkms_command" >/dev/null 2>&1
+  else
+    sudo test -x "$dkms_command"
+  fi
+}
+
+run_dkms() {
+  sudo "$dkms_command" "$@"
 }
 
 sha() {
@@ -656,12 +673,12 @@ assert_no_owned_generic_overlay() {
 validate_dkms_status() {
   local version="$1"
   local output status line count=0
-  if ! command -v dkms >/dev/null 2>&1; then
+  if ! dkms_available; then
     printf 'absent\n'
     return
   fi
   set +e
-  output="$(sudo dkms status -m hyperpixel2r-kms -v "$version" 2>/dev/null)"
+  output="$(run_dkms status -m hyperpixel2r-kms -v "$version" 2>/dev/null)"
   status=$?
   set -e
   if test "$status" -ne 0; then
@@ -733,13 +750,13 @@ restore_dkms_source_state() {
     # The source-tree rollback authority is independent of whether the dkms
     # executable is presently available.  Do not let an absent dkms command
     # short-circuit restoration of the captured candidate bytes.
-    if command -v dkms >/dev/null 2>&1; then
+    if dkms_available; then
       current_state="$(validate_dkms_status "$driver_version")" || return
     else
       current_state=absent
     fi
     case "$current_state" in
-      registered) sudo dkms remove -m hyperpixel2r-kms -v "$driver_version" --all || return ;;
+      registered) run_dkms remove -m hyperpixel2r-kms -v "$driver_version" --all || return ;;
       absent|unregistered) ;;
       *) return 1 ;;
     esac
@@ -748,8 +765,8 @@ restore_dkms_source_state() {
   if "$desired_tree_present"; then
     assert_source_tree_shape "$source_backup" || return
     materialize_source_tree "$source_backup" "$destination" || return
-    if test "$desired_state" = registered && command -v dkms >/dev/null 2>&1; then
-      sudo dkms add -m hyperpixel2r-kms -v "$driver_version" || return
+    if test "$desired_state" = registered && dkms_available; then
+      run_dkms add -m hyperpixel2r-kms -v "$driver_version" || return
     fi
   fi
 }
@@ -832,7 +849,7 @@ stage() {
         else sudo rm -f -- "$tryboot_config" || true
         fi
       fi
-      if "$dkms_added" && command -v dkms >/dev/null 2>&1; then sudo dkms remove -m hyperpixel2r-kms -v "$driver_version" --all || true; fi
+      if "$dkms_added" && dkms_available; then run_dkms remove -m hyperpixel2r-kms -v "$driver_version" --all || true; fi
       if "$created_dkms" || "$dkms_replaced"; then
         if sudo test -L "$dkms_dir"; then :
         elif sudo test -e "$dkms_dir"; then remove_exact_tree "$dkms_dir" || true
@@ -841,8 +858,8 @@ stage() {
           absent) ;;
           unregistered|registered)
             materialize_source_tree "$prior_dkms_snapshot" "$dkms_dir" || true
-            if test "$prior_dkms_state" = registered && command -v dkms >/dev/null 2>&1; then
-              sudo dkms add -m hyperpixel2r-kms -v "$driver_version" || true
+            if test "$prior_dkms_state" = registered && dkms_available; then
+              run_dkms add -m hyperpixel2r-kms -v "$driver_version" || true
             fi
             ;;
         esac
@@ -984,7 +1001,7 @@ stage() {
     else
       test "$prior_dkms_state" != absent || die 'missing prior DKMS capture'
       assert_source_tree_shape "$dkms_dir" "$prior_dkms_snapshot" || die 'DKMS source changed after capture'
-      if test "$prior_dkms_state" = registered; then sudo dkms remove -m hyperpixel2r-kms -v "$driver_version" --all || die 'failed to remove prior DKMS registration'; fi
+      if test "$prior_dkms_state" = registered; then run_dkms remove -m hyperpixel2r-kms -v "$driver_version" --all || die 'failed to remove prior DKMS registration'; fi
       dkms_replaced=true
       remove_exact_tree "$dkms_dir" || die 'failed to remove replaced DKMS source tree'
       materialize_source_tree "$artifact_dir/dkms-source" "$dkms_dir" || die 'failed to materialize replacement DKMS source tree'
@@ -1000,7 +1017,7 @@ stage() {
   dkms_status="$(validate_dkms_status "$driver_version")" || die 'failed to validate DKMS status after staging'
   case "$dkms_status" in
     absent|registered) ;;
-    unregistered) sudo dkms add -m hyperpixel2r-kms -v "$driver_version" || die 'failed to register DKMS source'; dkms_added=true ;;
+    unregistered) run_dkms add -m hyperpixel2r-kms -v "$driver_version" || die 'failed to register DKMS source'; dkms_added=true ;;
     *) die 'invalid DKMS status result' ;;
   esac
   test "$(sha "$normal_config")" = "$normal_sha" || die 'normal boot config changed while staging tryboot candidate'
@@ -1352,7 +1369,7 @@ uninstall() {
       dkms_status="$(validate_dkms_status "$version")" || die 'failed to validate DKMS status during uninstall'
       case "$dkms_status" in
         absent|unregistered) ;;
-        registered) sudo dkms remove -m hyperpixel2r-kms -v "$version" --all ;;
+        registered) run_dkms remove -m hyperpixel2r-kms -v "$version" --all ;;
         *) die 'invalid DKMS status result' ;;
       esac
       remove_exact_tree "$dkms_dir" || die 'failed to remove DKMS source tree during uninstall'
@@ -1360,7 +1377,7 @@ uninstall() {
       dkms_status="$(validate_dkms_status "$version")" || die 'failed to validate prior DKMS status during uninstall'
       case "$dkms_status" in
         absent|unregistered) ;;
-        registered) sudo dkms remove -m hyperpixel2r-kms -v "$version" --all ;;
+        registered) run_dkms remove -m hyperpixel2r-kms -v "$version" --all ;;
         *) die 'invalid DKMS status result' ;;
       esac
     fi
