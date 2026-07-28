@@ -1,6 +1,7 @@
 min_version = "2026.7.7"
 
 [env]
+_.file = { path = ".env", redact = true }
 CC = "/usr/bin/clang"
 
 [tasks.test-protocol]
@@ -21,5 +22,26 @@ cc -std=c11 -Wall -Wextra -Werror -pedantic \
 ./target/gpio-test
 """
 
+[tasks.test-build-contract]
+run = "bash tests/build-contract.sh"
+
+[tasks.export-target-kbuild]
+run = """
+HP2R_TARGET="${HP2R_TARGET:-${PLANERADAR_PI_TARGET:-}}" \
+  exec ./scripts/export-target-kbuild.sh
+"""
+
+[tasks.build-driver]
+run = """
+HP2R_TARGET="${HP2R_TARGET:-${PLANERADAR_PI_TARGET:-}}" \
+  exec ./scripts/build-driver.sh
+"""
+
+[tasks.check-artifacts]
+run = """
+HP2R_TARGET="${HP2R_TARGET:-${PLANERADAR_PI_TARGET:-}}" \
+  exec ./scripts/check-artifacts.sh
+"""
+
 [tasks.verify]
-depends = ["test-protocol", "test-gpio"]
+depends = ["test-protocol", "test-gpio", "test-build-contract"]
