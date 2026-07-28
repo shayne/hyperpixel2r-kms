@@ -271,7 +271,11 @@ atomic_copy() {
   }
   sudo chmod "$requested_mode" "$temporary" || { sudo rm -f -- "$temporary" || true; return 1; }
   sudo chown root:root "$temporary" || { sudo rm -f -- "$temporary" || true; return 1; }
-  assert_owned_regular "$temporary" "$requested_mode" || { sudo rm -f -- "$temporary" || true; return 1; }
+  if test "$boot_file" = true; then
+    assert_owned_regular "$temporary" boot || { sudo rm -f -- "$temporary" || true; return 1; }
+  else
+    assert_owned_regular "$temporary" "$requested_mode" || { sudo rm -f -- "$temporary" || true; return 1; }
+  fi
   sudo mv -f "$temporary" "$destination" || { sudo rm -f -- "$temporary" || true; return 1; }
   if test "$boot_file" = true; then
     assert_owned_regular "$destination" boot || {

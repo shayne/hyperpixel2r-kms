@@ -183,6 +183,14 @@ if test -n "${HP2R_INSTALL_ROOT:-}" && test -n "${HP2R_FIXTURE_ALLOCATOR_FAULT:-
       ;;
   esac
 fi
+if test "${HP2R_FIXTURE_BOOT_MODE:-}" = 755 && test "${2-}" = %a; then
+  case "${3-}" in
+    "$HP2R_FIXTURE_ROOT"/boot/firmware/*)
+      printf '%s\n' 755
+      exit 0
+      ;;
+  esac
+fi
 exec /usr/bin/stat "$@"
 SCRIPT
 
@@ -745,6 +753,16 @@ else
   fail 'baseline stage did not run in the disposable target'
 fi
 test "$(cat "$root/tmp/remote-uid")" = 65534 || fail 'fake target did not execute as an unprivileged SSH user'
+
+# Raspberry Pi firmware is normally VFAT with fmask=0022, so chmod 0644 still
+# reports mode 0755.  Publishing a boot artifact must accept that mount mode.
+new_target
+if HP2R_FIXTURE_BOOT_MODE=755 run_stage; then
+  assert_file "$root/boot/firmware/tryboot.txt"
+  assert_file "$root/boot/firmware/overlays/$overlay_file"
+else
+  fail 'stage rejected the Raspberry Pi VFAT boot-file mode'
+fi
 
 # A verified release-source extraction has no ambient Git repository.  Its
 # exact source identity and regular kernel leaves must be sufficient for
