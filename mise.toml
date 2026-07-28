@@ -1,0 +1,25 @@
+min_version = "2026.7.7"
+
+[env]
+CC = "/usr/bin/clang"
+
+[tasks.test-protocol]
+run = """
+mkdir -p target
+cc -std=c11 -Wall -Wextra -Werror -pedantic \
+  kernel/hyperpixel2r_kms_protocol.c tests/protocol_test.c \
+  -o target/protocol-test
+./target/protocol-test
+"""
+
+[tasks.test-gpio]
+run = """
+mkdir -p target
+cc -std=c11 -Wall -Wextra -Werror -pedantic \
+  kernel/hyperpixel2r_kms_gpio.c tests/gpio_test.c \
+  -o target/gpio-test
+./target/gpio-test
+"""
+
+[tasks.verify]
+depends = ["test-protocol", "test-gpio"]

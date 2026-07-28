@@ -1,0 +1,5 @@
+obj-m += hyperpixel2r_kms.o
+hyperpixel2r_kms-y := \
+	hyperpixel2r_kms_main.o \
+	hyperpixel2r_kms_gpio.o \
+	hyperpixel2r_kms_protocol.o
