@@ -23,8 +23,100 @@ fixture_runner="$repo_root/tests/boot-fixtures.sh"
 test -f "$fixture_runner" && test ! -L "$fixture_runner"
 image="${HP2R_BOOT_FIXTURE_IMAGE:-${HP2R_KERNEL_BUILD_IMAGE:-hyperpixel2r-kms-kernel-builder:debian-trixie-gcc14}}"
 docker image inspect "$image" >/dev/null
+
+# Keep the executable lifecycle suite hermetic.  A real exact-kernel bundle is
+# deliberately a maintainer artifact, not CI input; these fixtures need only a
+# regular, provenance-valid payload because their fake target never loads it.
+fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/hp2r-boot-repo.XXXXXX")"
+fixture_repo="$fixture_root/repo"
+trap 'rm -rf -- "$fixture_root"' EXIT
+source_revision="$(
+  bash -eu -c \
+    'cd "$1"; source "$2"; hp2r_resolve_build_revision' \
+    bash \
+    "$repo_root" \
+    "$repo_root/scripts/common.sh"
+)"
+git clone --quiet --no-hardlinks "$repo_root" "$fixture_repo"
+git -C "$fixture_repo" checkout --quiet --detach "$source_revision"
+
+# Overlay the tracked working files so a developer's uncommitted lifecycle
+# change is tested too, while dist/ and other untracked deployment state stay
+# outside the fixture repository.
+while IFS= read -r -d '' relative_path; do
+  test -f "$repo_root/$relative_path" && test ! -L "$repo_root/$relative_path"
+  mkdir -p "$fixture_repo/$(dirname "$relative_path")"
+  cp -p "$repo_root/$relative_path" "$fixture_repo/$relative_path"
+done < <(git -C "$repo_root" ls-files -z)
+
+release='6.18.34+rpt-rpi-v8'
+source_tree="$(git -C "$fixture_repo" rev-parse "$source_revision^{tree}")"
+artifact_dir="$fixture_repo/dist/artifacts/$release"
+target_dir="$fixture_repo/dist/kernel-target/$release"
+mkdir -p "$artifact_dir" "$target_dir"
+module_file='hyperpixel2r_kms.ko'
+overlay_file="hyperpixel2r-kms-${source_revision:0:12}.dtbo"
+applied_dtb_file='hyperpixel2r-kms-applied.dtb'
+printf 'synthetic module fixture\n' > "$artifact_dir/$module_file"
+printf 'synthetic overlay fixture\n' > "$artifact_dir/$overlay_file"
+printf 'synthetic applied dtb fixture\n' > "$artifact_dir/$applied_dtb_file"
+for helper in host-fixdep host-modpost host-genksyms; do
+  printf 'synthetic %s fixture\n' "$helper" > "$artifact_dir/$helper"
+done
+
+module_sha256="$(sha256sum "$artifact_dir/$module_file" | awk '{print $1}')"
+overlay_sha256="$(sha256sum "$artifact_dir/$overlay_file" | awk '{print $1}')"
+applied_dtb_sha256="$(sha256sum "$artifact_dir/$applied_dtb_file" | awk '{print $1}')"
+host_fixdep_sha256="$(sha256sum "$artifact_dir/host-fixdep" | awk '{print $1}')"
+host_modpost_sha256="$(sha256sum "$artifact_dir/host-modpost" | awk '{print $1}')"
+host_genksyms_sha256="$(sha256sum "$artifact_dir/host-genksyms" | awk '{print $1}')"
+source_deb_sha256='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+base_dtb_sha256='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+
+{
+  printf 'schema_version\t1\n'
+  printf 'driver_version\t0.1.0\n'
+  printf 'source_revision\t%s\n' "$source_revision"
+  printf 'source_tree\t%s\n' "$source_tree"
+  printf 'kernel_release\t%s\n' "$release"
+  printf 'architecture\taarch64\n'
+  printf 'base_dtb_sha256\t%s\n' "$base_dtb_sha256"
+  printf 'module_file\t%s\n' "$module_file"
+  printf 'module_sha256\t%s\n' "$module_sha256"
+  printf 'module_vermagic\t%s fixture\n' "$release"
+  printf 'overlay_file\t%s\n' "$overlay_file"
+  printf 'overlay_sha256\t%s\n' "$overlay_sha256"
+  printf 'applied_dtb_file\t%s\n' "$applied_dtb_file"
+  printf 'applied_dtb_sha256\t%s\n' "$applied_dtb_sha256"
+} > "$artifact_dir/manifest.txt"
+{
+  printf 'host_arch\tx86_64\n'
+  printf 'kernel_source_package\tlinux\n'
+  printf 'kernel_source_deb_package\tlinux-source-6.18\n'
+  printf 'kernel_source_version\t6.18.34-1\n'
+  printf 'kernel_source_sha256\t%s\n' "$source_deb_sha256"
+  printf 'host_fixdep_sha256\t%s\n' "$host_fixdep_sha256"
+  printf 'host_modpost_sha256\t%s\n' "$host_modpost_sha256"
+  printf 'host_genksyms_sha256\t%s\n' "$host_genksyms_sha256"
+} > "$artifact_dir/host-tools.txt"
+{
+  printf 'kernel_release\t%s\n' "$release"
+  printf 'kernel_arch\taarch64\n'
+  printf 'header_path\t/usr/src/linux-headers-6.18.34+rpt-rpi-v8\n'
+  printf 'common_header_path\t/usr/src/linux-headers-6.18.34+rpt-common-rpi\n'
+  printf 'kbuild_path\t/usr/lib/linux-kbuild-6.18.34+rpt\n'
+  printf 'kernel_source_package\tlinux\n'
+  printf 'kernel_source_version\t6.18.34-1\n'
+  printf 'kernel_source_deb_package\tlinux-source-6.18\n'
+  printf 'kernel_source_deb_filename\tpool/main/l/linux/linux-source-6.18_6.18.34-1_all.deb\n'
+  printf 'kernel_source_deb_sha256\t%s\n' "$source_deb_sha256"
+  printf 'kernel_source_deb\tkernel-source.deb\n'
+  printf 'base_dtb_path\t/boot/firmware/bcm2710-rpi-zero-2-w.dtb\n'
+  printf 'base_dtb_sha256\t%s\n' "$base_dtb_sha256"
+} > "$target_dir/target.txt"
+
 docker run --rm \
-  --volume "$repo_root:/repo:ro" \
+  --volume "$fixture_repo:/repo:ro" \
   --workdir /repo \
   --env HP2R_FIXTURE_REPO_ROOT=/repo \
   "$image" \
