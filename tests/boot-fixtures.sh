@@ -760,6 +760,16 @@ new_target
 if HP2R_FIXTURE_BOOT_MODE=755 run_stage; then
   assert_file "$root/boot/firmware/tryboot.txt"
   assert_file "$root/boot/firmware/overlays/$overlay_file"
+  install_live_hardware
+  if HP2R_FIXTURE_BOOT_MODE=755 run_controller commit-boot.sh; then
+    grep -Eq "^dtoverlay=hyperpixel2r-kms-[0-9a-f]{12}\.dtbo[[:space:]]*$" \
+      "$root/boot/firmware/config.txt" ||
+      fail 'commit did not publish the accepted overlay on the VFAT fixture'
+    assert_absent "$root/boot/firmware/tryboot.txt"
+    assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+  else
+    fail 'commit rejected the Raspberry Pi VFAT boot-file mode'
+  fi
 else
   fail 'stage rejected the Raspberry Pi VFAT boot-file mode'
 fi

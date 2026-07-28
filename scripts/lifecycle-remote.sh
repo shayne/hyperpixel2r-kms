@@ -1068,21 +1068,23 @@ prepare_copy() {
   local directory="$2"
   local mode="$3"
   local workspace="$4"
+  local boot_file="${5:-false}"
   local temporary snapshot expected_sha
   sudo test ! -L "$directory" && sudo test -d "$directory" || return
   assert_private_workspace "$workspace" || return
   snapshot="$(privileged_snapshot "$source" "$workspace" prepare)" || return
   expected_sha="$(sha "$snapshot")" || { sudo rm -f -- "$snapshot" || true; return 1; }
   temporary="$(sudo mktemp "$directory/.hp2r-prepare.XXXXXX")" || { sudo rm -f -- "$snapshot" || true; return 1; }
-  atomic_copy "$snapshot" "$temporary" "$mode" "$expected_sha" || {
+  atomic_copy "$snapshot" "$temporary" "$mode" "$expected_sha" "$boot_file" || {
     sudo rm -f -- "$snapshot" "$temporary" || true
     return 1
   }
   sudo rm -f -- "$snapshot" || { sudo rm -f -- "$temporary" || true; return 1; }
-  assert_owned_regular "$temporary" "$mode" || {
-    sudo rm -f -- "$temporary" || true
-    return 1
-  }
+  if test "$boot_file" = true; then
+    assert_owned_regular "$temporary" boot || { sudo rm -f -- "$temporary" || true; return 1; }
+  else
+    assert_owned_regular "$temporary" "$mode" || { sudo rm -f -- "$temporary" || true; return 1; }
+  fi
   printf '%s\n' "$temporary"
 }
 
@@ -1153,8 +1155,8 @@ commit() {
   printf '\n# hyperpixel2r-kms accepted candidate\ndtoverlay=%s\n' "$(state_value overlay_file)" | sudo tee -a "$normal_candidate" >/dev/null || die 'failed to append normal config candidate'
   assert_owned_regular "$normal_candidate" 600 || die 'normal config candidate ownership drifted'
   LC_ALL=C sudo awk '{ line=$0; sub(/\r$/, "", line); if (length(line) > 98) exit 1 }' "$normal_candidate" || die 'normal boot config has a firmware-line-length violation'
-  normal_tmp="$(prepare_copy "$normal_candidate" "$(dirname "$normal_config")" 644 "$workspace")" || die 'failed to prepare normal config publication'
-  if test "$(state_value tryboot_existed)" = true; then prior_tmp="$(prepare_copy "$artifact_dir/prior-tryboot.txt" "$(dirname "$tryboot_config")" 600 "$workspace")" || die 'failed to prepare prior tryboot config'; else prior_tmp=''; fi
+  normal_tmp="$(prepare_copy "$normal_candidate" "$(dirname "$normal_config")" 644 "$workspace" true)" || die 'failed to prepare normal config publication'
+  if test "$(state_value tryboot_existed)" = true; then prior_tmp="$(prepare_copy "$artifact_dir/prior-tryboot.txt" "$(dirname "$tryboot_config")" 644 "$workspace" true)" || die 'failed to prepare prior tryboot config'; else prior_tmp=''; fi
   state_hold="$(sudo mktemp "$state_dir/.tryboot-state-hold.XXXXXX")" || die 'failed to create commit state hold'
   test "$(sha "$normal_config")" = "$normal_sha" || die 'normal boot config changed after commit validation'
   sudo mv -f "$normal_tmp" "$normal_config" || die 'failed to publish accepted normal config'
@@ -1257,7 +1259,7 @@ rollback() {
     atomic_copy "$dkms_root/hyperpixel2r-kms-$driver_version/$name" "$candidate_dkms_backup/$name" 644 "$expected_sha" || die 'failed to capture candidate DKMS source leaf'
   done
   assert_source_tree_shape "$candidate_dkms_backup" "$artifact_dir/dkms-source" || die 'failed to capture candidate DKMS source'
-  if test "$(state_value tryboot_existed)" = true; then prior_tmp="$(prepare_copy "$artifact_dir/prior-tryboot.txt" "$(dirname "$tryboot_config")" 600 "$workspace")" || die 'failed to prepare prior tryboot config'; else prior_tmp=''; fi
+  if test "$(state_value tryboot_existed)" = true; then prior_tmp="$(prepare_copy "$artifact_dir/prior-tryboot.txt" "$(dirname "$tryboot_config")" 644 "$workspace" true)" || die 'failed to prepare prior tryboot config'; else prior_tmp=''; fi
   state_hold="$(sudo mktemp "$state_dir/.tryboot-state-hold.XXXXXX")" || die 'failed to create rollback state hold'
   dkms_restore_started=true
   if test "$prior_dkms_state" = absent; then
