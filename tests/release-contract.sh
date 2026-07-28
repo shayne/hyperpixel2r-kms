@@ -22,6 +22,16 @@ for workflow in .github/workflows/ci.yml .github/workflows/release.yml; do
   }
 done
 
+release_workflow="$repo_root/.github/workflows/release.yml"
+grep -Fxq '          git config user.name "github-actions[bot]"' "$release_workflow" || {
+  printf 'release workflow must configure the immutable tag committer name\n' >&2
+  exit 1
+}
+grep -Fxq '          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"' "$release_workflow" || {
+  printf 'release workflow must configure the immutable tag committer email\n' >&2
+  exit 1
+}
+
 test -f "$repo_root/docs/compatibility.md"
 test -f "$repo_root/docs/provenance.md"
 
