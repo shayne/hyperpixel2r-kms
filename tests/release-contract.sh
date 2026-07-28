@@ -128,6 +128,8 @@ if release_workflow.is_file():
         failures.append("release workflow must bind tag base version to committed driver version")
     if 'source_commit="$(git rev-parse \'HEAD^{commit}\')"' not in workflow:
         failures.append("release workflow must bind the selected source to checked-out HEAD")
+    if 'test "$source_commit" = "$DISPATCH_COMMIT"' not in workflow:
+        failures.append("release workflow must bind attestation event provenance to selected source")
     if 'source_commit="$(git rev-parse "$GITHUB_SHA^{commit}")"' in workflow:
         failures.append("release workflow must never bind selected source identity through GITHUB_SHA")
     if "DISPATCH_COMMIT: ${{ github.sha }}" not in workflow:

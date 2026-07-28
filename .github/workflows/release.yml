@@ -46,6 +46,7 @@ jobs:
         id: preflight
         env:
           TAG: ${{ inputs.tag }}
+          DISPATCH_COMMIT: ${{ github.sha }}
         run: |
           git diff --quiet
           git fetch --tags --force
@@ -54,6 +55,7 @@ jobs:
             exit 1
           fi
           source_commit="$(git rev-parse 'HEAD^{commit}')"
+          test "$source_commit" = "$DISPATCH_COMMIT"
           ./scripts/validate-release-tag.sh "$TAG" "$source_commit"
           printf 'commit=%s\n' "$source_commit" >> "$GITHUB_OUTPUT"
 
