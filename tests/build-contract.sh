@@ -53,6 +53,12 @@ if [[ "$check_help_output" != *"--kernel-target"* ]]; then
   exit 1
 fi
 
+stage_help_output="$("$repo_root/scripts/stage-tryboot.sh" --help)"
+if [[ "$stage_help_output" != *"--kernel-target"* ]]; then
+  printf 'stage-tryboot.sh --help must document --kernel-target\n' >&2
+  exit 1
+fi
+
 temporary_dir="$(mktemp -d "${TMPDIR:-/tmp}/hp2r-build-contract.XXXXXX")"
 trap 'rm -rf "$temporary_dir"' EXIT
 valid_manifest="$temporary_dir/manifest.txt"

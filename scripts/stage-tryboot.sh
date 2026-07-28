@@ -14,6 +14,7 @@ Usage: stage-tryboot.sh [OPTIONS]
 Options:
   --target TARGET              SSH target (or set HP2R_TARGET)
   --artifact-dir DIR           Exact-kernel artifact directory
+  --kernel-target DIR          Exported kernel target parent (default: dist/kernel-target)
   --replace-overlay NAME       Replace exactly one declared overlay NAME
   -h, --help                   Show this help
 USAGE
@@ -21,11 +22,13 @@ USAGE
 
 target="${HP2R_TARGET:-}"
 artifact_dir=''
+kernel_target_parent="$repo_root/dist/kernel-target"
 replace_overlay=''
 while test "$#" -gt 0; do
   case "$1" in
     --target) test "$#" -ge 2 || { echo '--target requires a value' >&2; exit 64; }; target="$2"; shift 2 ;;
     --artifact-dir) test "$#" -ge 2 || { echo '--artifact-dir requires a value' >&2; exit 64; }; artifact_dir="$2"; shift 2 ;;
+    --kernel-target) test "$#" -ge 2 || { echo '--kernel-target requires a value' >&2; exit 64; }; kernel_target_parent="$2"; shift 2 ;;
     --replace-overlay) test "$#" -ge 2 || { echo '--replace-overlay requires a value' >&2; exit 64; }; replace_overlay="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 64 ;;
@@ -42,7 +45,7 @@ if test -z "$artifact_dir"; then artifact_dir="$(hp2r_release_path "$repo_root/d
 test ! -L "$artifact_dir" && test -d "$artifact_dir" || { echo "artifact directory is missing or a symlink: $artifact_dir" >&2; exit 1; }
 artifact_dir="$(cd "$artifact_dir" && pwd -P)"
 manifest="$artifact_dir/manifest.txt"
-target_manifest="$(hp2r_release_path "$repo_root/dist/kernel-target" "$release")/target.txt"
+target_manifest="$(hp2r_release_path "$kernel_target_parent" "$release")/target.txt"
 hp2r_validate_artifact_provenance "$manifest" "$target_manifest" "$artifact_dir"
 
 source_revision="$(hp2r_manifest_value "$manifest" source_revision)"

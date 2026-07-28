@@ -6,9 +6,9 @@ is not an accident. Display drivers are where a one-line configuration change
 can turn into an evening with a serial console, so the project chooses one
 known shape over a heroic compatibility matrix.
 
-<!-- HP2R_CURRENT_RELEASE=v0.1.0-rc.7 -->
+<!-- HP2R_CURRENT_RELEASE=v0.1.0-rc.8 -->
 
-Current release: `v0.1.0-rc.7` is a release candidate. It has host-side build
+Current release: `v0.1.0-rc.8` is a release candidate. It has host-side build
 and boot-lifecycle checks, reproducible source packaging, and signed GitHub
 provenance. It is still a release candidate, which is a useful warning label:
 the package can prove what it built, but it cannot make every future Raspberry
@@ -91,8 +91,8 @@ match the Pi in front of you. GitHub Actions creates provenance and SBOM
 attestations for the published payloads.
 
 ```sh
-gh release download v0.1.0-rc.7 -R shayne/hyperpixel2r-kms -D dist/v0.1.0-rc.7
-cd dist/v0.1.0-rc.7
+gh release download v0.1.0-rc.8 -R shayne/hyperpixel2r-kms -D dist/v0.1.0-rc.8
+cd dist/v0.1.0-rc.8
 sha256sum -c SHA256SUMS
 gh attestation verify hyperpixel2r-kms-source.tar.zst \
   -R shayne/hyperpixel2r-kms \
