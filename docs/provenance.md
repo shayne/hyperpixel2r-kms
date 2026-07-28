@@ -29,6 +29,12 @@ GitHub Actions builds and attests published release files. A matching exact
 kernel bundle includes the module, overlay, module metadata, checksum evidence,
 and DTB application result.
 
+The release contract validates `driver-manifest.json` with Draft 2020-12 JSON
+Schema and validates the SPDX 2.3 document with the official SPDX Python tools.
+Those validator versions are locked in `release/validator-requirements.txt`.
+The boring part is the point: JSON that looks plausible is not the same thing as
+metadata another tool can actually consume.
+
 The release process uses a pinned Debian Trixie Slim OCI image digest for the
 cross-build container. Tags move; digests do not. Kernel source packages and
 the Pi's exported headers remain explicit inputs, checked by digest before the

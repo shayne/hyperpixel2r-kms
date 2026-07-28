@@ -55,7 +55,6 @@ done
 
 cd "$repo_root"
 hp2r_require_clean_source
-workspace_revision="$(hp2r_resolve_build_revision)"
 workspace_tree="$(git rev-parse 'HEAD^{tree}')"
 if test -n "$source_ref"; then
   source_revision="$(git rev-parse --verify "$source_ref^{commit}")"
@@ -65,7 +64,7 @@ if test -n "$source_ref"; then
     exit 1
   }
 else
-  source_revision="$workspace_revision"
+  source_revision="$(hp2r_resolve_build_revision)"
   source_tree="$workspace_tree"
 fi
 hp2r_require_durable_source_revision "$source_revision"
@@ -283,7 +282,10 @@ for index, entry in enumerate(item for item in entries if item):
     files.append({
         "SPDXID": f"SPDXRef-File-{index}",
         "fileName": f"./{path.as_posix()}",
-        "checksums": [{"algorithm": "SHA256", "checksumValue": hashlib.sha256(content).hexdigest()}],
+        "checksums": [
+            {"algorithm": "SHA1", "checksumValue": hashlib.sha1(content).hexdigest()},
+            {"algorithm": "SHA256", "checksumValue": hashlib.sha256(content).hexdigest()},
+        ],
         "licenseConcluded": "NOASSERTION",
         "copyrightText": "NOASSERTION",
     })
@@ -397,26 +399,7 @@ document = {
 output.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
 PY
 
-python3 - "$repo_root/release/driver-manifest.schema.json" "$manifest" <<'PY'
-import json
-import re
-import sys
-
-schema = json.load(open(sys.argv[1]))
-document = json.load(open(sys.argv[2]))
-assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
-assert document["schema_version"] == 1
-assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", document["driver_version"])
-assert re.fullmatch(r"[0-9a-f]{40}", document["source"]["commit"])
-assert re.fullmatch(r"[0-9a-f]{40}", document["source"]["tree"])
-assert document["supported"]["architecture"] == "aarch64"
-assert document["supported"]["kernel_policy"] == "exact-release-only"
-assert len(document["artifacts"]) >= 2
-for item in document["artifacts"]:
-    assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", item["name"])
-    assert re.fullmatch(r"[0-9a-f]{64}", item["sha256"])
-    assert item["size"] > 0
-PY
+"$repo_root/scripts/validate-release-metadata.sh" "$manifest" "$sbom"
 
 (
   cd "$stage"

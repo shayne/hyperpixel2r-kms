@@ -77,7 +77,6 @@ hp2r_validate_release "$release"
 
 cd "$repo_root"
 hp2r_require_clean_source
-workspace_revision="$(hp2r_resolve_build_revision)"
 workspace_tree="$(git rev-parse 'HEAD^{tree}')"
 if test -n "$source_ref"; then
   source_revision="$(git rev-parse --verify "$source_ref^{commit}")"
@@ -87,6 +86,7 @@ if test -n "$source_ref"; then
     exit 1
   }
 else
+  workspace_revision="$(hp2r_resolve_build_revision)"
   source_revision="$workspace_revision"
   source_tree="$workspace_tree"
 fi

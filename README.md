@@ -6,9 +6,13 @@ is not an accident. Display drivers are where a one-line configuration change
 can turn into an evening with a serial console, so the project chooses one
 known shape over a heroic compatibility matrix.
 
-Current status: `v0.1.0-rc.1` is a release candidate. It has host-side build
-and boot-lifecycle checks, but a release candidate is not a promise that every
-future Raspberry Pi kernel will be equally cooperative.
+<!-- HP2R_CURRENT_RELEASE=v0.1.0-rc.3 -->
+
+Current release: `v0.1.0-rc.3` is a release candidate. It has host-side build
+and boot-lifecycle checks, reproducible source packaging, and signed GitHub
+provenance. It is still a release candidate, which is a useful warning label:
+the package can prove what it built, but it cannot make every future Raspberry
+Pi kernel agree to run it.
 
 ## Supported shape
 
@@ -79,16 +83,20 @@ See [compatibility](docs/compatibility.md) for the hard boundary and
 ## Releases and verification
 
 Release candidates contain a deterministic source archive,
-`driver-manifest.json`, `SHA256SUMS`, and an SPDX SBOM. A matching exact-kernel
-archive is included only when the release workflow has verified a complete
-bundle for that kernel. GitHub Actions creates provenance and SBOM attestations
-for published assets.
+`driver-manifest.json`, `SHA256SUMS`, and an SPDX 2.3 SBOM. A matching
+exact-kernel archive is included only when the release workflow has verified a
+complete bundle for that kernel. That distinction matters: a source release is
+useful everywhere, while a module archive is only useful when its kernel facts
+match the Pi in front of you. GitHub Actions creates provenance and SBOM
+attestations for the published payloads.
 
 ```sh
-gh release download v0.1.0-rc.1 -R shayne/hyperpixel2r-kms -D dist/rc1
-cd dist/rc1
+gh release download v0.1.0-rc.3 -R shayne/hyperpixel2r-kms -D dist/v0.1.0-rc.3
+cd dist/v0.1.0-rc.3
 sha256sum -c SHA256SUMS
-gh attestation verify hyperpixel2r-kms-source.tar.zst -R shayne/hyperpixel2r-kms
+gh attestation verify hyperpixel2r-kms-source.tar.zst \
+  -R shayne/hyperpixel2r-kms \
+  --signer-workflow shayne/hyperpixel2r-kms/.github/workflows/release.yml
 ```
 
 The source archive is the durable fallback. An exact archive is a convenience,

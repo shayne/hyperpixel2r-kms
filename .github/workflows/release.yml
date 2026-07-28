@@ -7,6 +7,11 @@ on:
         description: Immutable semantic release tag, for example v0.1.0-rc.1
         required: true
         type: string
+      source_ref:
+        description: Source branch, tag, or commit to release
+        default: main
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -17,63 +22,90 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out main
-        uses: actions/checkout@v4
+      - name: Check out selected source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: main
+          ref: ${{ inputs.source_ref }}
           fetch-depth: 0
 
       - name: Set up mise
-        uses: jdx/mise-action@v2
+        uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4.2.3
 
       - name: Install release packaging tools
         run: sudo apt-get update && sudo apt-get install --yes zstd
 
-      - name: Validate and create the immutable tag
+      - name: Confirm unused tag and bind selected source
+        id: preflight
         env:
           TAG: ${{ inputs.tag }}
         run: |
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]
           git diff --quiet
           git fetch --tags --force
           if git rev-parse --verify --quiet "refs/tags/$TAG"; then
             echo "release tag already exists: $TAG" >&2
             exit 1
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag --annotate "$TAG" "$GITHUB_SHA" --message "HyperPixel 2 Round KMS driver $TAG"
-          git push origin "refs/tags/$TAG"
+          source_commit="$(git rev-parse "$GITHUB_SHA^{commit}")"
+          ./scripts/validate-release-tag.sh "$TAG" "$source_commit"
+          printf 'commit=%s\n' "$source_commit" >> "$GITHUB_OUTPUT"
 
-      - name: Verify the source before release packaging
+      - name: Verify the selected source before release packaging
         run: |
           docker build --tag hyperpixel2r-kms-kernel-builder:debian-trixie-gcc14 --file packaging/Dockerfile.kernel .
           mise run verify
 
-      - name: Build deterministic release assets
-        run: mise run package-release -- --source-revision "$GITHUB_SHA" --artifact-dir "$RUNNER_TEMP/no-artifacts" --output dist/release
-
-      - name: Verify release checksums
+      - name: Build reproducible release assets
+        env:
+          RELEASE_COMMIT: ${{ steps.preflight.outputs.commit }}
         run: |
-          cd dist/release
-          sha256sum -c SHA256SUMS
+          mise run package-release -- --source-revision "$RELEASE_COMMIT" --artifact-dir "$RUNNER_TEMP/no-artifacts" --output dist/release
+          mise run package-release -- --source-revision "$RELEASE_COMMIT" --artifact-dir "$RUNNER_TEMP/no-artifacts" --output dist/release-repro
+          diff -r dist/release dist/release-repro
+
+      - name: Validate release metadata and checksums
+        run: |
+          mise run validate-release-metadata -- dist/release/driver-manifest.json dist/release/SBOM.spdx.json
+          (
+            cd dist/release
+            sha256sum -c SHA256SUMS
+          )
+
+      - name: Create the immutable tag after verification
+        id: tag
+        env:
+          TAG: ${{ inputs.tag }}
+          RELEASE_COMMIT: ${{ steps.preflight.outputs.commit }}
+        run: |
+          git fetch --tags --force
+          if git rev-parse --verify --quiet "refs/tags/$TAG"; then
+            echo "release tag appeared while the source was being verified: $TAG" >&2
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag --annotate "$TAG" "$RELEASE_COMMIT" --message "HyperPixel 2 Round KMS driver $TAG"
+          git push origin "refs/tags/$TAG:refs/tags/$TAG"
+          git fetch origin "refs/tags/$TAG:refs/tags/$TAG"
+          tag_commit="$(git rev-parse "$TAG^{}")"
+          test "$tag_commit" = "$RELEASE_COMMIT"
+          printf 'commit=%s\n' "$tag_commit" >> "$GITHUB_OUTPUT"
 
       - name: Attest every published release subject
-        uses: actions/attest@v4
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-checksums: dist/release/SHA256SUMS
 
       - name: Attest the SPDX bill of materials
-        uses: actions/attest@v4
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: dist/release/hyperpixel2r-kms-source.tar.zst
           sbom-path: dist/release/SBOM.spdx.json
 
       - name: Create a draft prerelease with immutable assets
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@fe965f7af51af5f2602596916f38a38df2e33de0 # v3.0.2
         with:
           tag_name: ${{ inputs.tag }}
-          target_commitish: ${{ github.sha }}
+          target_commitish: ${{ steps.tag.outputs.commit }}
           name: HyperPixel 2 Round KMS driver ${{ inputs.tag }}
           draft: true
           prerelease: true

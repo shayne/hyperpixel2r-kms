@@ -30,13 +30,7 @@ docker image inspect "$image" >/dev/null
 fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/hp2r-boot-repo.XXXXXX")"
 fixture_repo="$fixture_root/repo"
 trap 'rm -rf -- "$fixture_root"' EXIT
-source_revision="$(
-  bash -eu -c \
-    'cd "$1"; source "$2"; hp2r_resolve_build_revision' \
-    bash \
-    "$repo_root" \
-    "$repo_root/scripts/common.sh"
-)"
+source_revision="$(git -C "$repo_root" rev-parse --verify 'origin/main^{commit}')"
 git clone --quiet --no-hardlinks "$repo_root" "$fixture_repo"
 git -C "$fixture_repo" checkout --quiet --detach "$source_revision"
 

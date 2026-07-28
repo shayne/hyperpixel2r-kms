@@ -148,55 +148,14 @@ if ! bash -eu -c \
   exit 1
 fi
 
-workspace_subject="$(git show -s --format=%s HEAD)"
-if test "$workspace_subject" = 'GitButler Workspace Commit'; then
-  workspace_tree="$(git rev-parse 'HEAD^{tree}')"
-  expected_source="$(
-    git for-each-ref --format='%(refname) %(objectname)' refs/heads |
-      while read -r ref revision; do
-        case "$ref" in
-          refs/heads/gitbutler/*) continue ;;
-        esac
-        test "$(git rev-parse "$revision^{tree}")" = "$workspace_tree" || continue
-        printf '%s\n' "$revision"
-      done
-  )"
-  test "$(printf '%s\n' "$expected_source" | sed '/^$/d' | wc -l | tr -d ' ')" = 1 || {
-    printf 'test setup must have one stable GitButler source revision\n' >&2
-    exit 1
-  }
-  resolved_source="$(
-    bash -eu -c \
-      'cd "$1"; source "$2"; hp2r_resolve_build_revision' \
-      bash \
-      "$repo_root" \
-      "$repo_root/scripts/common.sh"
-  )"
-  test "$resolved_source" = "$expected_source" || {
-    printf 'build source revision must resolve to the stable GitButler branch\n' >&2
-    exit 1
-  }
-  if grep -Fq \
-    'test "$(git rev-parse HEAD)" = "$workspace_revision"' \
-    "$repo_root/scripts/build-driver.sh"; then
-    printf 'build stability checks must not compare GitButler workspace HEAD\n' >&2
-    exit 1
-  fi
-  if ! grep -Fq \
-    'test "$(hp2r_resolve_build_revision)" = "$workspace_revision"' \
-    "$repo_root/scripts/build-driver.sh"; then
-    printf 'build stability checks must compare the resolved source revision\n' >&2
-    exit 1
-  fi
+if ! grep -Fq \
+  'workspace_revision="$(hp2r_resolve_build_revision)"' \
+  "$repo_root/scripts/build-driver.sh"; then
+  printf 'implicit builds must retain their resolved source revision for the post-build check\n' >&2
+  exit 1
 fi
 
-current_source="$(
-  bash -eu -c \
-    'cd "$1"; source "$2"; hp2r_resolve_build_revision' \
-    bash \
-    "$repo_root" \
-    "$repo_root/scripts/common.sh"
-)"
+current_source="$(git -C "$repo_root" rev-parse --verify 'origin/main^{commit}')"
 bash -eu -c \
   'cd "$1"; source "$2"; hp2r_require_durable_source_revision "$3"' \
   bash \
@@ -255,6 +214,23 @@ if run_fixture_durability_check "$unreferenced_revision" >/dev/null 2>&1; then
   printf 'durable source validation accepted an unreferenced commit\n' >&2
   exit 1
 fi
+
+remote_repo="$temporary_dir/durable-remote.git"
+git init -q --bare "$remote_repo"
+git -C "$fixture_repo" remote add origin "$remote_repo"
+git -C "$fixture_repo" push -q origin main
+printf 'remote-only\n' >> "$fixture_repo/source.txt"
+git -C "$fixture_repo" add source.txt
+git -C "$fixture_repo" commit --quiet --no-gpg-sign -m 'remote durable source'
+remote_revision="$(git -C "$fixture_repo" rev-parse HEAD)"
+git -C "$fixture_repo" push -q origin main
+git -C "$fixture_repo" fetch -q origin main
+git -C "$fixture_repo" checkout -q --detach "$durable_revision"
+git -C "$fixture_repo" branch -D main >/dev/null
+run_fixture_durability_check "$remote_revision" || {
+  printf 'durable source validation must accept a fetched remote-tracking branch\n' >&2
+  exit 1
+}
 
 for script in scripts/build-driver.sh scripts/check-artifacts.sh; do
   if ! grep -Fq \

@@ -163,14 +163,14 @@ hp2r_require_durable_source_revision() {
   }
   while IFS= read -r ref; do
     case "$ref" in
-      refs/heads/gitbutler/*) continue ;;
+      refs/heads/gitbutler/*|refs/remotes/*/gitbutler/*) continue ;;
     esac
     if git merge-base --is-ancestor "$revision" "$ref"; then
       return 0
     fi
-  done < <(git for-each-ref --format='%(refname)' refs/heads refs/tags)
+  done < <(git for-each-ref --format='%(refname)' refs/heads refs/remotes refs/tags)
 
-  echo "source revision is not reachable from a durable local branch or tag: $revision" >&2
+  echo "source revision is not reachable from a durable branch, remote-tracking ref, or tag: $revision" >&2
   return 1
 }
 

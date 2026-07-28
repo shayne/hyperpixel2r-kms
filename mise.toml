@@ -34,6 +34,9 @@ run = "bash tests/release-contract.sh"
 [tasks.package-release]
 run = "./scripts/package-release.sh \"$@\""
 
+[tasks.validate-release-metadata]
+run = "./scripts/validate-release-metadata.sh \"$@\""
+
 [tasks.export-target-kbuild]
 run = """
 HP2R_TARGET="${HP2R_TARGET:-}" \

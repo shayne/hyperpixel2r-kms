@@ -56,26 +56,64 @@
     "artifacts": {
       "type": "array",
       "minItems": 2,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["name", "kind", "sha256", "size"],
-        "properties": {
-          "name": {
-            "type": "string",
-            "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$"
-          },
-          "kind": {
-            "enum": ["source-archive", "sbom", "exact-kernel-bundle"]
-          },
-          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-          "size": { "type": "integer", "minimum": 1 },
-          "architecture": { "const": "aarch64" },
-          "kernel_release": {
-            "type": "string",
-            "pattern": "^[A-Za-z0-9._+-]+$"
+      "allOf": [
+        {
+          "contains": {
+            "type": "object",
+            "properties": { "kind": { "const": "source-archive" } },
+            "required": ["kind"]
+          }
+        },
+        {
+          "contains": {
+            "type": "object",
+            "properties": { "kind": { "const": "sbom" } },
+            "required": ["kind"]
           }
         }
+      ],
+      "items": {
+        "type": "object",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "required": ["name", "kind", "sha256", "size"],
+            "properties": {
+              "name": { "const": "hyperpixel2r-kms-source.tar.zst" },
+              "kind": { "const": "source-archive" },
+              "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "size": { "type": "integer", "minimum": 1 }
+            }
+          },
+          {
+            "additionalProperties": false,
+            "required": ["name", "kind", "sha256", "size"],
+            "properties": {
+              "name": { "const": "SBOM.spdx.json" },
+              "kind": { "const": "sbom" },
+              "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "size": { "type": "integer", "minimum": 1 }
+            }
+          },
+          {
+            "additionalProperties": false,
+            "required": ["name", "kind", "sha256", "size", "architecture", "kernel_release"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^hyperpixel2r-kms-[A-Za-z0-9._+-]+-aarch64\\.tar\\.zst$"
+              },
+              "kind": { "const": "exact-kernel-bundle" },
+              "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "size": { "type": "integer", "minimum": 1 },
+              "architecture": { "const": "aarch64" },
+              "kernel_release": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._+-]+$"
+              }
+            }
+          }
+        ]
       }
     }
   }
