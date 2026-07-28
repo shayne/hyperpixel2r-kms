@@ -40,12 +40,18 @@ if ! grep -q 'HP2R_TARGET' "${required_scripts[@]/#/$repo_root/}"; then
 fi
 
 help_output="$("$repo_root/scripts/build-driver.sh" --help)"
-for option in --target --kernel-release --source-revision --output; do
+for option in --target --kernel-release --kernel-target --source-revision --output; do
   if [[ "$help_output" != *"$option"* ]]; then
     printf 'build-driver.sh --help must document %s\n' "$option" >&2
     exit 1
   fi
 done
+
+check_help_output="$("$repo_root/scripts/check-artifacts.sh" --help)"
+if [[ "$check_help_output" != *"--kernel-target"* ]]; then
+  printf 'check-artifacts.sh --help must document --kernel-target\n' >&2
+  exit 1
+fi
 
 temporary_dir="$(mktemp -d "${TMPDIR:-/tmp}/hp2r-build-contract.XXXXXX")"
 trap 'rm -rf "$temporary_dir"' EXIT

@@ -13,6 +13,7 @@ Cross-build an exact-kernel HyperPixel 2 Round driver artifact bundle.
 Options:
   --target TARGET           SSH target (or set HP2R_TARGET)
   --kernel-release RELEASE  Build for an already-exported target release
+  --kernel-target DIR       Exported kernel target parent (default: dist/kernel-target)
   --source-revision REF     Bind artifacts to this tree-identical Git commit
   --output DIR              Artifact parent (default: dist/artifacts)
   -h, --help                Show this help
@@ -21,6 +22,7 @@ USAGE
 
 target="${HP2R_TARGET:-}"
 release=""
+kernel_target_parent="$repo_root/dist/kernel-target"
 source_ref=""
 output_parent="$repo_root/dist/artifacts"
 while test "$#" -gt 0; do
@@ -39,6 +41,14 @@ while test "$#" -gt 0; do
         exit 64
       }
       release="$2"
+      shift 2
+      ;;
+    --kernel-target)
+      test "$#" -ge 2 || {
+        echo "--kernel-target requires a value" >&2
+        exit 64
+      }
+      kernel_target_parent="$2"
       shift 2
       ;;
     --source-revision)
@@ -126,7 +136,7 @@ do
   fi
 done
 
-target_parent="$repo_root/dist/kernel-target"
+target_parent="$kernel_target_parent"
 test -d "$target_parent" || {
   echo "missing target exports; run mise run export-target-kbuild" >&2
   exit 1

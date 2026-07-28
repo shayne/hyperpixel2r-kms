@@ -13,6 +13,7 @@ Validate an exact-kernel HyperPixel 2 Round driver artifact bundle.
 Options:
   --target TARGET           SSH target (or set HP2R_TARGET)
   --kernel-release RELEASE  Validate an already-exported target release
+  --kernel-target DIR       Exported kernel target parent (default: dist/kernel-target)
   --output DIR              Artifact parent (default: dist/artifacts)
   -h, --help                Show this help
 USAGE
@@ -20,6 +21,7 @@ USAGE
 
 target="${HP2R_TARGET:-}"
 release=""
+kernel_target_parent="$repo_root/dist/kernel-target"
 artifact_parent="$repo_root/dist/artifacts"
 while test "$#" -gt 0; do
   case "$1" in
@@ -37,6 +39,14 @@ while test "$#" -gt 0; do
         exit 64
       }
       release="$2"
+      shift 2
+      ;;
+    --kernel-target)
+      test "$#" -ge 2 || {
+        echo "--kernel-target requires a value" >&2
+        exit 64
+      }
+      kernel_target_parent="$2"
       shift 2
       ;;
     --output)
@@ -102,7 +112,7 @@ do
   }
 done
 
-target_parent="$repo_root/dist/kernel-target"
+target_parent="$kernel_target_parent"
 test -d "$target_parent" || {
   echo "missing target exports; run mise run export-target-kbuild" >&2
   exit 1
