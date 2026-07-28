@@ -41,6 +41,11 @@ for pip to improvise.  Regenerate that lock with
 Linux. The boring part is the point: JSON that looks plausible is not the same
 thing as metadata another tool can actually consume.
 
+CI builds a source-only release and runs those real validators on Ubuntu 24.04
+with Python 3.12 and on macOS with Python 3.13. The `referencing` constraint is
+intentional: newer releases require a Python 3.13-only typing feature, so they
+would make the Linux release job fail before it could validate anything.
+
 Manual release dispatch has two deliberately separate identities. The dispatch
 commit is where GitHub finds and runs `release.yml`; the selected `source_ref`
 is the checked-out source that becomes the manifest, archive, annotated tag,

@@ -53,11 +53,14 @@ else:
         failures.append("README must expose the canonical release marker for the contract")
 
 requirements = root / "release" / "validator-requirements.txt"
+requirements_input = root / "release" / "validator-requirements.in"
 validator = root / "scripts" / "validate-release-metadata.sh"
 if not requirements.is_file() or "spdx-tools==0.8.3" not in requirements.read_text():
     failures.append("release validators must pin official spdx-tools 0.8.3")
 if not requirements.is_file() or "check-jsonschema==0.37.4" not in requirements.read_text():
     failures.append("release validators must pin check-jsonschema 0.37.4")
+if not requirements_input.is_file() or "referencing<0.36" not in requirements_input.read_text():
+    failures.append("release validators must constrain referencing to the CPython 3.12-compatible series")
 if not validator.is_file() or not validator.stat().st_mode & 0o111:
     failures.append("missing executable real release-metadata validator")
 if requirements.is_file():
@@ -83,6 +86,22 @@ if validator.is_file():
         failures.append("validator installer must support an isolated lock-file test input")
     if "HP2R_VALIDATOR_ROOT" not in validator_text:
         failures.append("validator installer must support an isolated validator-cache test root")
+
+ci_workflow = root / ".github" / "workflows" / "ci.yml"
+if ci_workflow.is_file():
+    ci = ci_workflow.read_text()
+    validator_ci_contract = (
+        "Validate official release metadata on supported Python hosts",
+        "os: ubuntu-24.04",
+        "os: macos-latest",
+        'python: "3.12"',
+        'python: "3.13"',
+        "python-version: ${{ matrix.python }}",
+        "mise run validate-release-metadata --",
+    )
+    for required in validator_ci_contract:
+        if required not in ci:
+            failures.append(f"CI must prove the real release validator on hosted Python: {required}")
 
 tag_validator = root / "scripts" / "validate-release-tag.sh"
 if not tag_validator.is_file() or not tag_validator.stat().st_mode & 0o111:
