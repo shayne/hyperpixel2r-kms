@@ -41,6 +41,13 @@ for pip to improvise.  Regenerate that lock with
 Linux. The boring part is the point: JSON that looks plausible is not the same
 thing as metadata another tool can actually consume.
 
+Manual release dispatch has two deliberately separate identities. The dispatch
+commit is where GitHub finds and runs `release.yml`; the selected `source_ref`
+is the checked-out source that becomes the manifest, archive, annotated tag,
+and release target. The workflow proves the first exists, then derives the
+second from `HEAD`. That prevents a convenient UI context value from quietly
+releasing the wrong commit.
+
 The release process uses a pinned Debian Trixie Slim OCI image digest for the
 cross-build container. Tags move; digests do not. Kernel source packages and
 the Pi's exported headers remain explicit inputs, checked by digest before the
