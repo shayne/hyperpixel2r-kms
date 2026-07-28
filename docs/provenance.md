@@ -31,9 +31,15 @@ and DTB application result.
 
 The release contract validates `driver-manifest.json` with Draft 2020-12 JSON
 Schema and validates the SPDX 2.3 document with the official SPDX Python tools.
-Those validator versions are locked in `release/validator-requirements.txt`.
-The boring part is the point: JSON that looks plausible is not the same thing as
-metadata another tool can actually consume.
+`release/validator-requirements.in` names the two validator versions;
+`release/validator-requirements.txt` is the complete transitive SHA-256 lock.
+The installer uses pip's isolated hash-checking mode with dependency resolution
+disabled, so a missing or changed wheel is a failure rather than an opportunity
+for pip to improvise.  Regenerate that lock with
+`./scripts/lock-release-validators.sh`; its wheel-only, hash-locked
+`pip-tools` bootstrap keeps the maintenance path reproducible on macOS and
+Linux. The boring part is the point: JSON that looks plausible is not the same
+thing as metadata another tool can actually consume.
 
 The release process uses a pinned Debian Trixie Slim OCI image digest for the
 cross-build container. Tags move; digests do not. Kernel source packages and

@@ -1,0 +1,4 @@
+# Direct release-metadata validator requirements.  Run
+# ./scripts/lock-release-validators.sh to regenerate the complete hash lock.
+check-jsonschema==0.37.4
+spdx-tools==0.8.3

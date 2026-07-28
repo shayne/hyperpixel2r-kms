@@ -28,6 +28,14 @@ jobs:
           ref: ${{ inputs.source_ref }}
           fetch-depth: 0
 
+      - name: Prove release workflow exists at dispatch ref
+        env:
+          DISPATCH_COMMIT: ${{ github.sha }}
+        run: |
+          git fetch --no-tags origin "$DISPATCH_COMMIT"
+          git cat-file -e "$DISPATCH_COMMIT^{commit}"
+          git cat-file -e "$DISPATCH_COMMIT:.github/workflows/release.yml"
+
       - name: Set up mise
         uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4.2.3
 
@@ -45,7 +53,7 @@ jobs:
             echo "release tag already exists: $TAG" >&2
             exit 1
           fi
-          source_commit="$(git rev-parse "$GITHUB_SHA^{commit}")"
+          source_commit="$(git rev-parse 'HEAD^{commit}')"
           ./scripts/validate-release-tag.sh "$TAG" "$source_commit"
           printf 'commit=%s\n' "$source_commit" >> "$GITHUB_OUTPUT"
 
@@ -61,6 +69,9 @@ jobs:
           mise run package-release -- --source-revision "$RELEASE_COMMIT" --artifact-dir "$RUNNER_TEMP/no-artifacts" --output dist/release
           mise run package-release -- --source-revision "$RELEASE_COMMIT" --artifact-dir "$RUNNER_TEMP/no-artifacts" --output dist/release-repro
           diff -r dist/release dist/release-repro
+          jq -e --arg commit "$RELEASE_COMMIT" \
+            '.source.commit == $commit' \
+            dist/release/driver-manifest.json >/dev/null
 
       - name: Validate release metadata and checksums
         run: |

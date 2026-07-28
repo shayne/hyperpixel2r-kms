@@ -3,8 +3,8 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 schema="$repo_root/release/driver-manifest.schema.json"
-requirements="$repo_root/release/validator-requirements.txt"
-validator_root="$repo_root/target/release-validators"
+requirements="${HP2R_VALIDATOR_REQUIREMENTS:-$repo_root/release/validator-requirements.txt}"
+validator_root="${HP2R_VALIDATOR_ROOT:-$repo_root/target/release-validators}"
 
 usage() {
   cat <<'USAGE'
@@ -12,7 +12,8 @@ Usage: validate-release-metadata.sh MANIFEST SBOM
 
 Validate a release manifest with Draft 2020-12 JSON Schema and validate an
 SPDX 2.3 SBOM with the official SPDX Python tools. The locked validator
-environment is created beneath target/ on first use.
+environment is created beneath target/ on first use. Maintainers regenerate
+the complete hash lock with ./scripts/lock-release-validators.sh.
 USAGE
 }
 
@@ -37,6 +38,10 @@ if test ! -x "$validator_root/bin/check-jsonschema" ||
   rm -rf -- "$validator_root"
   python3 -m venv "$validator_root"
   "$validator_root/bin/pip" install \
+    --isolated \
+    --require-hashes \
+    --no-deps \
+    --only-binary=:all: \
     --disable-pip-version-check \
     --quiet \
     --requirement "$requirements"

@@ -60,6 +60,29 @@ if not requirements.is_file() or "check-jsonschema==0.37.4" not in requirements.
     failures.append("release validators must pin check-jsonschema 0.37.4")
 if not validator.is_file() or not validator.stat().st_mode & 0o111:
     failures.append("missing executable real release-metadata validator")
+if requirements.is_file():
+    lock_lines = requirements.read_text().splitlines()
+    requirement_indexes = [
+        index
+        for index, line in enumerate(lock_lines)
+        if re.match(r"^[A-Za-z0-9_.-]+==[^\s\\]+", line)
+    ]
+    if not requirement_indexes:
+        failures.append("validator lock must contain pinned transitive requirements")
+    for offset, index in enumerate(requirement_indexes):
+        end = requirement_indexes[offset + 1] if offset + 1 < len(requirement_indexes) else len(lock_lines)
+        block = "\n".join(lock_lines[index:end])
+        if "--hash=sha256:" not in block:
+            failures.append(f"validator lock requirement lacks a SHA-256 hash: {lock_lines[index]}")
+if validator.is_file():
+    validator_text = validator.read_text()
+    for flag in ("--isolated", "--require-hashes", "--no-deps"):
+        if flag not in validator_text:
+            failures.append(f"validator installer must use pip {flag}")
+    if "HP2R_VALIDATOR_REQUIREMENTS" not in validator_text:
+        failures.append("validator installer must support an isolated lock-file test input")
+    if "HP2R_VALIDATOR_ROOT" not in validator_text:
+        failures.append("validator installer must support an isolated validator-cache test root")
 
 tag_validator = root / "scripts" / "validate-release-tag.sh"
 if not tag_validator.is_file() or not tag_validator.stat().st_mode & 0o111:
@@ -84,6 +107,21 @@ if release_workflow.is_file():
         failures.append("release draft must target the commit proven by the immutable tag step")
     if "scripts/validate-release-tag.sh" not in workflow:
         failures.append("release workflow must bind tag base version to committed driver version")
+    if 'source_commit="$(git rev-parse \'HEAD^{commit}\')"' not in workflow:
+        failures.append("release workflow must bind the selected source to checked-out HEAD")
+    if 'source_commit="$(git rev-parse "$GITHUB_SHA^{commit}")"' in workflow:
+        failures.append("release workflow must never bind selected source identity through GITHUB_SHA")
+    if "DISPATCH_COMMIT: ${{ github.sha }}" not in workflow:
+        failures.append("release workflow must expose the dispatch commit separately from selected source")
+    if 'git fetch --no-tags origin "$DISPATCH_COMMIT"' not in workflow or \
+       'git cat-file -e "$DISPATCH_COMMIT:.github/workflows/release.yml"' not in workflow:
+        failures.append("release workflow must prove release.yml exists on its dispatch ref")
+    if '.source.commit == $commit' not in workflow:
+        failures.append("release workflow must prove packaged manifest targets selected checked-out source")
+    if 'git tag --annotate "$TAG" "$RELEASE_COMMIT"' not in workflow or \
+       'git push origin "refs/tags/$TAG:refs/tags/$TAG"' not in workflow or \
+       'test "$tag_commit" = "$RELEASE_COMMIT"' not in workflow:
+        failures.append("release workflow tag race check and push must target the selected source exactly")
 
 for relative in ("scripts/build-driver.sh", "scripts/package-release.sh"):
     text = (root / relative).read_text()
@@ -292,11 +330,67 @@ with tempfile.TemporaryDirectory(prefix="hp2r-spdx-negative.") as temporary:
         raise SystemExit("official SPDX validator accepted an SBOM without a file SHA1")
 PY
 
+python3 - "$fixture/release/validator-requirements.txt" "$fixture/scripts/validate-release-metadata.sh" "$first_output/driver-manifest.json" "$first_output/SBOM.spdx.json" "$temporary_dir" <<'PY'
+import os
+import pathlib
+import re
+import subprocess
+import sys
+
+lock = pathlib.Path(sys.argv[1])
+validator = pathlib.Path(sys.argv[2])
+manifest = pathlib.Path(sys.argv[3])
+sbom = pathlib.Path(sys.argv[4])
+temporary = pathlib.Path(sys.argv[5])
+text = lock.read_text()
+match = re.search(r"--hash=sha256:([0-9a-f]{64})", text)
+if match is None:
+    raise SystemExit("validator lock has no SHA-256 hash to tamper")
+replacement = ("0" if match.group(1)[0] != "0" else "1") + match.group(1)[1:]
+tampered_lock = temporary / "validator-requirements-tampered.txt"
+tampered_lock.write_text(text[:match.start(1)] + replacement + text[match.end(1):])
+environment = os.environ | {
+    "HP2R_VALIDATOR_REQUIREMENTS": str(tampered_lock),
+    "HP2R_VALIDATOR_ROOT": str(temporary / "tampered-validator-root"),
+}
+result = subprocess.run([validator, manifest, sbom], capture_output=True, text=True, env=environment)
+if result.returncode == 0:
+    raise SystemExit("validator installer accepted a tampered dependency hash")
+if "DO NOT MATCH THE HASHES" not in (result.stdout + result.stderr):
+    raise SystemExit("tampered validator lock did not fail in pip hash-checking mode")
+PY
+
 "$fixture/scripts/validate-release-tag.sh" "v0.1.0-rc.3" "$source_revision"
 if "$fixture/scripts/validate-release-tag.sh" "v0.1.1-rc.3" "$source_revision"; then
   printf 'release tag validator accepted a tag whose base version mismatches the driver\n' >&2
   exit 1
 fi
+
+# GitHub runs the workflow definition from its dispatch ref, while the user can
+# select a different source_ref.  Simulate those two commits locally: the
+# dispatch commit must carry release.yml, but packaging and the annotated tag
+# must bind the checked-out source branch rather than that dispatch commit.
+git -C "$fixture" branch release-source "$source_revision"
+git -C "$fixture" switch -q -c dispatch-context "$source_revision"
+printf 'workflow dispatch context\n' > "$fixture/.release-dispatch-context"
+git -C "$fixture" add .release-dispatch-context
+git -C "$fixture" commit -q --no-gpg-sign -m 'dispatch context fixture'
+dispatch_commit="$(git -C "$fixture" rev-parse HEAD)"
+git -C "$fixture" cat-file -e "$dispatch_commit:.github/workflows/release.yml"
+git -C "$fixture" switch -q release-source
+checked_out_source="$(git -C "$fixture" rev-parse 'HEAD^{commit}')"
+test "$checked_out_source" = "$source_revision"
+test "$checked_out_source" != "$dispatch_commit"
+binding_output="$temporary_dir/source-ref-binding"
+"$fixture/scripts/package-release.sh" \
+  --source-revision "$checked_out_source" \
+  --artifact-dir "$fixture/no-artifacts" \
+  --output "$binding_output"
+jq -e --arg commit "$checked_out_source" '.source.commit == $commit' \
+  "$binding_output/driver-manifest.json" >/dev/null
+"$fixture/scripts/validate-release-tag.sh" "v0.1.0-rc.4" "$checked_out_source"
+git -C "$fixture" tag --annotate v0.1.0-rc.4 "$checked_out_source" --message 'source-ref binding fixture'
+test "$(git -C "$fixture" rev-parse 'v0.1.0-rc.4^{}')" = "$checked_out_source"
 
 archive_tar="$temporary_dir/source.tar"
 zstd -q -d -c "$first_output/hyperpixel2r-kms-source.tar.zst" > "$archive_tar"
