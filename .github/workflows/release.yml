@@ -1,0 +1,85 @@
+name: Publish driver release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Immutable semantic release tag, for example v0.1.0-rc.1
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up mise
+        uses: jdx/mise-action@v2
+
+      - name: Install release packaging tools
+        run: sudo apt-get update && sudo apt-get install --yes zstd
+
+      - name: Validate and create the immutable tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]
+          git diff --quiet
+          git fetch --tags --force
+          if git rev-parse --verify --quiet "refs/tags/$TAG"; then
+            echo "release tag already exists: $TAG" >&2
+            exit 1
+          fi
+          git tag --annotate "$TAG" "$GITHUB_SHA" --message "HyperPixel 2 Round KMS driver $TAG"
+          git push origin "refs/tags/$TAG"
+
+      - name: Verify the source before release packaging
+        run: |
+          docker build --tag hyperpixel2r-kms-kernel-builder:debian-trixie-gcc14 --file packaging/Dockerfile.kernel .
+          mise run verify
+
+      - name: Build deterministic release assets
+        run: mise run package-release -- --source-revision "$GITHUB_SHA" --artifact-dir "$RUNNER_TEMP/no-artifacts" --output dist/release
+
+      - name: Verify release checksums
+        run: |
+          cd dist/release
+          sha256sum -c SHA256SUMS
+
+      - name: Attest every published release subject
+        uses: actions/attest@v4
+        with:
+          subject-checksums: dist/release/SHA256SUMS
+
+      - name: Attest the SPDX bill of materials
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/release/hyperpixel2r-kms-source.tar.zst
+          sbom-path: dist/release/SBOM.spdx.json
+
+      - name: Create a draft prerelease with immutable assets
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ inputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: HyperPixel 2 Round KMS driver ${{ inputs.tag }}
+          draft: true
+          prerelease: true
+          fail_on_unmatched_files: true
+          files: dist/release/*
+
+      - name: Publish the verified prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: gh release edit "$TAG" --draft=false --prerelease --title "HyperPixel 2 Round KMS driver $TAG"

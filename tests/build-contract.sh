@@ -28,8 +28,9 @@ if grep -EnH '[[:alnum:]_.-]+@[[:alnum:].-]+\.[[:alpha:]]{2,}' \
   exit 1
 fi
 
-if grep -EnH 'PLANERADAR_' "${required_scripts[@]/#/$repo_root/}"; then
-  printf 'driver scripts must use HP2R inputs, not PLANERADAR inputs\n' >&2
+legacy_input_prefix="PLANE""RADAR_"
+if grep -EnH "$legacy_input_prefix" "${required_scripts[@]/#/$repo_root/}"; then
+  printf 'driver scripts must use HP2R inputs, not legacy project inputs\n' >&2
   exit 1
 fi
 

@@ -577,11 +577,11 @@ run_controller() {
 install_live_hardware() {
   mkdir -p \
     "$root/sys/module/hyperpixel2r_kms" \
-    "$root/sys/bus/platform/drivers/hyperpixel2r-kms/planeradar/of_node" \
+    "$root/sys/bus/platform/drivers/hyperpixel2r-kms/fixture-panel/of_node" \
     "$root/sys/class/drm/card0-DPI-1" \
     "$root/sys/class/input/event0/device"
   printf '%s\n' "${HP2R_FIXTURE_LIVE_DRIVER_VERSION:-0.1.0}" > "$root/sys/module/hyperpixel2r_kms/version"
-  printf 'shayne,hyperpixel2r-kms\0' > "$root/sys/bus/platform/drivers/hyperpixel2r-kms/planeradar/of_node/compatible"
+  printf 'shayne,hyperpixel2r-kms\0' > "$root/sys/bus/platform/drivers/hyperpixel2r-kms/fixture-panel/of_node/compatible"
   printf 'connected\n' > "$root/sys/class/drm/card0-DPI-1/status"
   printf '480x480\n' > "$root/sys/class/drm/card0-DPI-1/modes"
   printf 'EDT FT5406\n' > "$root/sys/class/input/event0/device/name"

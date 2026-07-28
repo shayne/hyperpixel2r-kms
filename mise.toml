@@ -28,21 +28,27 @@ run = "bash tests/build-contract.sh"
 [tasks.test-boot-scripts]
 run = "bash tests/boot-scripts.sh"
 
+[tasks.test-release-contract]
+run = "bash tests/release-contract.sh"
+
+[tasks.package-release]
+run = "./scripts/package-release.sh \"$@\""
+
 [tasks.export-target-kbuild]
 run = """
-HP2R_TARGET="${HP2R_TARGET:-${PLANERADAR_PI_TARGET:-}}" \
+HP2R_TARGET="${HP2R_TARGET:-}" \
   exec ./scripts/export-target-kbuild.sh
 """
 
 [tasks.build-driver]
 run = """
-HP2R_TARGET="${HP2R_TARGET:-${PLANERADAR_PI_TARGET:-}}" \
+HP2R_TARGET="${HP2R_TARGET:-}" \
   exec ./scripts/build-driver.sh
 """
 
 [tasks.check-artifacts]
 run = """
-HP2R_TARGET="${HP2R_TARGET:-${PLANERADAR_PI_TARGET:-}}" \
+HP2R_TARGET="${HP2R_TARGET:-}" \
   exec ./scripts/check-artifacts.sh
 """
 
@@ -77,4 +83,4 @@ HP2R_TARGET="${HP2R_TARGET:-}" \
 """
 
 [tasks.verify]
-depends = ["test-protocol", "test-gpio", "test-build-contract", "test-boot-scripts"]
+depends = ["test-protocol", "test-gpio", "test-build-contract", "test-boot-scripts", "test-release-contract"]
