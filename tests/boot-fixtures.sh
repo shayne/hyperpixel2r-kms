@@ -344,6 +344,26 @@ set -euo pipefail
 source_path="${@: -2:1}"
 destination="${@: -1}"
 if test -n "${HP2R_INSTALL_ROOT:-}"; then
+  if test -n "${HP2R_FIXTURE_FAIL_LEGACY_AT:-}"; then
+    inject=false
+    case "$HP2R_FIXTURE_FAIL_LEGACY_AT" in
+      source-quarantine)
+        test "$source_path" = "$HP2R_FIXTURE_ROOT/usr/src/planeradar-hyperpixel2r-0.1.0" &&
+          test "$destination" = "$HP2R_FIXTURE_ROOT/usr/src/.planeradar-hyperpixel2r-v1.quarantine/planeradar-hyperpixel2r-0.1.0" &&
+          inject=true
+        ;;
+      overlay-quarantine)
+        case "$source_path:$destination" in
+          "$HP2R_FIXTURE_ROOT"/boot/firmware/overlays/planeradar-hyperpixel2r-*:"$HP2R_FIXTURE_ROOT"/boot/firmware/overlays/.planeradar-hyperpixel2r-v1.quarantine.planeradar-hyperpixel2r-*) inject=true ;;
+        esac
+        ;;
+    esac
+    marker="$HP2R_FIXTURE_ROOT/tmp/legacy-fault-$HP2R_FIXTURE_FAIL_LEGACY_AT"
+    if "$inject" && test ! -e "$marker"; then
+      : > "$marker"
+      exit 82
+    fi
+  fi
   if test "${HP2R_FIXTURE_RACE_POST_PUBLISH_INCOMING_MODULE:-}" = regular && test -d "$source_path"; then
     case "$source_path:$destination" in
       "$HP2R_FIXTURE_ROOT"/usr/lib/hyperpixel2r-kms/*/."$HP2R_FIXTURE_RELEASE".stage.*:"$HP2R_FIXTURE_ROOT"/usr/lib/hyperpixel2r-kms/*)
@@ -374,6 +394,20 @@ SCRIPT
   install -m 0755 /dev/stdin "$bin/rm" <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
+if test -n "${HP2R_INSTALL_ROOT:-}" && test -n "${HP2R_FIXTURE_FAIL_LEGACY_AT:-}"; then
+  inject=false
+  for argument in "$@"; do
+    case "$HP2R_FIXTURE_FAIL_LEGACY_AT:$argument" in
+      source-delete:*/planeradar-hyperpixel2r-0.1.0/planeradar_hyperpixel2r_main.c) inject=true ;;
+      overlay-delete:*planeradar-hyperpixel2r-222222222222.dtbo) inject=true ;;
+    esac
+  done
+  marker="$HP2R_FIXTURE_ROOT/tmp/legacy-fault-$HP2R_FIXTURE_FAIL_LEGACY_AT"
+  if "$inject" && test ! -e "$marker"; then
+    : > "$marker"
+    exit 83
+  fi
+fi
 if test -n "${HP2R_INSTALL_ROOT:-}" && test "${HP2R_FIXTURE_FAIL_RM:-}" = state-hold; then
   for argument in "$@"; do
     case "$argument" in "$HP2R_FIXTURE_ROOT"/var/lib/hyperpixel2r-kms/.tryboot-state-hold.*) exit 76;; esac
@@ -1639,6 +1673,55 @@ run_legacy_cleanup() {
     --cleanup-legacy-planeradar \
     --expect-overlay-file hyperpixel2r-kms-aaaaaaaaaaaa.dtbo
 }
+
+prepare_legacy_cleanup
+export HP2R_FIXTURE_NO_DKMS=1
+if run_legacy_cleanup >/dev/null 2>&1; then
+  fail 'legacy cleanup accepted missing DKMS tooling as registration proof'
+fi
+unset HP2R_FIXTURE_NO_DKMS
+assert_file "$root/usr/src/planeradar-hyperpixel2r-0.1.0/Kbuild"
+assert_file "$root/var/lib/dkms/registered-planeradar"
+assert_file "$root/boot/firmware/overlays/planeradar-hyperpixel2r-111111111111.dtbo"
+
+for legacy_interruption in \
+  source-quarantine overlay-quarantine source-delete overlay-delete; do
+  prepare_legacy_cleanup
+  interrupted_baseline_sha="$(sha256sum "$root/boot/firmware/config.txt.task6-baseline.fixture.bak" | awk '{print $1}')"
+  export HP2R_FIXTURE_FAIL_LEGACY_AT="$legacy_interruption"
+  if run_legacy_cleanup >/dev/null 2>&1; then
+    fail "legacy cleanup did not stop at injected $legacy_interruption boundary"
+  fi
+  unset HP2R_FIXTURE_FAIL_LEGACY_AT
+  pending="$root/var/lib/hyperpixel2r-kms/migrations/planeradar-hyperpixel2r-v1/pending.tsv"
+  assert_file "$pending"
+  test "$(stat -c '%U:%G:%a' "$pending")" = root:root:600 ||
+    fail "legacy cleanup pending state is not root-private after $legacy_interruption"
+  grep -Fq $'result\tpending' \
+    "$root/var/lib/hyperpixel2r-kms/migrations/planeradar-hyperpixel2r-v1/events.log" ||
+    fail "legacy cleanup did not record pending before $legacy_interruption"
+
+  run_legacy_cleanup >/dev/null
+  assert_absent "$pending"
+  assert_absent "$root/usr/src/planeradar-hyperpixel2r-0.1.0"
+  assert_absent "$root/usr/src/.planeradar-hyperpixel2r-v1.quarantine"
+  assert_absent "$root/var/lib/dkms/registered-planeradar"
+  assert_absent "$root/boot/firmware/overlays/planeradar-hyperpixel2r-111111111111.dtbo"
+  assert_absent "$root/boot/firmware/overlays/planeradar-hyperpixel2r-222222222222.dtbo"
+  assert_absent "$root/boot/firmware/overlays/.planeradar-hyperpixel2r-v1.quarantine.planeradar-hyperpixel2r-111111111111.dtbo"
+  assert_absent "$root/boot/firmware/overlays/.planeradar-hyperpixel2r-v1.quarantine.planeradar-hyperpixel2r-222222222222.dtbo"
+  assert_file "$root/boot/firmware/overlays/planeradar-hyperpixel2r-ffffffffffff.dtbo"
+  test "$(sha256sum "$root/boot/firmware/config.txt.task6-baseline.fixture.bak" | awk '{print $1}')" = "$interrupted_baseline_sha" ||
+    fail "legacy cleanup changed recovery baseline after $legacy_interruption"
+  grep -Fq $'result\tremoved' \
+    "$root/var/lib/hyperpixel2r-kms/migrations/planeradar-hyperpixel2r-v1/events.log" ||
+    fail "legacy cleanup did not record recovered completion after $legacy_interruption"
+
+  run_legacy_cleanup >/dev/null
+  grep -Fq $'result\talready-absent' \
+    "$root/var/lib/hyperpixel2r-kms/migrations/planeradar-hyperpixel2r-v1/events.log" ||
+    fail "legacy cleanup was not idempotent after recovering $legacy_interruption"
+done
 
 prepare_legacy_cleanup
 legacy_baseline_sha="$(sha256sum "$root/boot/firmware/config.txt.task6-baseline.fixture.bak" | awk '{print $1}')"

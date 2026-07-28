@@ -87,7 +87,12 @@ assert_owned_regular() {
 }
 
 assert_owned_dir() {
+  assert_owned_dir_mode "$1" 755
+}
+
+assert_owned_dir_mode() {
   local path="$1"
+  local expected_mode="$2"
   sudo test ! -L "$path" && sudo test -d "$path" || {
     printf 'unsafe owned directory: %s\n' "$path" >&2
     return 1
@@ -96,7 +101,7 @@ assert_owned_dir() {
     printf 'ownership drift: %s\n' "$path" >&2
     return 1
   }
-  test "$(sudo stat -c '%a' "$path")" = 755 || {
+  test "$(sudo stat -c '%a' "$path")" = "$expected_mode" || {
     printf 'directory mode drift: %s\n' "$path" >&2
     return 1
   }
@@ -716,10 +721,12 @@ cleanup_legacy_planeradar() {
   local expected_overlay="$2"
   local schema_version='' migration_id='' legacy_module='' legacy_version='' source_dir_relative=''
   local recovery_relative='' recovery_sha='' key field2 field3 extra source_dir source_entry
-  local status source_present=false overlays_present=0 overlay_path migration_root migration_dir
-  local evidence_manifest events contract_sha existing_sha result
+  local status overlay_path migration_root migration_dir evidence_manifest events contract_sha existing_sha
+  local pending_state pending=false source_location=absent source_quarantine_root source_quarantine_path
+  local original_count=0 quarantine_count=0 absent_count=0 index entry name
   local -a source_names=() source_hashes=() overlay_names=() overlay_hashes=()
-  local -A seen_source=() seen_overlay=()
+  local -a overlay_locations=() overlay_quarantine_paths=()
+  local -A seen_source=() seen_overlay=() source_contract_hashes=()
 
   if test -n "$root"; then contract="${root}${contract}"; fi
   [[ "$expected_overlay" =~ ^hyperpixel2r-kms-[0-9a-f]{12}\.dtbo$ ]] ||
@@ -758,6 +765,7 @@ cleanup_legacy_planeradar() {
           die 'unsafe legacy source-file contract'
         test -z "${seen_source[$field2]+x}" || die 'duplicate legacy source file'
         seen_source["$field2"]=1
+        source_contract_hashes["$field2"]="$field3"
         source_names+=("$field2")
         source_hashes+=("$field3")
         ;;
@@ -814,12 +822,38 @@ cleanup_legacy_planeradar() {
   test "$(sha "${root}${recovery_relative}")" = "$recovery_sha" ||
     die 'recovery baseline checksum drifted'
 
+  if sudo test -L "$state_dir"; then die 'unsafe HyperPixel state directory'; fi
+  if sudo test -e "$state_dir"; then
+    assert_owned_dir "$state_dir" || die 'unsafe HyperPixel state directory'
+  fi
+  migration_root="$state_dir/migrations"
+  if sudo test -L "$migration_root"; then die 'unsafe migration evidence root'; fi
+  if sudo test -e "$migration_root"; then
+    assert_owned_dir "$migration_root" || die 'unsafe migration evidence root'
+  fi
+  migration_dir="$migration_root/$migration_id"
+  if sudo test -L "$migration_dir"; then die 'unsafe migration evidence directory'; fi
+  if sudo test -e "$migration_dir"; then
+    assert_owned_dir "$migration_dir" || die 'unsafe migration evidence directory'
+  fi
+  contract_sha="$(sha "$contract")" || die 'failed to hash legacy migration contract'
+  pending_state="$migration_dir/pending.tsv"
+  if sudo test -e "$pending_state" || sudo test -L "$pending_state"; then
+    assert_owned_regular "$pending_state" 600 || die 'legacy cleanup pending state is unsafe'
+    test "$(sha "$pending_state")" = "$contract_sha" ||
+      die 'legacy cleanup pending state differs'
+    pending=true
+  fi
+
   source_dir="${root}${source_dir_relative}"
+  source_quarantine_root="${root}/usr/src/.${migration_id}.quarantine"
+  source_quarantine_path="$source_quarantine_root/$(basename "$source_dir_relative")"
+  assert_owned_dir "${root}/usr/src" || die 'legacy source parent is unsafe'
+  assert_owned_dir "${root}/boot/firmware/overlays" || die 'legacy overlay parent is unsafe'
   if sudo test -L "$source_dir"; then
     die 'legacy source directory is a symlink'
   elif sudo test -e "$source_dir"; then
     assert_owned_dir "$source_dir" || die 'legacy source directory metadata drifted'
-    source_present=true
     while IFS= read -r -d '' source_entry; do
       field2="$(basename "$source_entry")"
       test -n "${seen_source[$field2]+x}" || die 'legacy source directory has an unowned leaf'
@@ -831,31 +865,84 @@ cleanup_legacy_planeradar() {
       test "$(sha "$source_entry")" = "${source_hashes[$status]}" ||
         die 'legacy source leaf checksum drifted'
     done
+    source_location=original
+  fi
+  if sudo test -L "$source_quarantine_root"; then
+    die 'legacy source quarantine is a symlink'
+  elif sudo test -e "$source_quarantine_root"; then
+    assert_owned_dir_mode "$source_quarantine_root" 700 ||
+      die 'legacy source quarantine metadata drifted'
+    while IFS= read -r -d '' entry; do
+      test "$entry" = "$source_quarantine_path" ||
+        die 'legacy source quarantine has an unowned leaf'
+    done < <(sudo find -P "$source_quarantine_root" -mindepth 1 -maxdepth 1 -print0)
+  fi
+  if sudo test -L "$source_quarantine_path"; then
+    die 'legacy quarantined source directory is a symlink'
+  elif sudo test -e "$source_quarantine_path"; then
+    test "$source_location" = absent ||
+      die 'legacy source exists at original and quarantine paths'
+    assert_owned_dir "$source_quarantine_path" ||
+      die 'legacy quarantined source directory metadata drifted'
+    while IFS= read -r -d '' source_entry; do
+      name="$(basename "$source_entry")"
+      test -n "${source_contract_hashes[$name]+x}" ||
+        die 'legacy quarantined source has an unowned leaf'
+      assert_owned_regular "$source_entry" 644 ||
+        die 'legacy quarantined source leaf metadata drifted'
+      test "$(sha "$source_entry")" = "${source_contract_hashes[$name]}" ||
+        die 'legacy quarantined source leaf checksum drifted'
+    done < <(sudo find -P "$source_quarantine_path" -mindepth 1 -maxdepth 1 -print0)
+    source_location=quarantine
   fi
 
   for ((status = 0; status < ${#overlay_names[@]}; status++)); do
     overlay_path="${root}/boot/firmware/overlays/${overlay_names[$status]}"
-    if sudo test -L "$overlay_path"; then
-      die 'legacy overlay is a symlink'
+    field2="${root}/boot/firmware/overlays/.${migration_id}.quarantine.${overlay_names[$status]}"
+    overlay_quarantine_paths+=("$field2")
+    if sudo test -L "$overlay_path" || sudo test -L "$field2"; then
+      die 'legacy overlay or quarantine is a symlink'
+    elif sudo test -e "$overlay_path" && sudo test -e "$field2"; then
+      die 'legacy overlay exists at original and quarantine paths'
     elif sudo test -e "$overlay_path"; then
-      overlays_present=$((overlays_present + 1))
       assert_owned_regular "$overlay_path" boot || die 'legacy overlay metadata drifted'
       test "$(sha "$overlay_path")" = "${overlay_hashes[$status]}" ||
         die 'legacy overlay checksum drifted'
+      overlay_locations+=(original)
+      original_count=$((original_count + 1))
+    elif sudo test -e "$field2"; then
+      assert_owned_regular "$field2" boot || die 'legacy quarantined overlay metadata drifted'
+      test "$(sha "$field2")" = "${overlay_hashes[$status]}" ||
+        die 'legacy quarantined overlay checksum drifted'
+      overlay_locations+=(quarantine)
+      quarantine_count=$((quarantine_count + 1))
+    else
+      overlay_locations+=(absent)
+      absent_count=$((absent_count + 1))
     fi
   done
-  if "$source_present"; then
-    test "$overlays_present" = "${#overlay_names[@]}" ||
+  if ! "$pending"; then
+    sudo test ! -e "$source_quarantine_root" && sudo test ! -L "$source_quarantine_root" ||
+      die 'legacy cleanup found source quarantine without a pending transaction'
+    test "$quarantine_count" = 0 ||
+      die 'legacy cleanup found overlay quarantine without a pending transaction'
+    if test "$source_location" = original; then
+      test "$original_count" = "${#overlay_names[@]}" ||
+        die 'legacy cleanup found a partial owned artifact set'
+    elif test "$source_location" = absent; then
+      test "$absent_count" = "${#overlay_names[@]}" ||
+        die 'legacy cleanup found a partial owned artifact set'
+    else
       die 'legacy cleanup found a partial owned artifact set'
-  else
-    test "$overlays_present" = 0 ||
-      die 'legacy cleanup found a partial owned artifact set'
+    fi
   fi
 
+  dkms_available || die 'legacy cleanup requires available DKMS tooling'
   status="$(validate_named_dkms_status "$legacy_module" "$legacy_version")" ||
     die 'legacy DKMS status is malformed'
-  if ! "$source_present"; then
-    case "$status" in absent|unregistered) ;; *) die 'legacy DKMS registration survived without its source tree';; esac
+  if ! "$pending" && test "$source_location" = absent; then
+    test "$status" = unregistered ||
+      die 'legacy DKMS registration survived without its source tree'
   fi
 
   if sudo test -L "$state_dir"; then die 'unsafe HyperPixel state directory'; fi
@@ -870,7 +957,6 @@ cleanup_legacy_planeradar() {
   if ! sudo test -e "$migration_dir"; then sudo install -d -m 0755 "$migration_dir" || die 'failed to create migration evidence directory'; fi
   assert_owned_dir "$migration_dir" || die 'unsafe migration evidence directory'
   evidence_manifest="$migration_dir/manifest.tsv"
-  contract_sha="$(sha "$contract")" || die 'failed to hash legacy migration contract'
   if sudo test -e "$evidence_manifest" || sudo test -L "$evidence_manifest"; then
     assert_owned_regular "$evidence_manifest" 600 || die 'migration evidence manifest is unsafe'
     existing_sha="$(sha "$evidence_manifest")" || die 'failed to hash migration evidence manifest'
@@ -886,8 +972,9 @@ cleanup_legacy_planeradar() {
     sudo install -o root -g root -m 0600 /dev/null "$events" ||
       die 'failed to create migration event log'
   fi
+  pending_state="$migration_dir/pending.tsv"
 
-  if ! "$source_present"; then
+  if ! "$pending" && test "$source_location" = absent; then
     printf 'result\talready-absent\n' | sudo tee -a "$events" >/dev/null ||
       die 'failed to record legacy cleanup no-op'
     sudo sync
@@ -895,22 +982,74 @@ cleanup_legacy_planeradar() {
     return
   fi
 
-  printf 'result\tpending\n' | sudo tee -a "$events" >/dev/null ||
-    die 'failed to record pending legacy cleanup'
+  if ! "$pending"; then
+    atomic_copy "$contract" "$pending_state" 600 "$contract_sha" ||
+      die 'failed to record exact legacy cleanup pending state'
+    printf 'result\tpending\n' | sudo tee -a "$events" >/dev/null ||
+      die 'failed to record pending legacy cleanup'
+    sudo sync
+    pending=true
+  fi
+
   if test "$status" = registered; then
     run_dkms remove -m "$legacy_module" -v "$legacy_version" --all ||
       die 'failed to remove legacy DKMS registration'
+  elif test "$status" != unregistered; then
+    die 'legacy DKMS state cannot be resumed safely'
   fi
-  for source_entry in "${source_names[@]}"; do
-    sudo rm -f -- "$source_dir/$source_entry" || die 'failed to remove legacy source leaf'
+
+  if test "$source_location" = original; then
+    assert_owned_dir "${root}/usr/src" || die 'legacy source parent is unsafe'
+    if ! sudo test -e "$source_quarantine_root"; then
+      sudo install -o root -g root -m 0700 -d "$source_quarantine_root" ||
+        die 'failed to create legacy source quarantine'
+    fi
+    assert_owned_dir_mode "$source_quarantine_root" 700 ||
+      die 'legacy source quarantine metadata drifted'
+    sudo test ! -e "$source_quarantine_path" && sudo test ! -L "$source_quarantine_path" ||
+      die 'legacy source quarantine destination already exists'
+    sudo mv -- "$source_dir" "$source_quarantine_path" ||
+      die 'failed to quarantine legacy source directory'
+    source_location=quarantine
+  fi
+
+  for ((index = 0; index < ${#overlay_names[@]}; index++)); do
+    if test "${overlay_locations[$index]}" = original; then
+      overlay_path="${root}/boot/firmware/overlays/${overlay_names[$index]}"
+      sudo mv -- "$overlay_path" "${overlay_quarantine_paths[$index]}" ||
+        die 'failed to quarantine legacy overlay'
+      overlay_locations[$index]=quarantine
+    fi
   done
-  sudo rmdir -- "$source_dir" || die 'failed to remove legacy source directory'
+
+  sudo test ! -e "$source_dir" && sudo test ! -L "$source_dir" ||
+    die 'legacy source remained active after quarantine'
   for overlay_path in "${overlay_names[@]}"; do
-    sudo rm -f -- "${root}/boot/firmware/overlays/$overlay_path" ||
-      die 'failed to remove legacy overlay'
+    sudo test ! -e "${root}/boot/firmware/overlays/$overlay_path" &&
+      sudo test ! -L "${root}/boot/firmware/overlays/$overlay_path" ||
+      die 'legacy overlay remained active after quarantine'
+  done
+
+  if sudo test -e "$source_quarantine_path"; then
+    for source_entry in "${source_names[@]}"; do
+      sudo rm -f -- "$source_quarantine_path/$source_entry" ||
+        die 'failed to remove quarantined legacy source leaf'
+    done
+    sudo rmdir -- "$source_quarantine_path" ||
+      die 'failed to remove quarantined legacy source directory'
+  fi
+  if sudo test -e "$source_quarantine_root"; then
+    sudo rmdir -- "$source_quarantine_root" ||
+      die 'failed to remove legacy source quarantine'
+  fi
+  for overlay_path in "${overlay_quarantine_paths[@]}"; do
+    sudo rm -f -- "$overlay_path" ||
+      die 'failed to remove quarantined legacy overlay'
   done
   printf 'result\tremoved\n' | sudo tee -a "$events" >/dev/null ||
     die 'failed to record completed legacy cleanup'
+  sudo sync
+  sudo rm -f -- "$pending_state" || die 'failed to clear legacy cleanup pending state'
   sudo sync
   printf 'removed exact legacy Plane Radar state\n'
 }
