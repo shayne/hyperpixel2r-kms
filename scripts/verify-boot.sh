@@ -76,16 +76,27 @@ if test -n "$expected_driver_version" && test "$driver_version" != "$expected_dr
   exit 1
 fi
 
-generic_bound=false
 generic_driver="$(path /sys/bus/platform/drivers/hyperpixel2r-kms)"
-for entry in "$generic_driver"/*; do
-  test ! -L "$entry" && test -e "$entry" || continue
-  compatible="$entry/of_node/compatible"
-  test ! -L "$compatible" && test -f "$compatible" || continue
-  tr '\0' '\n' < "$compatible" | grep -Fxq shayne,hyperpixel2r-kms || continue
-  generic_bound=true
-done
-"$generic_bound" || { echo 'generic HyperPixel compatible is not bound by the live platform driver' >&2; exit 1; }
+platform_devices="$(path /sys/devices/platform)"
+generic_bound_count=0
+if test ! -L "$generic_driver" && test -d "$generic_driver"; then
+  for entry in "$generic_driver"/*; do
+    test -L "$entry" || continue
+    resolved_entry="$(readlink -f -- "$entry")" || continue
+    case "$resolved_entry" in
+      "$platform_devices"/*) ;;
+      *) continue ;;
+    esac
+    compatible="$resolved_entry/of_node/compatible"
+    test ! -L "$compatible" && test -f "$compatible" || continue
+    tr '\0' '\n' < "$compatible" | grep -Fxq shayne,hyperpixel2r-kms || continue
+    generic_bound_count=$((generic_bound_count + 1))
+  done
+fi
+test "$generic_bound_count" = 1 || {
+  echo 'generic HyperPixel compatible is not bound exactly once by the live platform driver' >&2
+  exit 1
+}
 
 case "$expected_boot" in
   tryboot) active_config_name=tryboot.txt ;;

@@ -577,14 +577,35 @@ run_controller() {
 install_live_hardware() {
   mkdir -p \
     "$root/sys/module/hyperpixel2r_kms" \
-    "$root/sys/bus/platform/drivers/hyperpixel2r-kms/fixture-panel/of_node" \
+    "$root/sys/bus/platform/drivers/hyperpixel2r-kms" \
+    "$root/sys/devices/platform/fixture-panel/of_node" \
     "$root/sys/class/drm/card0-DPI-1" \
     "$root/sys/class/input/event0/device"
+  ln -s ../../../../devices/platform/fixture-panel \
+    "$root/sys/bus/platform/drivers/hyperpixel2r-kms/fixture-panel"
   printf '%s\n' "${HP2R_FIXTURE_LIVE_DRIVER_VERSION:-0.1.0}" > "$root/sys/module/hyperpixel2r_kms/version"
-  printf 'shayne,hyperpixel2r-kms\0' > "$root/sys/bus/platform/drivers/hyperpixel2r-kms/fixture-panel/of_node/compatible"
+  printf 'shayne,hyperpixel2r-kms\0' > "$root/sys/devices/platform/fixture-panel/of_node/compatible"
   printf 'connected\n' > "$root/sys/class/drm/card0-DPI-1/status"
   printf '480x480\n' > "$root/sys/class/drm/card0-DPI-1/modes"
   printf 'EDT FT5406\n' > "$root/sys/class/input/event0/device/name"
+}
+
+run_verify() {
+  PATH="$bin:$PATH" \
+    HP2R_FIXTURE_ROOT="$root" \
+    HP2R_FIXTURE_RELEASE="$release" \
+    HP2R_FIXTURE_LOG="$log" \
+    HP2R_FIXTURE_REPO_ROOT="$repo_root" \
+    HP2R_TARGET=pi@fixture \
+    "$repo_root/scripts/verify-boot.sh" --expect-tryboot --json
+}
+
+assert_verify_rejects_binding() {
+  local label="$1"
+
+  if run_verify >/dev/null 2>&1; then
+    fail "verify accepted $label"
+  fi
 }
 
 prepare_prior_dkms() {
@@ -1021,9 +1042,57 @@ assert_file "$root/var/lib/hyperpixel2r-kms/tryboot-state"
 new_target
 run_stage >/dev/null
 install_live_hardware
-json="$(PATH="$bin:$PATH" HP2R_FIXTURE_ROOT="$root" HP2R_FIXTURE_RELEASE="$release" HP2R_FIXTURE_LOG="$log" HP2R_FIXTURE_REPO_ROOT="$repo_root" HP2R_TARGET=pi@fixture "$repo_root/scripts/verify-boot.sh" --expect-tryboot --json)"
+json="$(run_verify)"
 test "$json" = '{"schema_version":1,"driver_version":"0.1.0","kernel_release":"6.18.34+rpt-rpi-v8","module":"hyperpixel2r_kms","drm_mode":"480x480","touch":true,"sdl_driver":"KMSDRM","renderer":"opengles2","accepted":true}' ||
   fail 'verify JSON was not derived from the live fake target'
+
+rm -f -- "$root/sys/bus/platform/drivers/hyperpixel2r-kms/fixture-panel"
+mkdir -p "$root/sys/bus/platform/drivers/hyperpixel2r-kms/fixture-panel/of_node"
+printf 'shayne,hyperpixel2r-kms\0' \
+  > "$root/sys/bus/platform/drivers/hyperpixel2r-kms/fixture-panel/of_node/compatible"
+assert_verify_rejects_binding 'a regular fake platform binding'
+
+rm -rf -- "$root/sys/bus/platform/drivers/hyperpixel2r-kms/fixture-panel"
+ln -s ../../../../devices/platform/missing-panel \
+  "$root/sys/bus/platform/drivers/hyperpixel2r-kms/fixture-panel"
+assert_verify_rejects_binding 'an unresolved platform binding symlink'
+
+rm -f -- "$root/sys/bus/platform/drivers/hyperpixel2r-kms/fixture-panel"
+mkdir -p "$root/sys/devices/virtual/foreign-panel/of_node"
+printf 'shayne,hyperpixel2r-kms\0' > "$root/sys/devices/virtual/foreign-panel/of_node/compatible"
+ln -s ../../../../devices/virtual/foreign-panel \
+  "$root/sys/bus/platform/drivers/hyperpixel2r-kms/fixture-panel"
+assert_verify_rejects_binding 'a platform binding outside sysfs platform devices'
+
+rm -f -- "$root/sys/bus/platform/drivers/hyperpixel2r-kms/fixture-panel"
+ln -s ../../../../devices/platform/fixture-panel \
+  "$root/sys/bus/platform/drivers/hyperpixel2r-kms/fixture-panel"
+mv "$root/sys/devices/platform/fixture-panel/of_node/compatible" \
+  "$root/sys/devices/platform/fixture-panel/of_node/compatible-real"
+ln -s compatible-real "$root/sys/devices/platform/fixture-panel/of_node/compatible"
+assert_verify_rejects_binding 'a symlinked compatible leaf'
+
+rm -f -- \
+  "$root/sys/bus/platform/drivers/hyperpixel2r-kms/fixture-panel" \
+  "$root/sys/devices/platform/fixture-panel/of_node/compatible"
+mv "$root/sys/devices/platform/fixture-panel/of_node/compatible-real" \
+  "$root/sys/devices/platform/fixture-panel/of_node/compatible"
+assert_verify_rejects_binding 'zero compatible platform bindings'
+
+ln -s ../../../../devices/platform/fixture-panel \
+  "$root/sys/bus/platform/drivers/hyperpixel2r-kms/fixture-panel"
+mkdir -p "$root/sys/devices/platform/second-panel/of_node"
+printf 'shayne,hyperpixel2r-kms\0' > "$root/sys/devices/platform/second-panel/of_node/compatible"
+ln -s ../../../../devices/platform/second-panel \
+  "$root/sys/bus/platform/drivers/hyperpixel2r-kms/second-panel"
+assert_verify_rejects_binding 'multiple compatible platform bindings'
+
+rm -f -- \
+  "$root/sys/bus/platform/drivers/hyperpixel2r-kms/second-panel" \
+  "$root/sys/bus/platform/drivers/hyperpixel2r-kms/fixture-panel"
+rm -rf -- "$root/sys/devices/platform/second-panel"
+ln -s ../../../../devices/platform/fixture-panel \
+  "$root/sys/bus/platform/drivers/hyperpixel2r-kms/fixture-panel"
 if PATH="$bin:$PATH" HP2R_FIXTURE_ROOT="$root" HP2R_FIXTURE_RELEASE="$release" HP2R_FIXTURE_LOG="$log" HP2R_FIXTURE_REPO_ROOT="$repo_root" HP2R_TARGET=pi@fixture \
   "$repo_root/scripts/verify-boot.sh" --expect-tryboot --expect-overlay-file hyperpixel2r-kms-aaaaaaaaaaaa.dtbo >/dev/null 2>&1; then
   fail 'verify accepted a live overlay that differs from its expected candidate identity'
