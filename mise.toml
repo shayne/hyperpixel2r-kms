@@ -25,6 +25,9 @@ cc -std=c11 -Wall -Wextra -Werror -pedantic \
 [tasks.test-build-contract]
 run = "bash tests/build-contract.sh"
 
+[tasks.test-boot-scripts]
+run = "bash tests/boot-scripts.sh"
+
 [tasks.export-target-kbuild]
 run = """
 HP2R_TARGET="${HP2R_TARGET:-${PLANERADAR_PI_TARGET:-}}" \
@@ -43,5 +46,35 @@ HP2R_TARGET="${HP2R_TARGET:-${PLANERADAR_PI_TARGET:-}}" \
   exec ./scripts/check-artifacts.sh
 """
 
+[tasks.stage-tryboot]
+run = """
+HP2R_TARGET="${HP2R_TARGET:-}" \
+  exec ./scripts/stage-tryboot.sh "$@"
+"""
+
+[tasks.verify-boot]
+run = """
+HP2R_TARGET="${HP2R_TARGET:-}" \
+  exec ./scripts/verify-boot.sh "$@"
+"""
+
+[tasks.commit-boot]
+run = """
+HP2R_TARGET="${HP2R_TARGET:-}" \
+  exec ./scripts/commit-boot.sh "$@"
+"""
+
+[tasks.rollback-boot]
+run = """
+HP2R_TARGET="${HP2R_TARGET:-}" \
+  exec ./scripts/rollback-boot.sh "$@"
+"""
+
+[tasks.uninstall]
+run = """
+HP2R_TARGET="${HP2R_TARGET:-}" \
+  exec ./scripts/uninstall.sh "$@"
+"""
+
 [tasks.verify]
-depends = ["test-protocol", "test-gpio", "test-build-contract"]
+depends = ["test-protocol", "test-gpio", "test-build-contract", "test-boot-scripts"]

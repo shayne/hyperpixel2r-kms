@@ -490,5 +490,6 @@ static struct platform_driver hyperpixel2r_kms_driver = {
 module_platform_driver(hyperpixel2r_kms_driver);
 
 MODULE_DESCRIPTION("HyperPixel 2.1 Round display and touch bus");
+MODULE_VERSION("0.1.0");
 MODULE_LICENSE("GPL");
 MODULE_SOFTDEP("pre: edt_ft5x06");

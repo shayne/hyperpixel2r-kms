@@ -85,9 +85,19 @@ hp2r_validate_artifact_name() {
   esac
 }
 
+hp2r_require_regular() {
+  local file="$1"
+
+  test ! -L "$file" && test -f "$file" || {
+    echo "required regular file is missing or a symlink: $file" >&2
+    return 1
+  }
+}
+
 hp2r_sha256() {
   local file="$1"
 
+  hp2r_require_regular "$file" || return
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$file" | awk '{ print $1 }'
   else
@@ -124,7 +134,7 @@ hp2r_validate_checksum_file() {
   local artifact="$2"
   local expected_line
 
-  test -f "$checksum_file" -a -f "$artifact" || {
+  hp2r_require_regular "$checksum_file" && hp2r_require_regular "$artifact" || {
     echo "checksum evidence is missing" >&2
     return 1
   }
@@ -234,7 +244,7 @@ hp2r_validate_host_helper() {
   local machine
   local helper_status
 
-  test -f "$helper" -a -x "$helper" || {
+  hp2r_require_regular "$helper" && test -x "$helper" || {
     echo "host helper is missing or not executable: $helper" >&2
     return 1
   }
@@ -264,6 +274,7 @@ hp2r_manifest_value() {
   local manifest="$1"
   local key="$2"
 
+  hp2r_require_regular "$manifest" || return
   awk -F '\t' -v wanted="$key" '$1 == wanted { print $2 }' "$manifest"
 }
 
@@ -274,7 +285,7 @@ hp2r_validate_exact_manifest_rows() {
   local key
   local count
 
-  test -f "$manifest" || {
+  hp2r_require_regular "$manifest" || {
     echo "manifest is missing: $manifest" >&2
     return 1
   }
@@ -565,7 +576,7 @@ hp2r_validate_artifact_provenance() {
   do
     helper="${specification%%:*}"
     checksum_key="${specification#*:}"
-    test -f "$artifact_dir/$helper" || {
+    hp2r_require_regular "$artifact_dir/$helper" || {
       echo "missing host helper evidence: $artifact_dir/$helper" >&2
       return 1
     }
@@ -593,7 +604,7 @@ hp2r_validate_overlay() {
   local overlay_dir
   local overlay_file
 
-  test -f "$overlay_path" || {
+  hp2r_require_regular "$overlay_path" || {
     echo "compiled overlay is missing: $overlay_path" >&2
     return 1
   }
