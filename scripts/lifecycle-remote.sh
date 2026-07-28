@@ -676,13 +676,21 @@ assert_no_owned_generic_overlay() {
 
 validate_dkms_status() {
   local version="$1"
+  validate_named_dkms_status hyperpixel2r-kms "$version"
+}
+
+validate_named_dkms_status() {
+  local module="$1"
+  local version="$2"
   local output status line count=0
+  [[ "$module" =~ ^[A-Za-z0-9._+-]+$ ]] || return
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return
   if ! dkms_available; then
     printf 'absent\n'
     return
   fi
   set +e
-  output="$(run_dkms status -m hyperpixel2r-kms -v "$version" 2>/dev/null)"
+  output="$(run_dkms status -m "$module" -v "$version" 2>/dev/null)"
   status=$?
   set -e
   if test "$status" -ne 0; then
@@ -693,7 +701,7 @@ validate_dkms_status() {
   if test -z "$output"; then printf 'unregistered\n'; return; fi
   while IFS= read -r line; do
     test -n "$line" || continue
-    [[ "$line" =~ ^hyperpixel2r-kms/$version(:\ added|,\ [A-Za-z0-9._+-]+,\ (aarch64|arm64):\ (built|installed))$ ]] || {
+    [[ "$line" =~ ^$module/$version(:\ added|,\ [A-Za-z0-9._+-]+,\ (aarch64|arm64):\ (built|installed))$ ]] || {
       printf 'unrecognized DKMS status line: %s\n' "$line" >&2
       return 1
     }
@@ -701,6 +709,210 @@ validate_dkms_status() {
   done <<<"$output"
   test "$count" -gt 0 || { echo 'empty DKMS status is malformed' >&2; return 1; }
   printf 'registered\n'
+}
+
+cleanup_legacy_planeradar() {
+  local contract="$1"
+  local expected_overlay="$2"
+  local schema_version='' migration_id='' legacy_module='' legacy_version='' source_dir_relative=''
+  local recovery_relative='' recovery_sha='' key field2 field3 extra source_dir source_entry
+  local status source_present=false overlays_present=0 overlay_path migration_root migration_dir
+  local evidence_manifest events contract_sha existing_sha result
+  local -a source_names=() source_hashes=() overlay_names=() overlay_hashes=()
+  local -A seen_source=() seen_overlay=()
+
+  if test -n "$root"; then contract="${root}${contract}"; fi
+  [[ "$expected_overlay" =~ ^hyperpixel2r-kms-[0-9a-f]{12}\.dtbo$ ]] ||
+    die 'unsafe expected external overlay file'
+  require_regular "$contract" || die 'legacy migration contract is not a regular file'
+  while IFS=$'\t' read -r key field2 field3 extra; do
+    test -z "$extra" || die 'legacy migration contract has extra fields'
+    case "$key" in
+      schema_version)
+        test -z "$schema_version" && test -n "$field2" && test -z "$field3" ||
+          die 'duplicate or malformed legacy schema version'
+        schema_version="$field2"
+        ;;
+      migration_id)
+        test -z "$migration_id" && test -n "$field2" && test -z "$field3" ||
+          die 'duplicate or malformed legacy migration id'
+        migration_id="$field2"
+        ;;
+      legacy_module)
+        test -z "$legacy_module" && test -n "$field2" && test -z "$field3" ||
+          die 'duplicate or malformed legacy module'
+        legacy_module="$field2"
+        ;;
+      legacy_version)
+        test -z "$legacy_version" && test -n "$field2" && test -z "$field3" ||
+          die 'duplicate or malformed legacy version'
+        legacy_version="$field2"
+        ;;
+      source_dir)
+        test -z "$source_dir_relative" && test -n "$field2" && test -z "$field3" ||
+          die 'duplicate or malformed legacy source directory'
+        source_dir_relative="$field2"
+        ;;
+      source_file)
+        [[ "$field2" =~ ^[A-Za-z0-9._+-]+$ ]] && [[ "$field3" =~ ^[0-9a-f]{64}$ ]] ||
+          die 'unsafe legacy source-file contract'
+        test -z "${seen_source[$field2]+x}" || die 'duplicate legacy source file'
+        seen_source["$field2"]=1
+        source_names+=("$field2")
+        source_hashes+=("$field3")
+        ;;
+      overlay_file)
+        [[ "$field2" =~ ^planeradar-hyperpixel2r-[0-9a-f]{12}\.dtbo$ ]] &&
+          [[ "$field3" =~ ^[0-9a-f]{64}$ ]] ||
+          die 'unsafe legacy overlay contract'
+        test -z "${seen_overlay[$field2]+x}" || die 'duplicate legacy overlay file'
+        seen_overlay["$field2"]=1
+        overlay_names+=("$field2")
+        overlay_hashes+=("$field3")
+        ;;
+      recovery_baseline)
+        test -z "$recovery_relative" && [[ "$field2" =~ ^/boot/firmware/config\.txt\.task6-baseline\.[A-Za-z0-9._-]+\.bak$ ]] &&
+          [[ "$field3" =~ ^[0-9a-f]{64}$ ]] ||
+          die 'duplicate or unsafe recovery baseline contract'
+        recovery_relative="$field2"
+        recovery_sha="$field3"
+        ;;
+      *) die 'unknown legacy migration contract field' ;;
+    esac
+  done < "$contract"
+  test "$schema_version" = 1 &&
+    test "$migration_id" = planeradar-hyperpixel2r-v1 &&
+    test "$legacy_module" = planeradar-hyperpixel2r &&
+    test "$legacy_version" = 0.1.0 &&
+    test "$source_dir_relative" = /usr/src/planeradar-hyperpixel2r-0.1.0 &&
+    test "${#source_names[@]}" -gt 0 &&
+    test "${#overlay_names[@]}" -gt 0 &&
+    test -n "$recovery_relative" ||
+    die 'legacy migration contract identity is invalid'
+
+  require_regular "$normal_config" || die 'normal boot config is unsafe during legacy cleanup'
+  sudo awk -v expected="$expected_overlay" '
+    {
+      line=$0
+      sub(/^[[:space:]]+/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      if (line !~ /^dtoverlay=/) next
+      raw=substr(line, 11)
+      split(raw, pieces, ",")
+      if (pieces[1] ~ /^planeradar-hyperpixel2r-/) bad=1
+      if (pieces[1] ~ /^hyperpixel2r-kms-/ && pieces[1] != expected) bad=1
+      if (pieces[1] == expected) count++
+    }
+    END { exit bad || count != 1 }
+  ' "$normal_config" || die 'legacy cleanup requires exactly the expected accepted external overlay'
+  test ! -L "$state_file" && test ! -e "$state_file" ||
+    die 'refusing legacy cleanup while a transaction is active'
+  sudo test ! -e "${root}/sys/module/planeradar_hyperpixel2r" ||
+    die 'refusing legacy cleanup while the legacy module is loaded'
+  assert_owned_regular "${root}${recovery_relative}" boot ||
+    die 'recovery baseline is unsafe during legacy cleanup'
+  test "$(sha "${root}${recovery_relative}")" = "$recovery_sha" ||
+    die 'recovery baseline checksum drifted'
+
+  source_dir="${root}${source_dir_relative}"
+  if sudo test -L "$source_dir"; then
+    die 'legacy source directory is a symlink'
+  elif sudo test -e "$source_dir"; then
+    assert_owned_dir "$source_dir" || die 'legacy source directory metadata drifted'
+    source_present=true
+    while IFS= read -r -d '' source_entry; do
+      field2="$(basename "$source_entry")"
+      test -n "${seen_source[$field2]+x}" || die 'legacy source directory has an unowned leaf'
+      assert_owned_regular "$source_entry" 644 || die 'legacy source leaf metadata drifted'
+    done < <(sudo find -P "$source_dir" -mindepth 1 -maxdepth 1 -print0)
+    for ((status = 0; status < ${#source_names[@]}; status++)); do
+      source_entry="$source_dir/${source_names[$status]}"
+      assert_owned_regular "$source_entry" 644 || die 'legacy source leaf is missing or unsafe'
+      test "$(sha "$source_entry")" = "${source_hashes[$status]}" ||
+        die 'legacy source leaf checksum drifted'
+    done
+  fi
+
+  for ((status = 0; status < ${#overlay_names[@]}; status++)); do
+    overlay_path="${root}/boot/firmware/overlays/${overlay_names[$status]}"
+    if sudo test -L "$overlay_path"; then
+      die 'legacy overlay is a symlink'
+    elif sudo test -e "$overlay_path"; then
+      overlays_present=$((overlays_present + 1))
+      assert_owned_regular "$overlay_path" boot || die 'legacy overlay metadata drifted'
+      test "$(sha "$overlay_path")" = "${overlay_hashes[$status]}" ||
+        die 'legacy overlay checksum drifted'
+    fi
+  done
+  if "$source_present"; then
+    test "$overlays_present" = "${#overlay_names[@]}" ||
+      die 'legacy cleanup found a partial owned artifact set'
+  else
+    test "$overlays_present" = 0 ||
+      die 'legacy cleanup found a partial owned artifact set'
+  fi
+
+  status="$(validate_named_dkms_status "$legacy_module" "$legacy_version")" ||
+    die 'legacy DKMS status is malformed'
+  if ! "$source_present"; then
+    case "$status" in absent|unregistered) ;; *) die 'legacy DKMS registration survived without its source tree';; esac
+  fi
+
+  if sudo test -L "$state_dir"; then die 'unsafe HyperPixel state directory'; fi
+  if ! sudo test -e "$state_dir"; then sudo install -d -m 0755 "$state_dir" || die 'failed to create HyperPixel state directory'; fi
+  assert_owned_dir "$state_dir" || die 'unsafe HyperPixel state directory'
+  migration_root="$state_dir/migrations"
+  if sudo test -L "$migration_root"; then die 'unsafe migration evidence root'; fi
+  if ! sudo test -e "$migration_root"; then sudo install -d -m 0755 "$migration_root" || die 'failed to create migration evidence root'; fi
+  assert_owned_dir "$migration_root" || die 'unsafe migration evidence root'
+  migration_dir="$migration_root/$migration_id"
+  if sudo test -L "$migration_dir"; then die 'unsafe migration evidence directory'; fi
+  if ! sudo test -e "$migration_dir"; then sudo install -d -m 0755 "$migration_dir" || die 'failed to create migration evidence directory'; fi
+  assert_owned_dir "$migration_dir" || die 'unsafe migration evidence directory'
+  evidence_manifest="$migration_dir/manifest.tsv"
+  contract_sha="$(sha "$contract")" || die 'failed to hash legacy migration contract'
+  if sudo test -e "$evidence_manifest" || sudo test -L "$evidence_manifest"; then
+    assert_owned_regular "$evidence_manifest" 600 || die 'migration evidence manifest is unsafe'
+    existing_sha="$(sha "$evidence_manifest")" || die 'failed to hash migration evidence manifest'
+    test "$existing_sha" = "$contract_sha" || die 'migration evidence manifest differs'
+  else
+    atomic_copy "$contract" "$evidence_manifest" 600 "$contract_sha" ||
+      die 'failed to preserve migration evidence manifest'
+  fi
+  events="$migration_dir/events.log"
+  if sudo test -e "$events" || sudo test -L "$events"; then
+    assert_owned_regular "$events" 600 || die 'migration event log is unsafe'
+  else
+    sudo install -o root -g root -m 0600 /dev/null "$events" ||
+      die 'failed to create migration event log'
+  fi
+
+  if ! "$source_present"; then
+    printf 'result\talready-absent\n' | sudo tee -a "$events" >/dev/null ||
+      die 'failed to record legacy cleanup no-op'
+    sudo sync
+    printf 'legacy Plane Radar state already absent\n'
+    return
+  fi
+
+  printf 'result\tpending\n' | sudo tee -a "$events" >/dev/null ||
+    die 'failed to record pending legacy cleanup'
+  if test "$status" = registered; then
+    run_dkms remove -m "$legacy_module" -v "$legacy_version" --all ||
+      die 'failed to remove legacy DKMS registration'
+  fi
+  for source_entry in "${source_names[@]}"; do
+    sudo rm -f -- "$source_dir/$source_entry" || die 'failed to remove legacy source leaf'
+  done
+  sudo rmdir -- "$source_dir" || die 'failed to remove legacy source directory'
+  for overlay_path in "${overlay_names[@]}"; do
+    sudo rm -f -- "${root}/boot/firmware/overlays/$overlay_path" ||
+      die 'failed to remove legacy overlay'
+  done
+  printf 'result\tremoved\n' | sudo tee -a "$events" >/dev/null ||
+    die 'failed to record completed legacy cleanup'
+  sudo sync
+  printf 'removed exact legacy Plane Radar state\n'
 }
 
 remove_exact_tree() {
@@ -1432,5 +1644,6 @@ case "${1-}" in
   commit) commit ;;
   rollback) rollback ;;
   uninstall) uninstall ;;
-  *) die 'usage: lifecycle-remote.sh {stage|identity|commit|rollback|uninstall}' ;;
+  cleanup-legacy-planeradar) shift; cleanup_legacy_planeradar "$@" ;;
+  *) die 'usage: lifecycle-remote.sh {stage|identity|commit|rollback|uninstall|cleanup-legacy-planeradar}' ;;
 esac

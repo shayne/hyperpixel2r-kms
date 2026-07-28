@@ -188,7 +188,13 @@ legacy_identity="plane""radar"
 legacy_user="shayne"
 legacy_host_marker="${legacy_user}@"
 legacy_password_marker="${legacy_user}s!"
-if git -C "$repo_root" grep -niE "$legacy_identity|$legacy_host_marker|$legacy_password_marker" -- ':!.env'; then
+legacy_migration_path="release/legacy-${legacy_identity}-migration-v1.tsv"
+if git -C "$repo_root" grep -niE "$legacy_identity|$legacy_host_marker|$legacy_password_marker" -- \
+  ':!.env' \
+  ":!$legacy_migration_path" \
+  ':!scripts/lifecycle-remote.sh' \
+  ':!scripts/uninstall.sh' \
+  ':!tests/boot-fixtures.sh'; then
   printf 'release source contains a deployment-specific identity or credential\n' >&2
   exit 1
 fi
@@ -216,13 +222,76 @@ git -C "$fixture" add .
 git -C "$fixture" commit -q --no-gpg-sign -m 'release fixture'
 source_revision="$(git -C "$fixture" rev-parse HEAD)"
 source_tree="$(git -C "$fixture" rev-parse 'HEAD^{tree}')"
+release='6.18.34+rpt-rpi-v8'
+artifact_dir="$fixture/dist/artifacts/$release"
+target_dir="$fixture/dist/kernel-target/$release"
+mkdir -p "$artifact_dir" "$target_dir"
+overlay_file="hyperpixel2r-kms-${source_revision:0:12}.dtbo"
+printf 'synthetic module fixture\n' > "$artifact_dir/hyperpixel2r_kms.ko"
+printf 'synthetic overlay fixture\n' > "$artifact_dir/$overlay_file"
+printf 'synthetic applied dtb fixture\n' > "$artifact_dir/hyperpixel2r-kms-applied.dtb"
+for helper in host-fixdep host-modpost host-genksyms; do
+  printf 'synthetic %s fixture\n' "$helper" > "$artifact_dir/$helper"
+done
+module_sha256="$(sha256sum "$artifact_dir/hyperpixel2r_kms.ko" | awk '{print $1}')"
+overlay_sha256="$(sha256sum "$artifact_dir/$overlay_file" | awk '{print $1}')"
+applied_dtb_sha256="$(sha256sum "$artifact_dir/hyperpixel2r-kms-applied.dtb" | awk '{print $1}')"
+host_fixdep_sha256="$(sha256sum "$artifact_dir/host-fixdep" | awk '{print $1}')"
+host_modpost_sha256="$(sha256sum "$artifact_dir/host-modpost" | awk '{print $1}')"
+host_genksyms_sha256="$(sha256sum "$artifact_dir/host-genksyms" | awk '{print $1}')"
+source_deb_sha256='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+base_dtb_sha256='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+{
+  printf 'schema_version\t1\n'
+  printf 'driver_version\t0.1.0\n'
+  printf 'source_revision\t%s\n' "$source_revision"
+  printf 'source_tree\t%s\n' "$source_tree"
+  printf 'kernel_release\t%s\n' "$release"
+  printf 'architecture\taarch64\n'
+  printf 'base_dtb_sha256\t%s\n' "$base_dtb_sha256"
+  printf 'module_file\thyperpixel2r_kms.ko\n'
+  printf 'module_sha256\t%s\n' "$module_sha256"
+  printf 'module_vermagic\t%s SMP preempt mod_unload modversions aarch64\n' "$release"
+  printf 'overlay_file\t%s\n' "$overlay_file"
+  printf 'overlay_sha256\t%s\n' "$overlay_sha256"
+  printf 'applied_dtb_file\thyperpixel2r-kms-applied.dtb\n'
+  printf 'applied_dtb_sha256\t%s\n' "$applied_dtb_sha256"
+} > "$artifact_dir/manifest.txt"
+printf '%s  hyperpixel2r_kms.ko\n' "$module_sha256" > "$artifact_dir/module.sha256"
+printf '%s  %s\n' "$overlay_sha256" "$overlay_file" > "$artifact_dir/overlay.sha256"
+printf '%s  hyperpixel2r-kms-applied.dtb\n' "$applied_dtb_sha256" > "$artifact_dir/applied-dtb.sha256"
+{
+  printf 'host_arch\tx86_64\n'
+  printf 'kernel_source_package\tlinux\n'
+  printf 'kernel_source_deb_package\tlinux-source-6.18\n'
+  printf 'kernel_source_version\t6.18.34-1\n'
+  printf 'kernel_source_sha256\t%s\n' "$source_deb_sha256"
+  printf 'host_fixdep_sha256\t%s\n' "$host_fixdep_sha256"
+  printf 'host_modpost_sha256\t%s\n' "$host_modpost_sha256"
+  printf 'host_genksyms_sha256\t%s\n' "$host_genksyms_sha256"
+} > "$artifact_dir/host-tools.txt"
+{
+  printf 'kernel_release\t%s\n' "$release"
+  printf 'kernel_arch\taarch64\n'
+  printf 'header_path\t/usr/src/linux-headers-6.18.34+rpt-rpi-v8\n'
+  printf 'common_header_path\t/usr/src/linux-headers-6.18.34+rpt-common-rpi\n'
+  printf 'kbuild_path\t/usr/lib/linux-kbuild-6.18.34+rpt\n'
+  printf 'kernel_source_package\tlinux\n'
+  printf 'kernel_source_version\t6.18.34-1\n'
+  printf 'kernel_source_deb_package\tlinux-source-6.18\n'
+  printf 'kernel_source_deb_filename\tpool/main/l/linux/linux-source-6.18_6.18.34-1_all.deb\n'
+  printf 'kernel_source_deb_sha256\t%s\n' "$source_deb_sha256"
+  printf 'kernel_source_deb\tkernel-source.deb\n'
+  printf 'base_dtb_path\t/boot/firmware/bcm2710-rpi-zero-2-w.dtb\n'
+  printf 'base_dtb_sha256\t%s\n' "$base_dtb_sha256"
+} > "$target_dir/target.txt"
 
 run_package() {
   local output="$1"
 
   "$fixture/scripts/package-release.sh" \
     --source-revision "$source_revision" \
-    --artifact-dir "$fixture/no-artifacts" \
+    --artifact-dir "$fixture/dist/artifacts" \
     --output "$output"
 }
 
@@ -240,6 +309,7 @@ expected_assets=(
   driver-manifest.json
   SHA256SUMS
   SBOM.spdx.json
+  "hyperpixel2r-kms-${release}-aarch64.tar.zst"
 )
 for asset in "${expected_assets[@]}"; do
   test -f "$first_output/$asset" || {
@@ -257,15 +327,20 @@ test "$(find "$first_output" -maxdepth 1 -type f | wc -l | tr -d ' ')" = \
   sha256sum -c SHA256SUMS
 )
 
-python3 - "$first_output" "$source_revision" "$source_tree" <<'PY'
+python3 - "$first_output" "$source_revision" "$source_tree" "$release" <<'PY'
+import hashlib
 import json
 import pathlib
 import re
 import sys
+import tarfile
+import tempfile
+import subprocess
 
 output = pathlib.Path(sys.argv[1])
 commit = sys.argv[2]
 tree = sys.argv[3]
+release = sys.argv[4]
 manifest = json.loads((output / "driver-manifest.json").read_text())
 schema = json.loads((output.parent / "fixture" / "release" / "driver-manifest.schema.json").read_text())
 
@@ -280,10 +355,30 @@ artifacts = manifest["artifacts"]
 assert [artifact["name"] for artifact in artifacts] == [
     "hyperpixel2r-kms-source.tar.zst",
     "SBOM.spdx.json",
+    f"hyperpixel2r-kms-{release}-aarch64.tar.zst",
 ]
 for artifact in artifacts:
     assert re.fullmatch(r"[0-9a-f]{64}", artifact["sha256"])
     assert artifact["size"] > 0
+exact = artifacts[2]
+assert exact["vermagic"] == (
+    f"{release} SMP preempt mod_unload modversions aarch64"
+)
+assert re.fullmatch(r"[0-9a-f]{64}", exact["bundle_manifest_sha256"])
+with tempfile.TemporaryDirectory(prefix="hp2r-exact-contract.") as temporary:
+    tar_path = pathlib.Path(temporary) / "exact.tar"
+    subprocess.run(
+        ["zstd", "-q", "-d", "-c", output / exact["name"]],
+        check=True,
+        stdout=tar_path.open("wb"),
+    )
+    with tarfile.open(tar_path) as archive:
+        manifest_member = next(
+            member for member in archive.getmembers()
+            if member.name.endswith("/manifest.txt")
+        )
+        manifest_bytes = archive.extractfile(manifest_member).read()
+assert hashlib.sha256(manifest_bytes).hexdigest() == exact["bundle_manifest_sha256"]
 PY
 
 python3 - "$first_output" "$fixture/scripts/validate-release-metadata.sh" <<'PY'

@@ -97,7 +97,16 @@
           },
           {
             "additionalProperties": false,
-            "required": ["name", "kind", "sha256", "size", "architecture", "kernel_release"],
+            "required": [
+              "name",
+              "kind",
+              "sha256",
+              "size",
+              "architecture",
+              "kernel_release",
+              "vermagic",
+              "bundle_manifest_sha256"
+            ],
             "properties": {
               "name": {
                 "type": "string",
@@ -110,6 +119,14 @@
               "kernel_release": {
                 "type": "string",
                 "pattern": "^[A-Za-z0-9._+-]+$"
+              },
+              "vermagic": {
+                "type": "string",
+                "pattern": "^[-A-Za-z0-9._+ ]{1,512}$"
+              },
+              "bundle_manifest_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
               }
             }
           }

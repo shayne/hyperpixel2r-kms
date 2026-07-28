@@ -79,3 +79,12 @@ transaction is present. It validates every stored release, full DKMS source
 tree, and DKMS status line; removes only checksum-proven module and overlay
 leaves; and runs `depmod` for every recorded kernel release. It does not tidy
 unknown files for you. Unknown files are just state with better marketing.
+
+The application adapter also exposes a one-time product migration through the
+same typed `Uninstall` action. That mode accepts only the shipped immutable
+legacy manifest and an exact expected generic overlay. It refuses active
+transactions, active or loaded legacy state, partial artifact sets, and any
+source, overlay, metadata, or recovery-baseline drift. On success it preserves
+the manifest and append-only result evidence below
+`/var/lib/hyperpixel2r-kms/migrations/`; repeating the migration records a
+no-op.

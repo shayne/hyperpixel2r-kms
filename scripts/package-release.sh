@@ -377,12 +377,19 @@ artifacts = [
 for line in exact_entries:
     if not line:
         continue
-    release, _ = line.split("\t", 1)
+    release, artifact_directory = line.split("\t", 1)
+    bundle_manifest = pathlib.Path(artifact_directory) / "manifest.txt"
+    bundle_fields = dict(
+        row.split("\t", 1)
+        for row in bundle_manifest.read_text().splitlines()
+    )
     artifacts.append(artifact(
         f"hyperpixel2r-kms-{release}-aarch64.tar.zst",
         "exact-kernel-bundle",
         architecture="aarch64",
         kernel_release=release,
+        vermagic=bundle_fields["module_vermagic"],
+        bundle_manifest_sha256=hashlib.sha256(bundle_manifest.read_bytes()).hexdigest(),
     ))
 document = {
     "schema_version": 1,

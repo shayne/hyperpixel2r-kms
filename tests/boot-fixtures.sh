@@ -306,20 +306,27 @@ SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
 version=''
+module=''
 for ((index = 1; index <= $#; index++)); do
+  if test "${!index}" = -m; then
+    next=$((index + 1))
+    module="${!next}"
+  fi
   if test "${!index}" = -v; then
     next=$((index + 1))
     version="${!next}"
-    break
   fi
 done
-test -n "$version"
+test -n "$module" && test -n "$version"
 marker="$HP2R_FIXTURE_ROOT/var/lib/dkms/registered"
+if test "$module" = planeradar-hyperpixel2r; then
+  marker="$HP2R_FIXTURE_ROOT/var/lib/dkms/registered-planeradar"
+fi
 if test "$version" != 0.1.0; then marker="$HP2R_FIXTURE_ROOT/var/lib/dkms/registered-$version"; fi
 case "${1-}" in
   status)
     if test -n "${HP2R_FIXTURE_DKMS_STATUS+x}"; then printf '%s\n' "$HP2R_FIXTURE_DKMS_STATUS"; exit "${HP2R_FIXTURE_DKMS_EXIT:-0}"; fi
-    test ! -f "$marker" || printf 'hyperpixel2r-kms/%s: added\n' "$version"
+    test ! -f "$marker" || printf '%s/%s: added\n' "$module" "$version"
     ;;
   add) mkdir -p "$(dirname "$marker")"; : > "$marker" ;;
   remove)
@@ -568,6 +575,7 @@ run_stage() {
 
 run_controller() {
   local script="$1"
+  shift
   local fixture_bin="$bin"
   local result
   if test "${HP2R_FIXTURE_NO_DKMS:-}" = 1; then fixture_bin="$bin_no_dkms"; fi
@@ -576,8 +584,9 @@ run_controller() {
     HP2R_FIXTURE_RELEASE="$release" \
     HP2R_FIXTURE_LOG="$log" \
     HP2R_FIXTURE_REPO_ROOT="$repo_root" \
+    HP2R_LEGACY_MIGRATION_CONTRACT="${HP2R_LEGACY_MIGRATION_CONTRACT:-}" \
     HP2R_TARGET=pi@fixture \
-    "$repo_root/scripts/$script"; then
+    "$repo_root/scripts/$script" "$@"; then
     assert_no_private_workspaces
     return
   else
@@ -1572,5 +1581,114 @@ run_stage >/dev/null
 run_controller rollback-boot.sh >/dev/null
 run_controller uninstall.sh >/dev/null
 assert_absent "$root/usr/lib/hyperpixel2r-kms"
+
+# Legacy Plane Radar cleanup is a separate, exact migration mode of the
+# existing Uninstall action. It must validate every mutation target before
+# removing anything, preserve unrelated overlays and the recovery baseline,
+# retain durable evidence, and be a no-op on repeat.
+prepare_legacy_cleanup() {
+  local contract="$fixture/legacy-migration.tsv"
+  local source_dir="$root/usr/src/planeradar-hyperpixel2r-0.1.0"
+  local baseline="$root/boot/firmware/config.txt.task6-baseline.fixture.bak"
+  local legacy_overlay
+
+  new_target
+  printf '[all]\ndtoverlay=vc4-kms-v3d\ndtoverlay=hyperpixel2r-kms-aaaaaaaaaaaa.dtbo\n' \
+    > "$root/boot/firmware/config.txt"
+  cp "$root/boot/firmware/config.txt" "$baseline"
+  mkdir -p "$source_dir" "$root/var/lib/dkms"
+  printf 'legacy Kbuild\n' > "$source_dir/Kbuild"
+  printf 'legacy source\n' > "$source_dir/planeradar_hyperpixel2r_main.c"
+  chown -R root:root "$source_dir"
+  chmod 0755 "$source_dir"
+  chmod 0644 "$source_dir"/*
+  : > "$root/var/lib/dkms/registered-planeradar"
+  for legacy_overlay in \
+    planeradar-hyperpixel2r-111111111111.dtbo \
+    planeradar-hyperpixel2r-222222222222.dtbo; do
+    printf 'owned legacy overlay\n' > "$root/boot/firmware/overlays/$legacy_overlay"
+    chmod 0644 "$root/boot/firmware/overlays/$legacy_overlay"
+  done
+  printf 'foreign overlay\n' \
+    > "$root/boot/firmware/overlays/planeradar-hyperpixel2r-ffffffffffff.dtbo"
+  chmod 0644 "$root/boot/firmware/overlays/planeradar-hyperpixel2r-ffffffffffff.dtbo"
+  {
+    printf 'schema_version\t1\n'
+    printf 'migration_id\tplaneradar-hyperpixel2r-v1\n'
+    printf 'legacy_module\tplaneradar-hyperpixel2r\n'
+    printf 'legacy_version\t0.1.0\n'
+    printf 'source_dir\t/usr/src/planeradar-hyperpixel2r-0.1.0\n'
+    printf 'source_file\tKbuild\t%s\n' "$(sha256sum "$source_dir/Kbuild" | awk '{print $1}')"
+    printf 'source_file\tplaneradar_hyperpixel2r_main.c\t%s\n' \
+      "$(sha256sum "$source_dir/planeradar_hyperpixel2r_main.c" | awk '{print $1}')"
+    for legacy_overlay in \
+      planeradar-hyperpixel2r-111111111111.dtbo \
+      planeradar-hyperpixel2r-222222222222.dtbo; do
+      printf 'overlay_file\t%s\t%s\n' "$legacy_overlay" \
+        "$(sha256sum "$root/boot/firmware/overlays/$legacy_overlay" | awk '{print $1}')"
+    done
+    printf 'recovery_baseline\t/boot/firmware/config.txt.task6-baseline.fixture.bak\t%s\n' \
+      "$(sha256sum "$baseline" | awk '{print $1}')"
+  } > "$contract"
+  HP2R_LEGACY_MIGRATION_CONTRACT="$contract"
+  export HP2R_LEGACY_MIGRATION_CONTRACT
+}
+
+run_legacy_cleanup() {
+  run_controller uninstall.sh \
+    --cleanup-legacy-planeradar \
+    --expect-overlay-file hyperpixel2r-kms-aaaaaaaaaaaa.dtbo
+}
+
+prepare_legacy_cleanup
+legacy_baseline_sha="$(sha256sum "$root/boot/firmware/config.txt.task6-baseline.fixture.bak" | awk '{print $1}')"
+run_legacy_cleanup >/dev/null
+assert_absent "$root/usr/src/planeradar-hyperpixel2r-0.1.0"
+assert_absent "$root/var/lib/dkms/registered-planeradar"
+assert_absent "$root/boot/firmware/overlays/planeradar-hyperpixel2r-111111111111.dtbo"
+assert_absent "$root/boot/firmware/overlays/planeradar-hyperpixel2r-222222222222.dtbo"
+assert_file "$root/boot/firmware/overlays/planeradar-hyperpixel2r-ffffffffffff.dtbo"
+test "$(sha256sum "$root/boot/firmware/config.txt.task6-baseline.fixture.bak" | awk '{print $1}')" = "$legacy_baseline_sha" ||
+  fail 'legacy cleanup changed the recovery baseline'
+grep -Fxq 'dtoverlay=hyperpixel2r-kms-aaaaaaaaaaaa.dtbo' "$root/boot/firmware/config.txt" ||
+  fail 'legacy cleanup changed the accepted external overlay'
+assert_file "$root/var/lib/hyperpixel2r-kms/migrations/planeradar-hyperpixel2r-v1/manifest.tsv"
+assert_file "$root/var/lib/hyperpixel2r-kms/migrations/planeradar-hyperpixel2r-v1/events.log"
+grep -Fq $'result\tremoved' "$root/var/lib/hyperpixel2r-kms/migrations/planeradar-hyperpixel2r-v1/events.log" ||
+  fail 'legacy cleanup did not retain completion evidence'
+run_legacy_cleanup >/dev/null
+grep -Fq $'result\talready-absent' "$root/var/lib/hyperpixel2r-kms/migrations/planeradar-hyperpixel2r-v1/events.log" ||
+  fail 'repeat legacy cleanup was not a recorded no-op'
+
+for hostile_legacy_state in active loaded source-hash overlay-hash transaction; do
+  prepare_legacy_cleanup
+  case "$hostile_legacy_state" in
+    active)
+      printf 'dtoverlay=planeradar-hyperpixel2r-111111111111.dtbo\n' \
+        >> "$root/boot/firmware/config.txt"
+      ;;
+    loaded)
+      mkdir -p "$root/sys/module/planeradar_hyperpixel2r"
+      ;;
+    source-hash)
+      printf 'tampered\n' > "$root/usr/src/planeradar-hyperpixel2r-0.1.0/Kbuild"
+      ;;
+    overlay-hash)
+      printf 'tampered\n' \
+        > "$root/boot/firmware/overlays/planeradar-hyperpixel2r-111111111111.dtbo"
+      ;;
+    transaction)
+      mkdir -p "$root/var/lib/hyperpixel2r-kms"
+      printf 'active\n' > "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+      ;;
+  esac
+  if run_legacy_cleanup >/dev/null 2>&1; then
+    fail "legacy cleanup accepted hostile state: $hostile_legacy_state"
+  fi
+  assert_file "$root/usr/src/planeradar-hyperpixel2r-0.1.0/Kbuild"
+  assert_file "$root/var/lib/dkms/registered-planeradar"
+  assert_file "$root/boot/firmware/overlays/planeradar-hyperpixel2r-111111111111.dtbo"
+done
+unset HP2R_LEGACY_MIGRATION_CONTRACT
 
 printf 'Driver executable boot fixtures passed\n'
