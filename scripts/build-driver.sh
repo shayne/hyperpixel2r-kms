@@ -76,23 +76,39 @@ fi
 hp2r_validate_release "$release"
 
 cd "$repo_root"
-hp2r_require_clean_source
-workspace_tree="$(git rev-parse 'HEAD^{tree}')"
-if test -n "$source_ref"; then
-  source_revision="$(git rev-parse --verify "$source_ref^{commit}")"
-  source_tree="$(git rev-parse --verify "$source_ref^{tree}")"
-  test "$source_tree" = "$workspace_tree" || {
-    echo "source revision tree does not match the clean workspace: $source_ref" >&2
-    exit 1
-  }
+release_source_root="${HP2R_RELEASE_SOURCE_ROOT:-$repo_root}"
+release_source=false
+if hp2r_release_source_available "$release_source_root"; then
+  release_source=true
+  identity="$release_source_root/release/source-identity.txt"
+  source_revision="$(hp2r_manifest_value "$identity" source_revision)"
+  source_tree="$(hp2r_manifest_value "$identity" source_tree)"
+  hp2r_validate_release_source "$release_source_root" "$source_revision" "$source_tree"
+  if test -n "$source_ref"; then
+    test "$source_ref" = "$source_revision" || {
+      echo "requested source revision does not match the extracted release" >&2
+      exit 1
+    }
+  fi
 else
-  workspace_revision="$(hp2r_resolve_build_revision)"
-  source_revision="$workspace_revision"
-  source_tree="$workspace_tree"
+  hp2r_require_clean_source
+  workspace_tree="$(git rev-parse 'HEAD^{tree}')"
+  if test -n "$source_ref"; then
+    source_revision="$(git rev-parse --verify "$source_ref^{commit}")"
+    source_tree="$(git rev-parse --verify "$source_ref^{tree}")"
+    test "$source_tree" = "$workspace_tree" || {
+      echo "source revision tree does not match the clean workspace: $source_ref" >&2
+      exit 1
+    }
+  else
+    workspace_revision="$(hp2r_resolve_build_revision)"
+    source_revision="$workspace_revision"
+    source_tree="$workspace_tree"
+  fi
+  hp2r_require_durable_source_revision "$source_revision"
 fi
 [[ "$source_revision" =~ ^[0-9a-f]{40}$ ]]
 [[ "$source_tree" =~ ^[0-9a-f]{40}$ ]]
-hp2r_require_durable_source_revision "$source_revision"
 for source_path in \
   kernel/Kbuild \
   kernel/hyperpixel2r_kms_main.c \
@@ -100,10 +116,14 @@ for source_path in \
   scripts/common.sh \
   scripts/prepare-kbuild-host-tools.sh
 do
-  git cat-file -e "$source_revision:$source_path" || {
-    echo "build source is not present in checked revision: $source_path" >&2
-    exit 1
-  }
+  if "$release_source"; then
+    hp2r_release_source_file "$release_source_root" "$source_path" >/dev/null
+  else
+    git cat-file -e "$source_revision:$source_path" || {
+      echo "build source is not present in checked revision: $source_path" >&2
+      exit 1
+    }
+  fi
 done
 
 target_parent="$repo_root/dist/kernel-target"
@@ -199,12 +219,21 @@ cleanup() {
 }
 trap cleanup EXIT
 mkdir "$build_dir/source"
-git archive --format=tar "$source_revision" -- \
-  kernel \
-  overlays \
-  scripts/common.sh \
-  scripts/prepare-kbuild-host-tools.sh |
-  tar -x -C "$build_dir/source"
+if "$release_source"; then
+  mkdir -p "$build_dir/source/scripts"
+  cp -R "$release_source_root/kernel" "$release_source_root/overlays" "$build_dir/source/"
+  cp \
+    "$release_source_root/scripts/common.sh" \
+    "$release_source_root/scripts/prepare-kbuild-host-tools.sh" \
+    "$build_dir/source/scripts/"
+else
+  git archive --format=tar "$source_revision" -- \
+    kernel \
+    overlays \
+    scripts/common.sh \
+    scripts/prepare-kbuild-host-tools.sh |
+    tar -x -C "$build_dir/source"
+fi
 cp -R "$build_dir/source/kernel" "$build_dir/kernel"
 mkdir "$build_dir/out"
 
@@ -292,23 +321,27 @@ hp2r_docker run --rm \
     "$applied_dtb_file"
 
 hp2r_validate_overlay "$build_dir/out/$overlay_file" "$image"
-hp2r_require_clean_source
-test "$(git rev-parse 'HEAD^{tree}')" = "$workspace_tree" || {
-  echo "source tree changed while building artifacts" >&2
-  exit 1
-}
-if test -n "$source_ref"; then
-  test "$(git rev-parse --verify "$source_ref^{tree}")" = "$source_tree" || {
-    echo "explicit source revision changed while building artifacts" >&2
-    exit 1
-  }
+if "$release_source"; then
+  hp2r_validate_release_source "$release_source_root" "$source_revision" "$source_tree"
 else
-  test "$(hp2r_resolve_build_revision)" = "$workspace_revision" || {
-    echo "source revision changed while building artifacts" >&2
+  hp2r_require_clean_source
+  test "$(git rev-parse 'HEAD^{tree}')" = "$workspace_tree" || {
+    echo "source tree changed while building artifacts" >&2
     exit 1
   }
+  if test -n "$source_ref"; then
+    test "$(git rev-parse --verify "$source_ref^{tree}")" = "$source_tree" || {
+      echo "explicit source revision changed while building artifacts" >&2
+      exit 1
+    }
+  else
+    test "$(hp2r_resolve_build_revision)" = "$workspace_revision" || {
+      echo "source revision changed while building artifacts" >&2
+      exit 1
+    }
+  fi
+  hp2r_require_durable_source_revision "$source_revision"
 fi
-hp2r_require_durable_source_revision "$source_revision"
 
 mkdir -p "$output_parent"
 output_parent="$(cd "$output_parent" && pwd -P)"

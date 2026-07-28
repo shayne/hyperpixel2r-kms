@@ -155,6 +155,13 @@ if ! grep -Fq \
   exit 1
 fi
 
+for script in scripts/build-driver.sh scripts/check-artifacts.sh scripts/stage-tryboot.sh; do
+  if ! grep -Fq 'hp2r_release_source_available' "$repo_root/$script"; then
+    printf '%s must consume a verified extracted release source without Git\n' "$script" >&2
+    exit 1
+  fi
+done
+
 current_source="$(git -C "$repo_root" rev-parse --verify 'origin/main^{commit}')"
 bash -eu -c \
   'cd "$1"; source "$2"; hp2r_require_durable_source_revision "$3"' \

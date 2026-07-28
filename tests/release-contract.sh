@@ -413,7 +413,7 @@ test "$(git -C "$fixture" rev-parse 'v0.1.0-rc.4^{}')" = "$checked_out_source"
 
 archive_tar="$temporary_dir/source.tar"
 zstd -q -d -c "$first_output/hyperpixel2r-kms-source.tar.zst" > "$archive_tar"
-python3 - "$archive_tar" <<'PY'
+python3 - "$archive_tar" "$source_revision" "$source_tree" <<'PY'
 import pathlib
 import tarfile
 import sys
@@ -431,7 +431,30 @@ with tarfile.open(sys.argv[1]) as archive:
         assert member.gid == 0
     names = {member.name for member in members}
     assert any(name.endswith("/scripts/package-release.sh") for name in names)
+    identity_name = next(
+        name for name in names if name.endswith("/release/source-identity.txt")
+    )
+    identity = archive.extractfile(identity_name).read().decode()
+    assert identity == (
+        "schema_version\t1\n"
+        "repository\thttps://github.com/shayne/hyperpixel2r-kms\n"
+        f"source_revision\t{sys.argv[2]}\n"
+        f"source_tree\t{sys.argv[3]}\n"
+    )
 PY
+
+release_source_root="$temporary_dir/release-source"
+mkdir "$release_source_root"
+tar -C "$release_source_root" -xf "$archive_tar"
+release_source="$(find "$release_source_root" -mindepth 1 -maxdepth 1 -type d)"
+test -n "$release_source"
+test ! -e "$release_source/.git"
+bash -eu -c \
+  'source "$1/scripts/common.sh"; hp2r_validate_release_source "$1" "$2" "$3"' \
+  bash \
+  "$release_source" \
+  "$source_revision" \
+  "$source_tree"
 
 if test -d "$repo_root/dist/artifacts" &&
   git -C "$repo_root" diff-index --quiet HEAD --; then

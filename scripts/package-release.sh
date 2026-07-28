@@ -100,7 +100,7 @@ trap cleanup EXIT
 
 source_tar="$work/hyperpixel2r-kms-source.tar"
 source_archive="$stage/hyperpixel2r-kms-source.tar.zst"
-python3 - "$repo_root" "$source_revision" "$source_epoch" "$source_tar" "hyperpixel2r-kms-${driver_version}" <<'PY'
+python3 - "$repo_root" "$source_revision" "$source_tree" "$source_epoch" "$source_tar" "hyperpixel2r-kms-${driver_version}" <<'PY'
 import io
 import os
 import pathlib
@@ -108,7 +108,7 @@ import subprocess
 import sys
 import tarfile
 
-root, revision, epoch, output, prefix = sys.argv[1:]
+root, revision, tree, epoch, output, prefix = sys.argv[1:]
 epoch = int(epoch)
 
 def checked_path(path: str) -> pathlib.PurePosixPath:
@@ -149,6 +149,19 @@ with tarfile.open(output, "w", format=tarfile.PAX_FORMAT) as archive:
         info.uname = info.gname = ""
         info.mtime = epoch
         archive.addfile(info)
+    identity = (
+        "schema_version\t1\n"
+        "repository\thttps://github.com/shayne/hyperpixel2r-kms\n"
+        f"source_revision\t{revision}\n"
+        f"source_tree\t{tree}\n"
+    ).encode()
+    info = tarfile.TarInfo(f"{prefix}/release/source-identity.txt")
+    info.size = len(identity)
+    info.mode = 0o644
+    info.uid = info.gid = 0
+    info.uname = info.gname = ""
+    info.mtime = epoch
+    archive.addfile(info, io.BytesIO(identity))
     for path, mode, object_id in files:
         contents = subprocess.check_output(["git", "-C", root, "cat-file", "blob", object_id])
         info = tarfile.TarInfo(f"{prefix}/{path}")

@@ -8,6 +8,7 @@ set -euo pipefail
 repo_root="${HP2R_FIXTURE_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
 release='6.18.34+rpt-rpi-v8'
 source_revision="$(awk -F '\t' '$1 == "source_revision" { print $2 }' "$repo_root/dist/artifacts/$release/manifest.txt")"
+source_tree="$(awk -F '\t' '$1 == "source_tree" { print $2 }' "$repo_root/dist/artifacts/$release/manifest.txt")"
 overlay_file="hyperpixel2r-kms-${source_revision:0:12}.dtbo"
 fixture="$(mktemp -d)"
 chmod 0755 "$fixture"
@@ -508,6 +509,9 @@ SCRIPT
   install -m 0755 /dev/stdin "$bin/git" <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
+if test "${HP2R_FIXTURE_REJECT_GIT:-}" = 1; then
+  exit 99
+fi
 manifest="$HP2R_FIXTURE_REPO_ROOT/dist/artifacts/$HP2R_FIXTURE_RELEASE/manifest.txt"
 revision="$(awk -F '\t' '$1 == "source_revision" {print $2}' "$manifest")"
 tree="$(awk -F '\t' '$1 == "source_tree" {print $2}' "$manifest")"
@@ -540,6 +544,7 @@ run_stage() {
     HP2R_FIXTURE_RELEASE="$fixture_release" \
     HP2R_FIXTURE_LOG="$log" \
     HP2R_FIXTURE_REPO_ROOT="$repo_root" \
+    HP2R_RELEASE_SOURCE_ROOT="${HP2R_RELEASE_SOURCE_ROOT:-}" \
     HP2R_TARGET=pi@fixture \
     "$repo_root/scripts/stage-tryboot.sh" \
       --artifact-dir "$repo_root/dist/artifacts/$release" \
@@ -740,6 +745,28 @@ else
   fail 'baseline stage did not run in the disposable target'
 fi
 test "$(cat "$root/tmp/remote-uid")" = 65534 || fail 'fake target did not execute as an unprivileged SSH user'
+
+# A verified release-source extraction has no ambient Git repository.  Its
+# exact source identity and regular kernel leaves must be sufficient for
+# staging the committed DKMS source.
+release_source_root="$fixture/release-source"
+mkdir -p "$release_source_root/release"
+cp -a "$repo_root/kernel" "$release_source_root/kernel"
+{
+  printf 'schema_version\t1\n'
+  printf 'repository\thttps://github.com/shayne/hyperpixel2r-kms\n'
+  printf 'source_revision\t%s\n' "$source_revision"
+  printf 'source_tree\t%s\n' "$source_tree"
+} > "$release_source_root/release/source-identity.txt"
+new_target
+export HP2R_FIXTURE_REJECT_GIT=1 HP2R_RELEASE_SOURCE_ROOT="$release_source_root"
+if ! run_stage >/dev/null; then
+  fail 'stage could not consume the verified extracted release source without Git'
+fi
+unset HP2R_FIXTURE_REJECT_GIT HP2R_RELEASE_SOURCE_ROOT
+run_controller rollback-boot.sh >/dev/null
+new_target
+run_stage >/dev/null
 
 # State is a strict private schema and the DKMS source must be materialized by
 # the controller's committed-revision read, rather than copied from kernel/.

@@ -111,20 +111,26 @@ target_dir="$(hp2r_release_path "$target_parent" "$release")"
 target_file="$target_dir/target.txt"
 hp2r_validate_artifact_provenance "$manifest" "$target_file" "$artifact_dir"
 
-hp2r_require_clean_source
 source_revision="$(hp2r_manifest_value "$manifest" source_revision)"
 source_tree="$(hp2r_manifest_value "$manifest" source_tree)"
-git cat-file -e "$source_revision^{commit}" || {
-  echo "artifact source revision is not available in this repository" >&2
-  exit 1
-}
-hp2r_require_durable_source_revision "$source_revision"
-checked_source_tree="$(git rev-parse 'HEAD^{tree}')"
-revision_tree="$(git rev-parse "$source_revision^{tree}")"
-test "$revision_tree" = "$checked_source_tree" || {
-  echo "artifact source revision tree does not match checked source" >&2
-  exit 1
-}
+release_source_root="${HP2R_RELEASE_SOURCE_ROOT:-$repo_root}"
+if hp2r_release_source_available "$release_source_root"; then
+  hp2r_validate_release_source "$release_source_root" "$source_revision" "$source_tree"
+  checked_source_tree="$source_tree"
+else
+  hp2r_require_clean_source
+  git cat-file -e "$source_revision^{commit}" || {
+    echo "artifact source revision is not available in this repository" >&2
+    exit 1
+  }
+  hp2r_require_durable_source_revision "$source_revision"
+  checked_source_tree="$(git rev-parse 'HEAD^{tree}')"
+  revision_tree="$(git rev-parse "$source_revision^{tree}")"
+  test "$revision_tree" = "$checked_source_tree" || {
+    echo "artifact source revision tree does not match checked source" >&2
+    exit 1
+  }
+fi
 hp2r_validate_source_identity \
   "$source_revision" \
   "$source_tree" \

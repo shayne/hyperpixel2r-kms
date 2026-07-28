@@ -52,8 +52,13 @@ module_file="$(hp2r_manifest_value "$manifest" module_file)"
 overlay_file="$(hp2r_manifest_value "$manifest" overlay_file)"
 applied_dtb_file="$(hp2r_manifest_value "$manifest" applied_dtb_file)"
 [[ "$source_revision" =~ ^[0-9a-f]{40}$ && "$source_tree" =~ ^[0-9a-f]{40}$ ]]
-git cat-file -e "$source_revision^{commit}" || { echo 'artifact source revision is unavailable locally' >&2; exit 1; }
-test "$(git rev-parse "$source_revision^{tree}")" = "$source_tree" || { echo 'artifact source tree does not match its revision' >&2; exit 1; }
+release_source_root="${HP2R_RELEASE_SOURCE_ROOT:-$repo_root}"
+if hp2r_release_source_available "$release_source_root"; then
+  hp2r_validate_release_source "$release_source_root" "$source_revision" "$source_tree"
+else
+  git cat-file -e "$source_revision^{commit}" || { echo 'artifact source revision is unavailable locally' >&2; exit 1; }
+  test "$(git rev-parse "$source_revision^{tree}")" = "$source_tree" || { echo 'artifact source tree does not match its revision' >&2; exit 1; }
+fi
 test "$driver_version" = "$HP2R_DRIVER_VERSION"
 test "$(hp2r_manifest_value "$manifest" kernel_release)" = "$release"
 
@@ -83,7 +88,12 @@ install -m 0644 "$repo_root/scripts/lifecycle-remote.sh" "$payload/lifecycle-rem
 # tree before reusing or registering it with DKMS.
 kernel_sources=(Kbuild Makefile dkms.conf hyperpixel2r_kms_main.c hyperpixel2r_kms_gpio.c hyperpixel2r_kms_gpio.h hyperpixel2r_kms_protocol.c hyperpixel2r_kms_protocol.h)
 for name in "${kernel_sources[@]}"; do
-  git show "$source_revision:kernel/$name" > "$payload/dkms-source/$name"
+  if hp2r_release_source_available "$release_source_root"; then
+    source_file="$(hp2r_release_source_file "$release_source_root" "kernel/$name")"
+    cp "$source_file" "$payload/dkms-source/$name"
+  else
+    git show "$source_revision:kernel/$name" > "$payload/dkms-source/$name"
+  fi
   test -s "$payload/dkms-source/$name" || { echo "committed kernel source is empty: $name" >&2; exit 1; }
   chmod 0644 "$payload/dkms-source/$name"
 done

@@ -310,6 +310,71 @@ hp2r_validate_exact_manifest_rows() {
   done
 }
 
+hp2r_validate_release_source() {
+  local root="$1"
+  local expected_revision="$2"
+  local expected_tree="$3"
+  local identity="$root/release/source-identity.txt"
+
+  [[ "$expected_revision" =~ ^[0-9a-f]{40}$ ]] &&
+    [[ "$expected_tree" =~ ^[0-9a-f]{40}$ ]] || {
+      echo "expected release source identity is invalid" >&2
+      return 1
+    }
+  hp2r_validate_exact_manifest_rows \
+    "$identity" \
+    schema_version \
+    repository \
+    source_revision \
+    source_tree || return
+  test "$(hp2r_manifest_value "$identity" schema_version)" = 1 &&
+    test "$(hp2r_manifest_value "$identity" repository)" = \
+      https://github.com/shayne/hyperpixel2r-kms &&
+    test "$(hp2r_manifest_value "$identity" source_revision)" = \
+      "$expected_revision" &&
+    test "$(hp2r_manifest_value "$identity" source_tree)" = \
+      "$expected_tree" || {
+      echo "release source identity does not match the locked release" >&2
+      return 1
+    }
+}
+
+hp2r_release_source_available() {
+  local root="$1"
+  local identity="$root/release/source-identity.txt"
+
+  test ! -L "$identity" && test -f "$identity"
+}
+
+hp2r_release_source_file() {
+  local root="$1"
+  local relative="$2"
+  local current="$root"
+  local part
+  local -a parts
+
+  case "$relative" in
+    ""|/*|*\\*|*[$'\t\r\n']*|*".."*)
+      echo "unsafe release source path: $relative" >&2
+      return 1
+      ;;
+  esac
+  IFS=/ read -r -a parts <<< "$relative"
+  for part in "${parts[@]}"; do
+    test -n "$part" || return 1
+    current="$current/$part"
+    test ! -L "$current" || {
+      echo "release source path contains a symlink: $relative" >&2
+      return 1
+    }
+  done
+  test -f "$current" || {
+    echo "release source file is missing: $relative" >&2
+    return 1
+  }
+  printf '%s\n' "$current"
+}
+
 hp2r_validate_artifact_manifest() {
   local manifest="$1"
   local required_keys=(
