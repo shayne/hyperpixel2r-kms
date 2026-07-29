@@ -39,7 +39,7 @@ jobs:
       - name: Install stable verification tools
         run: sudo apt-get update && sudo apt-get install --yes zstd
 
-      - name: Confirm promotion inputs and absent stable tag
+      - name: Confirm promotion inputs
         env:
           TAG: ${{ inputs.tag }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
@@ -54,15 +54,6 @@ jobs:
           ./scripts/validate-stable-release-tag.sh "$TAG" "$SOURCE_COMMIT"
           [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$ASSET_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]]
-          remote_tag_refs="$(
-            git ls-remote --tags origin \
-              "refs/tags/$TAG" "refs/tags/$TAG^{}"
-          )"
-          if test -n "$remote_tag_refs"; then
-            echo "stable tag already exists: $TAG" >&2
-            exit 1
-          fi
-
       - name: Download the exact accepted stable draft
         env:
           GH_TOKEN: ${{ github.token }}
@@ -153,38 +144,12 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           python3 scripts/stable_release.py publish \
             --record "$RUNNER_TEMP/stable-verification.json" \
-            --downloads "$RUNNER_TEMP/stable-accepted"
+            --downloads "$RUNNER_TEMP/stable-accepted" \
+            --result "$RUNNER_TEMP/stable-publication.json"
 
       - name: Verify published stable identity
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag }}
-          SOURCE_COMMIT: ${{ inputs.source_commit }}
-          RELEASE_ID: ${{ inputs.release_id }}
-          ASSET_FINGERPRINT: ${{ inputs.asset_fingerprint }}
         run: |
-          remote_tag_refs="$(
-            git ls-remote --tags origin \
-              "refs/tags/$TAG" "refs/tags/$TAG^{}"
-          )"
-          test "$(printf '%s\n' "$remote_tag_refs" | sed '/^$/d' | wc -l | tr -d ' ')" = 2
-          tag_object="$(
-            printf '%s\n' "$remote_tag_refs" |
-              awk -v wanted="refs/tags/$TAG" '$2 == wanted { print $1 }'
-          )"
-          tag_commit="$(
-            printf '%s\n' "$remote_tag_refs" |
-              awk -v wanted="refs/tags/$TAG^{}" '$2 == wanted { print $1 }'
-          )"
-          [[ "$tag_object" =~ ^[0-9a-f]{40}$ ]]
-          test "$tag_object" != "$SOURCE_COMMIT"
-          test "$tag_commit" = "$SOURCE_COMMIT"
-          gh api "repos/shayne/hyperpixel2r-kms/releases/$RELEASE_ID" |
-            jq -e --arg tag "$TAG" --arg commit "$SOURCE_COMMIT" '
-              .tag_name == $tag and
-              .target_commitish == $commit and
-              .draft == false and
-              .prerelease == false
-            ' >/dev/null
-          test "$(jq -r .asset_fingerprint "$RUNNER_TEMP/stable-verification.json")" = \
-            "$ASSET_FINGERPRINT"
+          python3 scripts/stable_release.py confirm \
+            --record "$RUNNER_TEMP/stable-publication.json"

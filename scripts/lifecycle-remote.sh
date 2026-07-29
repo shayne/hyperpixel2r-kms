@@ -49,12 +49,16 @@ state_keys=(
   "${state_keys_v2[@]}"
   prior_dkms_inventory_sha256
 )
-accepted_keys=(
+accepted_keys_v1=(
   schema_version driver_version source_revision kernel_release manifest_sha256
   module_file module_sha256 overlay_file overlay_sha256 normal_config_sha256
   stock_config_sha256
 )
-accepted_transition_keys=(
+accepted_keys=(
+  "${accepted_keys_v1[@]}"
+  prior_dkms_inventory_sha256
+)
+accepted_transition_keys_v2=(
   schema_version kind phase prior_driver_version prior_source_revision prior_kernel_release
   candidate_driver_version candidate_source_revision candidate_kernel_release
   candidate_manifest_sha256 candidate_module_file candidate_module_sha256
@@ -62,10 +66,18 @@ accepted_transition_keys=(
   prior_normal_config_sha256 candidate_normal_config_sha256 tryboot_config_sha256
   prior_dkms_status
 )
-accepted_uninstall_keys=(
+accepted_transition_keys=(
+  "${accepted_transition_keys_v2[@]}"
+  candidate_dkms_inventory_sha256
+)
+accepted_uninstall_keys_v2=(
   schema_version phase driver_version source_revision kernel_release
   manifest_sha256 module_file module_sha256 overlay_file overlay_sha256
   stock_config_sha256 dkms_status prior_dkms_status artifact_prior
+)
+accepted_uninstall_keys=(
+  "${accepted_uninstall_keys_v2[@]}"
+  prior_dkms_inventory_sha256
 )
 
 die() {
@@ -1758,7 +1770,7 @@ stage() {
   published_state=true
   fixture_interrupt_after candidate-tryboot-state-published
   if "$accepted_bound"; then
-    set_accepted_transition_phase prepared staged ||
+    set_accepted_transition_phase prepared staged '' "$prior_dkms_inventory_sha" ||
       die 'failed to mark accepted candidate staged'
     fixture_interrupt_after candidate-staged-published
   fi
@@ -2027,11 +2039,18 @@ accepted_value() {
 }
 
 assert_accepted_state() {
-  local key count version revision release manifest artifact prior=false
+  local key count schema version revision release manifest artifact marker prior=false
+  local -a keys=()
 
   assert_owned_regular "$accepted_state" 600 || return
   assert_owned_regular "$accepted_stock_config" 600 || return
-  test "$(sudo awk 'END { print NR }' "$accepted_state")" = "${#accepted_keys[@]}" || {
+  schema="$(accepted_value schema_version)"
+  case "$schema" in
+    1) keys=("${accepted_keys_v1[@]}") ;;
+    2) keys=("${accepted_keys[@]}") ;;
+    *) return 1 ;;
+  esac
+  test "$(sudo awk 'END { print NR }' "$accepted_state")" = "${#keys[@]}" || {
     echo 'accepted state has the wrong cardinality' >&2
     return 1
   }
@@ -2039,14 +2058,13 @@ assert_accepted_state() {
     echo 'accepted state has malformed rows' >&2
     return 1
   }
-  for key in "${accepted_keys[@]}"; do
+  for key in "${keys[@]}"; do
     count="$(sudo awk -F= -v wanted="$key" '$1 == wanted { count++ } END { print count + 0 }' "$accepted_state")"
     test "$count" = 1 || {
       printf 'accepted state key is missing or duplicated: %s\n' "$key" >&2
       return 1
     }
   done
-  test "$(accepted_value schema_version)" = 1 || return
   version="$(accepted_value driver_version)"
   revision="$(accepted_value source_revision)"
   release="$(accepted_value kernel_release)"
@@ -2064,6 +2082,19 @@ assert_accepted_state() {
   elif sudo test -e "$artifact/prior-tryboot.txt"; then prior=true
   fi
   assert_artifact_tree "$artifact" "$prior" || return
+  marker="$artifact/dkms-prior-state"
+  if test "$schema" = 1; then
+    test "$(sudo sed -n '1p' "$marker")" != schema_version=2 || {
+      echo 'legacy accepted state cannot authorize a full DKMS inventory' >&2
+      return 1
+    }
+  else
+    [[ "$(accepted_value prior_dkms_inventory_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
+    test "$(sha "$marker")" = "$(accepted_value prior_dkms_inventory_sha256)" || {
+      echo 'accepted DKMS inventory checksum differs' >&2
+      return 1
+    }
+  fi
   manifest="$artifact/manifest.txt"
   test "$(sha "$manifest")" = "$(accepted_value manifest_sha256)" || return
   test "$(manifest_value "$manifest" driver_version)" = "$version" || return
@@ -2108,7 +2139,8 @@ record_accepted() {
   local revision="$2"
   local release="$3"
   local artifact manifest module_file module_sha overlay_file overlay_sha module_path overlay_path
-  local workspace normal_snapshot stock receipt manifest_sha normal_sha stock_sha receipt_sha prior=false
+  local workspace normal_snapshot stock receipt manifest_sha normal_sha stock_sha receipt_sha
+  local prior_dkms_inventory_sha prior=false
 
   [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'unsafe accepted driver version'
   [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || die 'unsafe accepted source revision'
@@ -2130,6 +2162,8 @@ record_accepted() {
   elif sudo test -e "$artifact/prior-tryboot.txt"; then prior=true
   fi
   assert_artifact_tree "$artifact" "$prior" || die 'accepted artifact tree is unsafe'
+  prior_dkms_inventory_sha="$(sha "$artifact/dkms-prior-state")" ||
+    die 'accepted DKMS inventory is unsafe'
   manifest="$artifact/manifest.txt"
   test "$(manifest_value "$manifest" driver_version)" = "$version" || die 'accepted version differs'
   test "$(manifest_value "$manifest" source_revision)" = "$revision" || die 'accepted revision differs'
@@ -2157,7 +2191,7 @@ record_accepted() {
   normal_sha="$(sha "$normal_snapshot")"
   stock_sha="$(sha "$stock")"
   {
-    printf 'schema_version=1\n'
+    printf 'schema_version=2\n'
     printf 'driver_version=%s\n' "$version"
     printf 'source_revision=%s\n' "$revision"
     printf 'kernel_release=%s\n' "$release"
@@ -2168,6 +2202,7 @@ record_accepted() {
     printf 'overlay_sha256=%s\n' "$overlay_sha"
     printf 'normal_config_sha256=%s\n' "$normal_sha"
     printf 'stock_config_sha256=%s\n' "$stock_sha"
+    printf 'prior_dkms_inventory_sha256=%s\n' "$prior_dkms_inventory_sha"
   } | sudo tee "$receipt" >/dev/null || die 'failed to write accepted state'
   assert_owned_regular "$receipt" 600 || die 'accepted state allocation drifted'
   receipt_sha="$(sha "$receipt")"
@@ -2202,13 +2237,20 @@ publish_accepted_transition() {
   local candidate_snapshot="${11}"
   local prior_status="${12}"
   local workspace="${13}"
-  local prior_sha candidate_sha state_tmp state_sha
+  local prior_sha candidate_sha state_tmp state_sha candidate_artifact candidate_inventory_sha
 
   prior_sha="$(sha "$prior_snapshot")" || return
   candidate_sha="$(sha "$candidate_snapshot")" || return
+  if test "$kind" = new; then
+    candidate_inventory_sha=pending
+  else
+    candidate_artifact="$artifact_root/$candidate_version/$candidate_revision/$candidate_release"
+    assert_dkms_inventory_file "$candidate_artifact/dkms-prior-state" || return
+    candidate_inventory_sha="$(sha "$candidate_artifact/dkms-prior-state")" || return
+  fi
   state_tmp="$(private_file "$workspace" accepted-transition)" || return
   {
-    printf 'schema_version=2\n'
+    printf 'schema_version=3\n'
     printf 'kind=%s\n' "$kind"
     printf 'phase=prepared\n'
     printf 'prior_driver_version=%s\n' "$(accepted_value driver_version)"
@@ -2226,6 +2268,7 @@ publish_accepted_transition() {
     printf 'candidate_normal_config_sha256=%s\n' "$candidate_sha"
     printf 'tryboot_config_sha256=%s\n' "$candidate_sha"
     printf 'prior_dkms_status=%s\n' "$prior_status"
+    printf 'candidate_dkms_inventory_sha256=%s\n' "$candidate_inventory_sha"
   } | sudo tee "$state_tmp" >/dev/null || return
   state_sha="$(sha "$state_tmp")" || return
   atomic_copy "$prior_snapshot" "$accepted_transition_prior_config" 600 "$prior_sha" || return
@@ -2238,17 +2281,40 @@ set_accepted_transition_phase() {
   local expected="$1"
   local next="$2"
   local normal_sha="${3:-}"
-  local workspace state_tmp state_sha
+  local inventory_sha="${4:-}"
+  local schema workspace state_tmp state_sha
 
   assert_accepted_transition || return
   test "$(accepted_transition_value phase)" = "$expected" || return
+  schema="$(accepted_transition_value schema_version)"
+  if test "$schema" = 3 &&
+    test "$(accepted_transition_value candidate_dkms_inventory_sha256)" = pending; then
+    test "$expected:$next" = prepared:staged || return
+    [[ "$inventory_sha" =~ ^[0-9a-f]{64}$ ]] || return
+  elif test -n "$inventory_sha"; then
+    test "$schema" = 3 || return
+    test "$(accepted_transition_value candidate_dkms_inventory_sha256)" = \
+      "$inventory_sha" || return
+    inventory_sha=''
+  fi
   workspace="$(new_transaction_workspace)" || return
   accepted_workspace="$workspace"
   state_tmp="$(private_file "$workspace" accepted-transition)" || return
-  if test -n "$normal_sha"; then
+  if test -n "$normal_sha" && test -n "$inventory_sha"; then
     sudo sed \
       -e "s/^phase=$expected\$/phase=$next/" \
       -e "s/^candidate_normal_config_sha256=.*/candidate_normal_config_sha256=$normal_sha/" \
+      -e "s/^candidate_dkms_inventory_sha256=pending\$/candidate_dkms_inventory_sha256=$inventory_sha/" \
+      "$accepted_transition" | sudo tee "$state_tmp" >/dev/null || return
+  elif test -n "$normal_sha"; then
+    sudo sed \
+      -e "s/^phase=$expected\$/phase=$next/" \
+      -e "s/^candidate_normal_config_sha256=.*/candidate_normal_config_sha256=$normal_sha/" \
+      "$accepted_transition" | sudo tee "$state_tmp" >/dev/null || return
+  elif test -n "$inventory_sha"; then
+    sudo sed \
+      -e "s/^phase=$expected\$/phase=$next/" \
+      -e "s/^candidate_dkms_inventory_sha256=pending\$/candidate_dkms_inventory_sha256=$inventory_sha/" \
       "$accepted_transition" | sudo tee "$state_tmp" >/dev/null || return
   else
     sudo sed -e "s/^phase=$expected\$/phase=$next/" \
@@ -2339,17 +2405,24 @@ mark_committed_accepted() {
 }
 
 assert_accepted_transition() {
-  local key count kind phase prior_version prior_revision prior_release candidate_version candidate_revision candidate_release
+  local key count schema kind phase prior_version prior_revision prior_release
+  local candidate_version candidate_revision candidate_release candidate_artifact marker
+  local -a keys=()
 
   assert_owned_regular "$accepted_transition" 600 || return
   assert_owned_regular "$accepted_transition_prior_config" 600 || return
-  test "$(sudo awk 'END { print NR }' "$accepted_transition")" = "${#accepted_transition_keys[@]}" || return
+  schema="$(accepted_transition_value schema_version)"
+  case "$schema" in
+    2) keys=("${accepted_transition_keys_v2[@]}") ;;
+    3) keys=("${accepted_transition_keys[@]}") ;;
+    *) return 1 ;;
+  esac
+  test "$(sudo awk 'END { print NR }' "$accepted_transition")" = "${#keys[@]}" || return
   sudo awk -F= 'NF != 2 || $1 == "" || $2 == "" { exit 1 }' "$accepted_transition" || return
-  for key in "${accepted_transition_keys[@]}"; do
+  for key in "${keys[@]}"; do
     count="$(sudo awk -F= -v wanted="$key" '$1 == wanted { count++ } END { print count + 0 }' "$accepted_transition")"
     test "$count" = 1 || return
   done
-  test "$(accepted_transition_value schema_version)" = 2 || return
   kind="$(accepted_transition_value kind)"
   case "$kind" in new|retained) ;; *) return 1;; esac
   phase="$(accepted_transition_value phase)"
@@ -2375,6 +2448,22 @@ assert_accepted_transition() {
   test "$(accepted_transition_value candidate_overlay_file)" = \
     "hyperpixel2r-kms-${candidate_revision:0:12}.dtbo" || return
   case "$(accepted_transition_value prior_dkms_status)" in absent|unregistered|registered) ;; *) return 1;; esac
+  candidate_artifact="$artifact_root/$candidate_version/$candidate_revision/$candidate_release"
+  marker="$candidate_artifact/dkms-prior-state"
+  if test "$schema" = 3; then
+    if test "$(accepted_transition_value candidate_dkms_inventory_sha256)" = pending; then
+      test "$kind:$phase" = new:prepared || return
+    else
+      [[ "$(accepted_transition_value candidate_dkms_inventory_sha256)" =~ ^[0-9a-f]{64}$ ]] ||
+        return
+      assert_dkms_inventory_file "$marker" || return
+      test "$(sha "$marker")" = \
+        "$(accepted_transition_value candidate_dkms_inventory_sha256)" || return
+    fi
+  elif sudo test -e "$marker" || sudo test -L "$marker"; then
+    assert_dkms_inventory_file "$marker" || return
+    test "$(sudo sed -n '1p' "$marker")" != schema_version=2 || return
+  fi
   test "$(sha "$accepted_transition_prior_config")" = \
     "$(accepted_transition_value prior_normal_config_sha256)" || return
   if test "$phase" = receipt_published; then
@@ -2732,6 +2821,7 @@ finalize_accepted() {
   local version revision release artifact manifest module_file module_sha overlay_file overlay_sha
   local workspace receipt receipt_sha normal_sha prior_version prior_revision prior_release
   local prior_artifact prior_manifest prior_overlay prior_overlay_sha prior_overlay_path stock_sha phase
+  local candidate_inventory_sha
 
   if ! sudo test -e "$accepted_transition" && ! sudo test -L "$accepted_transition"; then
     assert_accepted_state || die 'accepted driver receipt is missing or unsafe'
@@ -2755,6 +2845,16 @@ finalize_accepted() {
   revision="$(accepted_transition_value candidate_source_revision)"
   release="$(accepted_transition_value candidate_kernel_release)"
   artifact="$artifact_root/$version/$revision/$release"
+  candidate_inventory_sha="$(sha "$artifact/dkms-prior-state")" ||
+    die 'candidate DKMS inventory is unsafe'
+  if test "$(accepted_transition_value schema_version)" = 3; then
+    test "$candidate_inventory_sha" = \
+      "$(accepted_transition_value candidate_dkms_inventory_sha256)" ||
+      die 'candidate DKMS inventory differs from accepted transition'
+  else
+    test "$(sudo sed -n '1p' "$artifact/dkms-prior-state")" != schema_version=2 ||
+      die 'legacy accepted transition cannot authorize a full DKMS inventory'
+  fi
   manifest="$artifact/manifest.txt"
   module_file="$(manifest_value "$manifest" module_file)"
   module_sha="$(manifest_value "$manifest" module_sha256)"
@@ -2805,7 +2905,7 @@ finalize_accepted() {
       accepted_workspace="$workspace"
       receipt="$(private_file "$workspace" accepted-state)" || die 'failed to allocate accepted receipt'
       {
-        printf 'schema_version=1\n'
+        printf 'schema_version=2\n'
         printf 'driver_version=%s\n' "$version"
         printf 'source_revision=%s\n' "$revision"
         printf 'kernel_release=%s\n' "$release"
@@ -2816,6 +2916,7 @@ finalize_accepted() {
         printf 'overlay_sha256=%s\n' "$overlay_sha"
         printf 'normal_config_sha256=%s\n' "$normal_sha"
         printf 'stock_config_sha256=%s\n' "$stock_sha"
+        printf 'prior_dkms_inventory_sha256=%s\n' "$candidate_inventory_sha"
       } | sudo tee "$receipt" >/dev/null || die 'failed to write accepted receipt'
       receipt_sha="$(sha "$receipt")"
       atomic_copy "$receipt" "$accepted_state" 600 "$receipt_sha" ||
@@ -2853,18 +2954,24 @@ accepted_uninstall_value() {
 }
 
 assert_accepted_uninstall() {
-  local key count phase version revision release artifact detached prior
+  local key count schema phase version revision release artifact detached prior marker
+  local -a keys=()
 
   assert_owned_regular "$accepted_uninstall" 600 || return
   assert_owned_regular "$accepted_uninstall_stock" 600 || return
+  schema="$(accepted_uninstall_value schema_version)"
+  case "$schema" in
+    2) keys=("${accepted_uninstall_keys_v2[@]}") ;;
+    3) keys=("${accepted_uninstall_keys[@]}") ;;
+    *) return 1 ;;
+  esac
   test "$(sudo awk 'END { print NR }' "$accepted_uninstall")" = \
-    "${#accepted_uninstall_keys[@]}" || return
+    "${#keys[@]}" || return
   sudo awk -F= 'NF != 2 || $1 == "" || $2 == "" { exit 1 }' "$accepted_uninstall" || return
-  for key in "${accepted_uninstall_keys[@]}"; do
+  for key in "${keys[@]}"; do
     count="$(sudo awk -F= -v wanted="$key" '$1 == wanted { count++ } END { print count + 0 }' "$accepted_uninstall")"
     test "$count" = 1 || return
   done
-  test "$(accepted_uninstall_value schema_version)" = 2 || return
   phase="$(accepted_uninstall_value phase)"
   case "$phase" in prepared|boot_restored|dkms_restored|module_removed|overlay_removed|artifact_detached|receipt_removed|artifact_removed) ;; *) return 1;; esac
   version="$(accepted_uninstall_value driver_version)"
@@ -2894,12 +3001,24 @@ assert_accepted_uninstall() {
     assert_artifact_tree "$artifact" "$prior" || return
     test "$(sha "$artifact/manifest.txt")" = \
       "$(accepted_uninstall_value manifest_sha256)" || return
+    marker="$artifact/dkms-prior-state"
   elif sudo test -e "$detached" || sudo test -L "$detached"; then
     assert_artifact_tree "$detached" "$prior" || return
     test "$(sha "$detached/manifest.txt")" = \
       "$(accepted_uninstall_value manifest_sha256)" || return
+    marker="$detached/dkms-prior-state"
   else
     case "$phase" in receipt_removed|artifact_removed) ;; *) return 1;; esac
+  fi
+  if test "$schema" = 3; then
+    [[ "$(accepted_uninstall_value prior_dkms_inventory_sha256)" =~ ^[0-9a-f]{64}$ ]] ||
+      return
+    if test -n "${marker:-}"; then
+      test "$(sha "$marker")" = \
+        "$(accepted_uninstall_value prior_dkms_inventory_sha256)" || return
+    fi
+  elif test -n "${marker:-}"; then
+    test "$(sudo sed -n '1p' "$marker")" != schema_version=2 || return
   fi
 }
 
@@ -2922,15 +3041,22 @@ set_accepted_uninstall_phase() {
 }
 
 assert_accepted_receipt_matches_uninstall() {
-  local key count
+  local key count schema journal_schema
+  local -a keys=()
   assert_owned_regular "$accepted_state" 600 || return
   assert_owned_regular "$accepted_stock_config" 600 || return
-  test "$(sudo awk 'END { print NR }' "$accepted_state")" = "${#accepted_keys[@]}" || return
-  for key in "${accepted_keys[@]}"; do
+  schema="$(accepted_value schema_version)"
+  journal_schema="$(accepted_uninstall_value schema_version)"
+  case "$schema:$journal_schema" in
+    1:2) keys=("${accepted_keys_v1[@]}") ;;
+    2:3) keys=("${accepted_keys[@]}") ;;
+    *) return 1 ;;
+  esac
+  test "$(sudo awk 'END { print NR }' "$accepted_state")" = "${#keys[@]}" || return
+  for key in "${keys[@]}"; do
     count="$(sudo awk -F= -v wanted="$key" '$1 == wanted { count++ } END { print count + 0 }' "$accepted_state")"
     test "$count" = 1 || return
   done
-  test "$(accepted_value schema_version)" = 1 || return
   test "$(accepted_value driver_version)" = "$(accepted_uninstall_value driver_version)" || return
   test "$(accepted_value source_revision)" = "$(accepted_uninstall_value source_revision)" || return
   test "$(accepted_value kernel_release)" = "$(accepted_uninstall_value kernel_release)" || return
@@ -2939,6 +3065,10 @@ assert_accepted_receipt_matches_uninstall() {
   test "$(accepted_value module_sha256)" = "$(accepted_uninstall_value module_sha256)" || return
   test "$(accepted_value overlay_file)" = "$(accepted_uninstall_value overlay_file)" || return
   test "$(accepted_value overlay_sha256)" = "$(accepted_uninstall_value overlay_sha256)" || return
+  if test "$schema" = 2; then
+    test "$(accepted_value prior_dkms_inventory_sha256)" = \
+      "$(accepted_uninstall_value prior_dkms_inventory_sha256)" || return
+  fi
   test "$(sha "$accepted_stock_config")" = "$(accepted_value stock_config_sha256)" || return
 }
 
@@ -2948,7 +3078,8 @@ uninstall_accepted() {
   local release="$3"
   local artifact detached manifest module_file module_sha overlay_file overlay_sha
   local module_path overlay_path workspace current_snapshot boot_candidate boot_sha prior=false
-  local prior_dkms_state_value dkms_dir dkms_status state_tmp state_sha phase current_status
+  local prior_dkms_state_value prior_dkms_inventory_sha receipt_schema journal_schema
+  local dkms_dir dkms_status state_tmp state_sha phase current_status
 
   test ! -L "$state_file" && test ! -e "$state_file" ||
     die 'refusing accepted uninstall while a tryboot transaction is active'
@@ -2976,6 +3107,20 @@ uninstall_accepted() {
     test "$(sha "$overlay_path")" = "$overlay_sha" || die 'accepted overlay drifted'
     prior_dkms_state_value="$(dkms_prior_state "$artifact")" ||
       die 'accepted prior DKMS state is unsafe'
+    receipt_schema="$(accepted_value schema_version)"
+    if test "$receipt_schema" = 2; then
+      prior_dkms_inventory_sha="$(accepted_value prior_dkms_inventory_sha256)"
+      test "$(sha "$artifact/dkms-prior-state")" = "$prior_dkms_inventory_sha" ||
+        die 'accepted DKMS inventory differs from its receipt'
+      journal_schema=3
+    else
+      test "$receipt_schema" = 1 ||
+        die 'accepted receipt schema is unsafe'
+      test "$(sudo sed -n '1p' "$artifact/dkms-prior-state")" != schema_version=2 ||
+        die 'legacy accepted receipt cannot authorize a full DKMS inventory'
+      prior_dkms_inventory_sha=''
+      journal_schema=2
+    fi
     dkms_dir="$dkms_root/hyperpixel2r-kms-$version"
     assert_source_tree_shape "$dkms_dir" "$artifact/dkms-source" ||
       die 'active DKMS source is not the accepted source'
@@ -3001,7 +3146,7 @@ uninstall_accepted() {
     state_tmp="$(private_file "$workspace" accepted-uninstall)" ||
       die 'failed to allocate accepted uninstall journal'
     {
-      printf 'schema_version=2\n'
+      printf 'schema_version=%s\n' "$journal_schema"
       printf 'phase=prepared\n'
       printf 'driver_version=%s\n' "$version"
       printf 'source_revision=%s\n' "$revision"
@@ -3015,6 +3160,9 @@ uninstall_accepted() {
       printf 'dkms_status=%s\n' "$dkms_status"
       printf 'prior_dkms_status=%s\n' "$prior_dkms_state_value"
       printf 'artifact_prior=%s\n' "$prior"
+      if test "$journal_schema" = 3; then
+        printf 'prior_dkms_inventory_sha256=%s\n' "$prior_dkms_inventory_sha"
+      fi
     } | sudo tee "$state_tmp" >/dev/null || die 'failed to write accepted uninstall journal'
     state_sha="$(sha "$state_tmp")"
     atomic_copy "$state_tmp" "$accepted_uninstall" 600 "$state_sha" ||

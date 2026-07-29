@@ -27,6 +27,11 @@ assert "O_EXCL" in download_source
 
 TAG = "v0.1.0"
 COMMIT = "a" * 40
+TAGGER_TIMESTAMP = 1700000000
+TAG_OBJECT = "18ff621bb3910f37f0fc4a6b3603981b8966068a"
+assert (
+    stable_release.canonical_tag_object(TAG, COMMIT, TAGGER_TIMESTAMP) == TAG_OBJECT
+)
 
 
 class FakeBackend:
@@ -41,15 +46,25 @@ class FakeBackend:
         self.next_asset_id = 100
         self.push_mode = "success"
         self.patch_mode = "success"
+        self.delete_mode = "success"
+        self.discard_mode = "success"
+        self.fail_next_remote_read = False
         self.partial_asset: int | None = None
         self.extra_asset: int | None = None
         self.download_limits: list[tuple[int, int]] = []
 
     def remote_tag(self, tag: str) -> dict | None:
+        if self.fail_next_remote_read:
+            self.fail_next_remote_read = False
+            raise OSError("fixture remote tag reread failed")
         value = self.remote_tags.get(tag)
         if value is None:
             return None
         return {"object": value[0], "commit": value[1]}
+
+    def commit_timestamp(self, commit: str) -> int:
+        assert commit == COMMIT
+        return TAGGER_TIMESTAMP
 
     def create_release(self, tag: str, commit: str) -> dict:
         if self.release is not None:
@@ -124,10 +139,13 @@ class FakeBackend:
             raise
         return {"size": written, "digest": f"sha256:{digest.hexdigest()}"}
 
-    def create_local_annotated_tag(self, tag: str, commit: str) -> str:
-        if tag in self.local_tags:
-            raise stable_release.ContractError("tag already exists")
-        tag_object = "d" * 40
+    def ensure_local_annotated_tag(
+        self, tag: str, commit: str, tagger_timestamp: int, tag_object: str
+    ) -> str:
+        assert tagger_timestamp == TAGGER_TIMESTAMP
+        existing = self.local_tags.get(tag)
+        if existing is not None and existing != (tag_object, commit):
+            raise stable_release.ContractError("different local tag already exists")
         self.local_tags[tag] = (tag_object, commit)
         return tag_object
 
@@ -163,16 +181,29 @@ class FakeBackend:
             self.remote_tags[TAG] = ("e" * 40, "f" * 40)
         return copy.deepcopy(self.release)
 
-    def delete_annotated_tag(self, tag: str, commit: str, tag_object: str) -> None:
+    def delete_remote_annotated_tag(
+        self, tag: str, commit: str, tag_object: str
+    ) -> None:
         if self.remote_tags.get(tag) != (tag_object, commit):
             raise stable_release.ContractError("refusing to delete a different tag")
+        if self.delete_mode == "before-success":
+            raise OSError("fixture delete failed before success")
+        if self.delete_mode == "drift":
+            self.remote_tags[tag] = ("e" * 40, commit)
+            raise OSError("fixture delete raced a different tag")
         del self.remote_tags[tag]
-        if self.local_tags.get(tag) != (tag_object, commit):
-            raise stable_release.ContractError("refusing to delete a different local tag")
-        del self.local_tags[tag]
+        if self.delete_mode == "after-success":
+            raise OSError("fixture delete response was lost")
+        if self.delete_mode == "reread-error":
+            self.fail_next_remote_read = True
 
     def discard_local_tag(self, tag: str, commit: str, tag_object: str) -> None:
-        if self.local_tags.get(tag) != (tag_object, commit):
+        if self.discard_mode == "error":
+            raise OSError("fixture local cleanup failed")
+        existing = self.local_tags.get(tag)
+        if existing is None:
+            return
+        if existing != (tag_object, commit):
             raise stable_release.ContractError("refusing to discard a different local tag")
         del self.local_tags[tag]
 
@@ -226,13 +257,23 @@ with tempfile.TemporaryDirectory(prefix="hp2r-stable-release.") as temporary:
         stable_release.REQUIRED_ASSETS
     )
     uploads_before_promotion = backend.upload_count
-    stable_release.publish_verified_draft(backend, verified, downloads)
-    assert backend.remote_tag(TAG) == {"object": "d" * 40, "commit": COMMIT}
+    published = stable_release.publish_verified_draft(backend, verified, downloads)
+    assert published["schema_version"] == 2
+    assert published["tag_object"] == TAG_OBJECT
+    assert published["tagger_timestamp"] == TAGGER_TIMESTAMP
+    assert backend.remote_tag(TAG) == {"object": TAG_OBJECT, "commit": COMMIT}
     assert backend.upload_count == uploads_before_promotion
     assert backend.build_count == 0
     assert backend.patch_payloads == [{"draft": False, "prerelease": False}]
     assert backend.release and backend.release["draft"] is False
     assert backend.release["prerelease"] is False
+    stable_release.confirm_published(backend, published)
+    backend.remote_tags[TAG] = ("e" * 40, COMMIT)
+    expect_rejected(
+        "published tag object replaced without changing peeled commit",
+        lambda: stable_release.confirm_published(backend, published),
+    )
+    backend.remote_tags[TAG] = (TAG_OBJECT, COMMIT)
 
     def staged_backend() -> tuple[FakeBackend, dict]:
         candidate = FakeBackend()
@@ -254,6 +295,24 @@ with tempfile.TemporaryDirectory(prefix="hp2r-stable-release.") as temporary:
             root / "tag-exists",
         ),
     )
+
+    # The one canonical tag object is a durable retry state even on a fresh
+    # runner.  Any other annotated object peeling to the same commit is not.
+    candidate, candidate_record = staged_backend()
+    candidate.remote_tags[TAG] = (TAG_OBJECT, COMMIT)
+    canonical_resume_downloads = root / "canonical-tag-resume"
+    canonical_resume = stable_release.verify_stable_draft(
+        candidate,
+        TAG,
+        COMMIT,
+        candidate_record["release_id"],
+        candidate_record["asset_fingerprint"],
+        canonical_resume_downloads,
+    )
+    stable_release.publish_verified_draft(
+        candidate, canonical_resume, canonical_resume_downloads
+    )
+    assert candidate.release and candidate.release["draft"] is False
 
     for label, mutation in (
         ("missing asset", lambda release: release["assets"].pop()),
@@ -334,6 +393,14 @@ with tempfile.TemporaryDirectory(prefix="hp2r-stable-release.") as temporary:
         )
         return candidate, verified_record, candidate_downloads
 
+    def fresh_runner(candidate: FakeBackend) -> FakeBackend:
+        fresh = FakeBackend()
+        fresh.release = copy.deepcopy(candidate.release)
+        fresh.asset_bytes = copy.deepcopy(candidate.asset_bytes)
+        fresh.remote_tags = copy.deepcopy(candidate.remote_tags)
+        fresh.next_asset_id = candidate.next_asset_id
+        return fresh
+
     # A local tag must never substitute for the exact remote public ref.
     candidate, verified, candidate_downloads = accepted_candidate("local-mask")
     candidate.local_tags[TAG] = ("d" * 40, COMMIT)
@@ -360,14 +427,14 @@ with tempfile.TemporaryDirectory(prefix="hp2r-stable-release.") as temporary:
     assert TAG not in candidate.local_tags
     candidate.push_mode = "success"
     stable_release.publish_verified_draft(candidate, verified, candidate_downloads)
-    assert candidate.remote_tag(TAG) == {"object": "d" * 40, "commit": COMMIT}
+    assert candidate.remote_tag(TAG) == {"object": TAG_OBJECT, "commit": COMMIT}
 
     # A lost successful push response is reconciled against the exact remote
     # annotated object and proceeds to publication.
     candidate, verified, candidate_downloads = accepted_candidate("push-after")
     candidate.push_mode = "after-success"
     stable_release.publish_verified_draft(candidate, verified, candidate_downloads)
-    assert candidate.remote_tag(TAG) == {"object": "d" * 40, "commit": COMMIT}
+    assert candidate.remote_tag(TAG) == {"object": TAG_OBJECT, "commit": COMMIT}
     assert candidate.release and candidate.release["draft"] is False
 
     # A different remote ref is ambiguous.  Do not delete or overwrite it.
@@ -395,7 +462,7 @@ with tempfile.TemporaryDirectory(prefix="hp2r-stable-release.") as temporary:
                 candidate, verified, candidate_downloads
             )
             assert candidate.remote_tag(TAG) == {
-                "object": "d" * 40,
+                "object": TAG_OBJECT,
                 "commit": COMMIT,
             }
             assert candidate.release and candidate.release["draft"] is False
@@ -416,9 +483,95 @@ with tempfile.TemporaryDirectory(prefix="hp2r-stable-release.") as temporary:
                 candidate, verified, candidate_downloads
             )
             assert candidate.remote_tag(TAG) == {
-                "object": "d" * 40,
+                "object": TAG_OBJECT,
                 "commit": COMMIT,
             }
+
+    # Every compensating-delete outcome is reconciled by exact tag object,
+    # peeled commit, and release state.  Each safe partial outcome can resume.
+    for delete_mode in (
+        "before-success",
+        "after-success",
+        "reread-error",
+        "local-cleanup-error",
+    ):
+        candidate, verified, candidate_downloads = accepted_candidate(
+            f"delete-{delete_mode}"
+        )
+        candidate.patch_mode = "before-error"
+        if delete_mode == "local-cleanup-error":
+            candidate.discard_mode = "error"
+        else:
+            candidate.delete_mode = delete_mode
+        expect_rejected(
+            f"compensating delete outcome: {delete_mode}",
+            lambda candidate=candidate, verified=verified, directory=candidate_downloads: (
+                stable_release.publish_verified_draft(candidate, verified, directory)
+            ),
+        )
+        if delete_mode == "before-success":
+            assert candidate.remote_tag(TAG) == {
+                "object": TAG_OBJECT,
+                "commit": COMMIT,
+            }
+        else:
+            assert candidate.remote_tag(TAG) is None
+        candidate.patch_mode = "success"
+        candidate.delete_mode = "success"
+        candidate.discard_mode = "success"
+        resumed = stable_release.publish_verified_draft(
+            candidate, verified, candidate_downloads
+        )
+        assert resumed["tag_object"] == TAG_OBJECT
+        assert candidate.remote_tag(TAG) == {
+            "object": TAG_OBJECT,
+            "commit": COMMIT,
+        }
+        assert candidate.release and candidate.release["draft"] is False
+
+    # The exact remote tag plus exact draft can resume without runner-local
+    # state.  The fresh runner downloads and verifies the immutable assets.
+    candidate, verified, candidate_downloads = accepted_candidate("fresh-runner-first")
+    candidate.patch_mode = "before-error"
+    candidate.delete_mode = "before-success"
+    expect_rejected(
+        "compensation retained exact canonical tag",
+        lambda: stable_release.publish_verified_draft(
+            candidate, verified, candidate_downloads
+        ),
+    )
+    fresh = fresh_runner(candidate)
+    fresh_downloads = root / "fresh-runner-downloads"
+    fresh_verified = stable_release.verify_stable_draft(
+        fresh,
+        TAG,
+        COMMIT,
+        verified["release_id"],
+        verified["asset_fingerprint"],
+        fresh_downloads,
+    )
+    stable_release.publish_verified_draft(fresh, fresh_verified, fresh_downloads)
+    assert fresh.remote_tag(TAG) == {"object": TAG_OBJECT, "commit": COMMIT}
+    assert fresh.release and fresh.release["draft"] is False
+
+    # A compensating delete that races a different annotated object must never
+    # remove or adopt it, even when it peels to the accepted commit.
+    candidate, verified, candidate_downloads = accepted_candidate("delete-drift")
+    candidate.patch_mode = "before-error"
+    candidate.delete_mode = "drift"
+    expect_rejected(
+        "compensating delete raced remote object drift",
+        lambda: stable_release.publish_verified_draft(
+            candidate, verified, candidate_downloads
+        ),
+    )
+    assert candidate.remote_tag(TAG) == {"object": "e" * 40, "commit": COMMIT}
+    expect_rejected(
+        "retry refused drifted same-commit tag object",
+        lambda: stable_release.publish_verified_draft(
+            candidate, verified, candidate_downloads
+        ),
+    )
 
     for mode in ("drift", "tag-race"):
         candidate, verified, candidate_downloads = accepted_candidate(f"ambiguous-{mode}")

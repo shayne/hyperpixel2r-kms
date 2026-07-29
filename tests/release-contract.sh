@@ -186,7 +186,7 @@ stable_promote = root / ".github" / "workflows" / "stable-promote.yml"
 if stable_promote.is_file():
     workflow = stable_promote.read_text()
     ordered_steps = [
-        "Confirm promotion inputs and absent stable tag",
+        "Confirm promotion inputs",
         "Download the exact accepted stable draft",
         "Verify stable checksums, schema, SPDX, and source identity",
         "Verify stable draft attestations",
@@ -202,15 +202,14 @@ if stable_promote.is_file():
         "asset_fingerprint:",
         "scripts/stable_release.py verify",
         "scripts/stable_release.py publish",
+        "scripts/stable_release.py confirm",
+        '--result "$RUNNER_TEMP/stable-publication.json"',
         "--signer-repo shayne/hyperpixel2r-kms",
         "--signer-workflow shayne/hyperpixel2r-kms/.github/workflows/stable-draft.yml",
         "--source-ref refs/heads/main",
         "--deny-self-hosted-runners",
         'git config user.name "github-actions[bot]"',
         'git config user.email "41898282+github-actions[bot]@users.noreply.github.com"',
-        'git ls-remote --tags origin',
-        '"refs/tags/$TAG^{}"',
-        'test "$tag_commit" = "$SOURCE_COMMIT"',
     ):
         if required not in workflow:
             failures.append(f"stable promotion workflow contract is missing: {required}")

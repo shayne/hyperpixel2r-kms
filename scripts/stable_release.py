@@ -30,6 +30,8 @@ MAX_TOTAL_SIZE = 1024 * 1024 * 1024
 STABLE_TAG = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 DIGEST = re.compile(r"^sha256:([0-9a-f]{64})$")
+TAGGER_NAME = "github-actions[bot]"
+TAGGER_EMAIL = "41898282+github-actions[bot]@users.noreply.github.com"
 
 
 class ContractError(RuntimeError):
@@ -45,6 +47,30 @@ def _require_identity(tag: str, commit: str) -> None:
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _require_tagger_timestamp(timestamp: int) -> None:
+    if isinstance(timestamp, bool) or not isinstance(timestamp, int) or timestamp <= 0:
+        raise ContractError("source commit timestamp is invalid")
+
+
+def _canonical_tag_payload(tag: str, commit: str, timestamp: int) -> bytes:
+    _require_identity(tag, commit)
+    _require_tagger_timestamp(timestamp)
+    return (
+        f"object {commit}\n"
+        "type commit\n"
+        f"tag {tag}\n"
+        f"tagger {TAGGER_NAME} <{TAGGER_EMAIL}> {timestamp} +0000\n"
+        "\n"
+        f"HyperPixel 2 Round KMS driver {tag}\n"
+    ).encode()
+
+
+def canonical_tag_object(tag: str, commit: str, timestamp: int) -> str:
+    payload = _canonical_tag_payload(tag, commit, timestamp)
+    header = f"tag {len(payload)}\0".encode()
+    return hashlib.sha1(header + payload).hexdigest()
 
 
 def _file_identity(path: pathlib.Path) -> dict[str, Any]:
@@ -198,9 +224,11 @@ def _record(
     release_id: int,
     inventory: list[dict[str, Any]],
     fingerprint: str,
+    tag_object: str | None = None,
+    tagger_timestamp: int | None = None,
 ) -> dict[str, Any]:
-    return {
-        "schema_version": 1,
+    record: dict[str, Any] = {
+        "schema_version": 1 if tag_object is None else 2,
         "repository": REPOSITORY,
         "tag": tag,
         "commit": commit,
@@ -208,10 +236,17 @@ def _record(
         "asset_fingerprint": fingerprint,
         "assets": inventory,
     }
+    if tag_object is not None:
+        if tagger_timestamp is None:
+            raise ContractError("publication record tagger timestamp is missing")
+        record["tag_object"] = tag_object
+        record["tagger_timestamp"] = tagger_timestamp
+    return record
 
 
 def _validate_record(record: dict[str, Any]) -> None:
-    if record.get("schema_version") != 1 or record.get("repository") != REPOSITORY:
+    schema = record.get("schema_version")
+    if schema not in (1, 2) or record.get("repository") != REPOSITORY:
         raise ContractError("verification record schema or repository differs")
     tag = record.get("tag")
     commit = record.get("commit")
@@ -227,6 +262,19 @@ def _validate_record(record: dict[str, Any]) -> None:
     inventory = record.get("assets")
     if not isinstance(inventory, list) or _asset_fingerprint(inventory) != fingerprint:
         raise ContractError("verification record asset inventory differs")
+    if schema == 1:
+        if "tag_object" in record or "tagger_timestamp" in record:
+            raise ContractError("verification record contains publication identity")
+        return
+    tag_object = record.get("tag_object")
+    tagger_timestamp = record.get("tagger_timestamp")
+    _require_tagger_timestamp(tagger_timestamp)
+    if (
+        not isinstance(tag_object, str)
+        or re.fullmatch(r"[0-9a-f]{40}", tag_object) is None
+        or tag_object != canonical_tag_object(tag, commit, tagger_timestamp)
+    ):
+        raise ContractError("publication record annotated tag object differs")
 
 
 def create_stable_draft(
@@ -280,12 +328,29 @@ def verify_stable_draft(
     downloads: pathlib.Path,
 ) -> dict[str, Any]:
     _require_identity(tag, commit)
-    if backend.remote_tag(tag) is not None:
-        raise ContractError("stable tag already exists")
+    tagger_timestamp = backend.commit_timestamp(commit)
+    _require_tagger_timestamp(tagger_timestamp)
+    expected_tag = {
+        "object": canonical_tag_object(tag, commit, tagger_timestamp),
+        "commit": commit,
+    }
+    remote = backend.remote_tag(tag)
     release = backend.get_release(release_id)
-    inventory, actual = _validate_draft_release(
-        release, tag, commit, release_id, fingerprint
-    )
+    try:
+        inventory, actual = _validate_draft_release(
+            release, tag, commit, release_id, fingerprint
+        )
+        release_state = "draft"
+    except ContractError:
+        inventory = _validate_published_release(
+            release, tag, commit, release_id, fingerprint
+        )
+        actual = fingerprint
+        release_state = "published"
+    if remote is None and release_state != "draft":
+        raise ContractError("published stable release is missing its exact tag")
+    if remote is not None and remote != expected_tag:
+        raise ContractError("stable tag differs from the canonical retry object")
     if downloads.exists() or downloads.is_symlink():
         raise ContractError("stable verification download directory already exists")
     downloads.mkdir(mode=0o700, parents=True)
@@ -315,6 +380,72 @@ def verify_stable_draft(
     return _record(tag, commit, release_id, inventory, actual)
 
 
+def _publication_record(
+    record: dict[str, Any],
+    inventory: list[dict[str, Any]],
+    tag_object: str,
+    tagger_timestamp: int,
+) -> dict[str, Any]:
+    return _record(
+        record["tag"],
+        record["commit"],
+        record["release_id"],
+        inventory,
+        record["asset_fingerprint"],
+        tag_object,
+        tagger_timestamp,
+    )
+
+
+def _release_state(
+    release: dict[str, Any],
+    tag: str,
+    commit: str,
+    release_id: int,
+    fingerprint: str,
+) -> tuple[str, list[dict[str, Any]]]:
+    try:
+        inventory, _ = _validate_draft_release(
+            release, tag, commit, release_id, fingerprint
+        )
+        return "draft", inventory
+    except ContractError as draft_error:
+        try:
+            return (
+                "published",
+                _validate_published_release(
+                    release, tag, commit, release_id, fingerprint
+                ),
+            )
+        except ContractError as published_error:
+            raise ContractError(
+                "stable release identity, assets, or state differs"
+            ) from published_error
+
+
+def confirm_published(backend: Any, publication_record: dict[str, Any]) -> dict[str, Any]:
+    _validate_record(publication_record)
+    if publication_record["schema_version"] != 2:
+        raise ContractError("published confirmation requires a schema-2 record")
+    tag = publication_record["tag"]
+    commit = publication_record["commit"]
+    expected_tag = {
+        "object": publication_record["tag_object"],
+        "commit": commit,
+    }
+    if backend.remote_tag(tag) != expected_tag:
+        raise ContractError("published stable tag object or peeled commit differs")
+    release = backend.get_release(publication_record["release_id"])
+    _validate_published_release(
+        release,
+        tag,
+        commit,
+        publication_record["release_id"],
+        publication_record["asset_fingerprint"],
+    )
+    return publication_record
+
+
 def publish_verified_draft(
     backend: Any, verification_record: dict[str, Any], downloads: pathlib.Path
 ) -> dict[str, Any]:
@@ -323,42 +454,63 @@ def publish_verified_draft(
     commit = verification_record["commit"]
     release_id = verification_record["release_id"]
     fingerprint = verification_record["asset_fingerprint"]
-    if backend.remote_tag(tag) is not None:
-        raise ContractError("stable tag already exists")
+    tagger_timestamp = backend.commit_timestamp(commit)
+    _require_tagger_timestamp(tagger_timestamp)
+    tag_object = canonical_tag_object(tag, commit, tagger_timestamp)
+    expected_tag = {"object": tag_object, "commit": commit}
+    remote = backend.remote_tag(tag)
     release = backend.get_release(release_id)
-    inventory, actual = _validate_draft_release(
+    state, inventory = _release_state(
         release, tag, commit, release_id, fingerprint
     )
     _validate_local_assets(downloads, inventory)
-    if actual != fingerprint:
-        raise ContractError("accepted stable draft fingerprint differs")
+    if remote == expected_tag and state == "published":
+        return _publication_record(
+            verification_record, inventory, tag_object, tagger_timestamp
+        )
+    if remote is None and state == "draft":
+        push_required = True
+    elif remote == expected_tag and state == "draft":
+        push_required = False
+    else:
+        raise ContractError(
+            "stable tag and release are not an exact resumable publication state"
+        )
 
-    tag_object = backend.create_local_annotated_tag(tag, commit)
-    if not isinstance(tag_object, str) or not re.fullmatch(r"[0-9a-f]{40}", tag_object):
-        raise ContractError("local annotated tag object identity is invalid")
-    push_error: Exception | None = None
-    try:
-        backend.push_annotated_tag(tag, tag_object)
-    except Exception as error:
-        push_error = error
-    try:
-        remote_after_push = backend.remote_tag(tag)
-    except Exception as remote_error:
-        raise ContractError(
-            "remote tag state is ambiguous after push; no compensation was attempted"
-        ) from remote_error
-    expected_tag = {"object": tag_object, "commit": commit}
-    if remote_after_push is None:
-        backend.discard_local_tag(tag, commit, tag_object)
-        raise ContractError(
-            "stable tag push did not publish a remote ref; the exact local tag "
-            "was removed for retry"
-        ) from push_error
-    if remote_after_push != expected_tag:
-        raise ContractError(
-            "remote stable tag differs after push; no destructive compensation "
-            "was attempted"
-        ) from push_error
+    local_object = backend.ensure_local_annotated_tag(
+        tag, commit, tagger_timestamp, tag_object
+    )
+    if local_object != tag_object:
+        raise ContractError("local canonical annotated tag object differs")
+    if push_required:
+        push_error: Exception | None = None
+        try:
+            backend.push_annotated_tag(tag, tag_object)
+        except Exception as error:
+            push_error = error
+        try:
+            remote_after_push = backend.remote_tag(tag)
+        except Exception as remote_error:
+            raise ContractError(
+                "remote tag state is ambiguous after push; no compensation was attempted"
+            ) from remote_error
+        if remote_after_push is None:
+            cleanup_error: Exception | None = None
+            try:
+                backend.discard_local_tag(tag, commit, tag_object)
+            except Exception as error:
+                cleanup_error = error
+            message = "stable tag push did not publish a remote ref"
+            if cleanup_error is None:
+                message += "; the exact local tag was removed for retry"
+            else:
+                message += "; exact local cleanup failed but remains retryable"
+            raise ContractError(message) from (cleanup_error or push_error)
+        if remote_after_push != expected_tag:
+            raise ContractError(
+                "remote stable tag differs after push; no destructive compensation "
+                "was attempted"
+            ) from push_error
 
     publish_error: Exception | None = None
     try:
@@ -373,46 +525,87 @@ def publish_verified_draft(
             "remote release or tag state is ambiguous after publication; "
             "no destructive compensation was attempted"
         ) from reread_error
-    if observed_tag == expected_tag:
-        try:
-            published_inventory = _validate_published_release(
-                observed_release, tag, commit, release_id, fingerprint
-            )
-            return _record(
-                tag, commit, release_id, published_inventory, fingerprint
-            )
-        except ContractError:
-            pass
-        try:
-            _validate_draft_release(
-                observed_release, tag, commit, release_id, fingerprint
-            )
-        except ContractError:
-            raise ContractError(
-                "release state drifted after publication; the exact tag was left "
-                "in place and no destructive compensation was attempted"
-            ) from publish_error
-        backend.delete_annotated_tag(tag, commit, tag_object)
-        try:
-            compensated_tag = backend.remote_tag(tag)
-            compensated_release = backend.get_release(release_id)
-        except Exception as compensation_error:
-            raise ContractError(
-                "publication compensation could not be proven"
-            ) from compensation_error
-        if compensated_tag is not None:
-            raise ContractError("compensating stable tag deletion did not hold")
-        _validate_draft_release(
-            compensated_release, tag, commit, release_id, fingerprint
-        )
+    if observed_tag != expected_tag:
         raise ContractError(
-            "stable publication did not complete; the exact created tag was "
-            "removed for retry"
+            "remote stable tag drifted after publication; no destructive "
+            "compensation was attempted"
         ) from publish_error
+    observed_state, observed_inventory = _release_state(
+        observed_release, tag, commit, release_id, fingerprint
+    )
+    if observed_state == "published":
+        return _publication_record(
+            verification_record,
+            observed_inventory,
+            tag_object,
+            tagger_timestamp,
+        )
+
+    delete_error: Exception | None = None
+    try:
+        backend.delete_remote_annotated_tag(tag, commit, tag_object)
+    except Exception as error:
+        delete_error = error
+    try:
+        compensated_tag = backend.remote_tag(tag)
+        compensated_release = backend.get_release(release_id)
+    except Exception as reread_error:
+        raise ContractError(
+            "publication compensation is ambiguous after remote delete"
+        ) from reread_error
+    compensated_state, compensated_inventory = _release_state(
+        compensated_release, tag, commit, release_id, fingerprint
+    )
+    if compensated_tag == expected_tag and compensated_state == "published":
+        return _publication_record(
+            verification_record,
+            compensated_inventory,
+            tag_object,
+            tagger_timestamp,
+        )
+    if compensated_state != "draft":
+        raise ContractError(
+            "release state drifted during publication compensation"
+        ) from (delete_error or publish_error)
+    if compensated_tag == expected_tag:
+        raise ContractError(
+            "stable publication remains an exact tagged draft and can be retried"
+        ) from (delete_error or publish_error)
+    if compensated_tag is not None:
+        raise ContractError(
+            "remote stable tag drifted during publication compensation"
+        ) from (delete_error or publish_error)
+
+    cleanup_error: Exception | None = None
+    try:
+        backend.discard_local_tag(tag, commit, tag_object)
+    except Exception as error:
+        cleanup_error = error
+    try:
+        final_tag = backend.remote_tag(tag)
+        final_release = backend.get_release(release_id)
+    except Exception as reread_error:
+        raise ContractError(
+            "publication compensation is ambiguous after exact local cleanup"
+        ) from reread_error
+    final_state, final_inventory = _release_state(
+        final_release, tag, commit, release_id, fingerprint
+    )
+    if final_tag == expected_tag and final_state == "published":
+        return _publication_record(
+            verification_record,
+            final_inventory,
+            tag_object,
+            tagger_timestamp,
+        )
+    if final_tag is None and final_state == "draft":
+        message = "stable publication was compensated to an exact retryable draft"
+        if cleanup_error is not None:
+            message += "; exact local cleanup failed"
+        raise ContractError(message) from (cleanup_error or delete_error or publish_error)
     raise ContractError(
-        "remote stable tag drifted after publication; no destructive "
-        "compensation was attempted"
-    ) from publish_error
+        "stable tag or release drifted after publication compensation"
+    ) from (cleanup_error or delete_error or publish_error)
 
 
 class GhGitBackend:
@@ -465,6 +658,20 @@ class GhGitBackend:
             if re.fullmatch(r"[0-9a-f]{40}", value) is None:
                 raise ContractError("remote stable tag object identity is invalid")
         return {"object": values[tag_ref], "commit": values[peeled_ref]}
+
+    def commit_timestamp(self, commit: str) -> int:
+        result = subprocess.run(
+            [self.git, "show", "--no-patch", "--format=%ct", commit],
+            text=True,
+            stdout=subprocess.PIPE,
+            check=True,
+        )
+        value = result.stdout.strip()
+        if re.fullmatch(r"[1-9][0-9]*", value) is None:
+            raise ContractError("source commit timestamp is invalid")
+        timestamp = int(value)
+        _require_tagger_timestamp(timestamp)
+        return timestamp
 
     def create_release(self, tag: str, commit: str) -> dict[str, Any]:
         payload = json.dumps(
@@ -550,27 +757,54 @@ class GhGitBackend:
                 os.close(descriptor)
         return _file_identity(destination)
 
-    def create_local_annotated_tag(self, tag: str, commit: str) -> str:
-        subprocess.run(
-            [
-                self.git,
-                "tag",
-                "--annotate",
-                tag,
-                commit,
-                "--message",
-                f"HyperPixel 2 Round KMS driver {tag}",
-            ],
-            check=True,
+    def ensure_local_annotated_tag(
+        self, tag: str, commit: str, tagger_timestamp: int, tag_object: str
+    ) -> str:
+        payload = _canonical_tag_payload(tag, commit, tagger_timestamp)
+        if canonical_tag_object(tag, commit, tagger_timestamp) != tag_object:
+            raise ContractError("requested canonical tag object differs")
+        reference = f"refs/tags/{tag}"
+        existing = subprocess.run(
+            [self.git, "rev-parse", "--verify", "--quiet", reference],
+            text=True,
+            stdout=subprocess.PIPE,
+            check=False,
         )
-        tag_object = subprocess.run(
-            [self.git, "rev-parse", f"refs/tags/{tag}"],
+        if existing.returncode not in (0, 1):
+            raise subprocess.CalledProcessError(existing.returncode, existing.args)
+        if existing.returncode == 1:
+            created = subprocess.run(
+                [self.git, "mktag"],
+                input=payload,
+                stdout=subprocess.PIPE,
+                check=True,
+            ).stdout.decode().strip()
+            if created != tag_object:
+                raise ContractError("git created a different canonical tag object")
+            subprocess.run(
+                [
+                    self.git,
+                    "update-ref",
+                    reference,
+                    tag_object,
+                    "0" * 40,
+                ],
+                check=True,
+            )
+        local_object = subprocess.run(
+            [self.git, "rev-parse", reference],
             text=True,
             stdout=subprocess.PIPE,
             check=True,
         ).stdout.strip()
-        if re.fullmatch(r"[0-9a-f]{40}", tag_object) is None:
-            raise ContractError("local annotated tag object identity is invalid")
+        local_commit = subprocess.run(
+            [self.git, "rev-parse", f"{reference}^{{}}"],
+            text=True,
+            stdout=subprocess.PIPE,
+            check=True,
+        ).stdout.strip()
+        if local_object != tag_object or local_commit != commit:
+            raise ContractError("different local stable tag already exists")
         return tag_object
 
     def push_annotated_tag(self, tag: str, tag_object: str) -> None:
@@ -587,23 +821,9 @@ class GhGitBackend:
             check=True,
         )
 
-    def delete_annotated_tag(
+    def delete_remote_annotated_tag(
         self, tag: str, commit: str, tag_object: str
     ) -> None:
-        local_object = subprocess.run(
-            [self.git, "rev-parse", f"refs/tags/{tag}"],
-            text=True,
-            stdout=subprocess.PIPE,
-            check=True,
-        ).stdout.strip()
-        local_commit = subprocess.run(
-            [self.git, "rev-parse", f"refs/tags/{tag}^{{}}"],
-            text=True,
-            stdout=subprocess.PIPE,
-            check=True,
-        ).stdout.strip()
-        if local_object != tag_object or local_commit != commit:
-            raise ContractError("refusing to delete a different local stable tag")
         remote = self.remote_tag(tag)
         if remote != {"object": tag_object, "commit": commit}:
             raise ContractError("refusing to delete a different remote stable tag")
@@ -611,32 +831,38 @@ class GhGitBackend:
             [
                 self.git,
                 "push",
-                f"--force-with-lease=refs/tags/{tag}:{local_object}",
+                f"--force-with-lease=refs/tags/{tag}:{tag_object}",
                 "origin",
                 f":refs/tags/{tag}",
             ],
             check=True,
         )
-        subprocess.run([self.git, "tag", "--delete", tag], check=True)
 
     def discard_local_tag(self, tag: str, commit: str, tag_object: str) -> None:
-        local_object = subprocess.run(
-            [self.git, "rev-parse", f"refs/tags/{tag}"],
+        reference = f"refs/tags/{tag}"
+        local = subprocess.run(
+            [self.git, "rev-parse", "--verify", "--quiet", reference],
             text=True,
             stdout=subprocess.PIPE,
-            check=True,
-        ).stdout.strip()
+            check=False,
+        )
+        if local.returncode not in (0, 1):
+            raise subprocess.CalledProcessError(local.returncode, local.args)
+        if local.returncode == 1:
+            return
+        local_object = local.stdout.strip()
         local_commit = subprocess.run(
-            [self.git, "rev-parse", f"refs/tags/{tag}^{{}}"],
+            [self.git, "rev-parse", f"{reference}^{{}}"],
             text=True,
             stdout=subprocess.PIPE,
             check=True,
         ).stdout.strip()
         if local_object != tag_object or local_commit != commit:
             raise ContractError("refusing to discard a different local stable tag")
-        if self.remote_tag(tag) is not None:
-            raise ContractError("refusing to discard local tag while remote exists")
-        subprocess.run([self.git, "tag", "--delete", tag], check=True)
+        subprocess.run(
+            [self.git, "update-ref", "--delete", reference, tag_object],
+            check=True,
+        )
 
     def publish_release(self, release_id: int) -> dict[str, Any]:
         payload = b'{"draft":false,"prerelease":false}'
@@ -695,6 +921,9 @@ def main() -> int:
     publish = commands.add_parser("publish")
     publish.add_argument("--record", type=pathlib.Path, required=True)
     publish.add_argument("--downloads", type=pathlib.Path, required=True)
+    publish.add_argument("--result", type=pathlib.Path, required=True)
+    confirm = commands.add_parser("confirm")
+    confirm.add_argument("--record", type=pathlib.Path, required=True)
     args = parser.parse_args()
     backend = GhGitBackend()
     if args.command == "draft":
@@ -710,10 +939,13 @@ def main() -> int:
             args.downloads,
         )
         _write_record(args.record, record)
-    else:
+    elif args.command == "publish":
         record = publish_verified_draft(
             backend, _read_record(args.record), args.downloads
         )
+        _write_record(args.result, record)
+    else:
+        record = confirm_published(backend, _read_record(args.record))
     print(json.dumps(record, sort_keys=True, separators=(",", ":")))
     return 0
 

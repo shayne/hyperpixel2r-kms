@@ -1018,12 +1018,15 @@ accepted_receipt="$root/var/lib/hyperpixel2r-kms/accepted-state"
 stock_config="$root/var/lib/hyperpixel2r-kms/accepted-stock-config.txt"
 assert_file "$accepted_receipt"
 assert_file "$stock_config"
-grep -Fxq 'schema_version=1' "$accepted_receipt" ||
+grep -Fxq 'schema_version=2' "$accepted_receipt" ||
   fail 'accepted driver receipt schema is missing'
 if grep -Eq '^[[:space:]]*dtoverlay=.*hyperpixel2r' "$stock_config"; then
   fail 'accepted stock boot candidate retained a driver declaration'
 fi
 accepted_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+accepted_inventory_sha="$(sha256sum "$accepted_artifact/dkms-prior-state" | awk '{ print $1 }')"
+grep -Fxq "prior_dkms_inventory_sha256=$accepted_inventory_sha" "$accepted_receipt" ||
+  fail 'accepted driver receipt did not bind the complete DKMS inventory'
 new_revision='cccccccccccccccccccccccccccccccccccccccc'
 new_overlay='hyperpixel2r-kms-cccccccccccc.dtbo'
 if HP2R_FIXTURE_INTERRUPT_AFTER=accepted-transition-published \
@@ -1035,8 +1038,10 @@ if HP2R_FIXTURE_INTERRUPT_AFTER=accepted-transition-published \
 fi
 new_transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
 assert_file "$new_transition"
-grep -Fxq 'schema_version=2' "$new_transition" ||
-  fail 'new transition did not publish the complete v2 journal'
+grep -Fxq 'schema_version=3' "$new_transition" ||
+  fail 'new transition did not publish the complete v3 journal'
+grep -Fxq 'candidate_dkms_inventory_sha256=pending' "$new_transition" ||
+  fail 'prepared new transition did not record its pending DKMS inventory binding'
 grep -Fxq 'kind=new' "$new_transition" ||
   fail 'new transition journal lost its candidate kind'
 grep -Fxq "candidate_source_revision=$new_revision" "$new_transition" ||
@@ -1191,6 +1196,12 @@ assert_absent "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko"
 assert_absent "$root/boot/firmware/overlays/$retained_overlay"
 assert_absent "$accepted_receipt"
 assert_file "$root/var/lib/hyperpixel2r-kms/accepted-uninstall"
+grep -Fxq 'schema_version=3' "$root/var/lib/hyperpixel2r-kms/accepted-uninstall" ||
+  fail 'accepted uninstall did not publish the checksum-bound v3 journal'
+retained_inventory_sha="$(sha256sum "$retained_artifact.accepted-uninstall/dkms-prior-state" | awk '{ print $1 }')"
+grep -Fxq "prior_dkms_inventory_sha256=$retained_inventory_sha" \
+  "$root/var/lib/hyperpixel2r-kms/accepted-uninstall" ||
+  fail 'accepted uninstall journal lost the complete DKMS inventory binding'
 assert_file "$root/lib/modules/$release/updates/dkms/hyperpixel2r_kms.ko"
 assert_dkms_kernel_state "$release" installed
 grep -Fxq 'hyperpixel2r_kms.ko: updates/dkms/hyperpixel2r_kms.ko' \
@@ -1209,6 +1220,152 @@ if HP2R_FIXTURE_INTERRUPT_AFTER=uninstall-journal-cleared \
 fi
 run_accepted_remote finalize-uninstall-accepted >/dev/null
 assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-uninstall"
+
+# Accepted uninstall must retain the complete per-kernel inventory authority,
+# including replay after the restore happened but its phase write did not.
+exercise_accepted_inventory_uninstall() {
+  local label="$1"
+  local running_state="$2"
+  local future_state="$3"
+  local future_kernel='6.18.35+rpt-rpi-v8'
+  local sums artifact receipt marker marker_sha journal
+
+  new_target
+  prepare_prior_dkms "$label" "$running_state"
+  if test "$future_state" != none; then
+    set_prior_dkms_kernel_state "$future_kernel" "$future_state"
+  fi
+  sums="$fixture/prior-dkms-$label.sums"
+  (cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$sums"
+  run_stage >/dev/null
+  install_live_hardware
+  run_controller commit-boot.sh >/dev/null
+  run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" >/dev/null
+  artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+  receipt="$root/var/lib/hyperpixel2r-kms/accepted-state"
+  marker="$artifact/dkms-prior-state"
+  marker_sha="$(sha256sum "$marker" | awk '{ print $1 }')"
+  grep -Fxq 'schema_version=2' "$receipt" ||
+    fail "$label accepted receipt is not schema 2"
+  grep -Fxq "prior_dkms_inventory_sha256=$marker_sha" "$receipt" ||
+    fail "$label accepted receipt lost its DKMS inventory checksum"
+  if HP2R_FIXTURE_INTERRUPT_AFTER=uninstall-dkms-restored \
+    run_accepted_remote uninstall-accepted \
+      0.1.0 "$source_revision" "$release" >/dev/null 2>&1; then
+    fail "$label accepted uninstall ignored DKMS-restored interruption"
+  fi
+  run_accepted_remote uninstall-accepted \
+    0.1.0 "$source_revision" "$release" >/dev/null
+  journal="$root/var/lib/hyperpixel2r-kms/accepted-uninstall"
+  grep -Fxq 'schema_version=3' "$journal" ||
+    fail "$label accepted uninstall journal is not schema 3"
+  grep -Fxq "prior_dkms_inventory_sha256=$marker_sha" "$journal" ||
+    fail "$label accepted uninstall journal lost its DKMS inventory checksum"
+  case "$running_state" in
+    installed|built) assert_prior_dkms "$sums" "$running_state" ;;
+    *) assert_prior_dkms "$sums" inventory ;;
+  esac
+  if test "$future_state" != none; then
+    assert_dkms_kernel_state "$future_kernel" "$future_state"
+  fi
+  run_accepted_remote finalize-uninstall-accepted >/dev/null
+}
+
+exercise_accepted_inventory_uninstall accepted-two-installed installed installed
+exercise_accepted_inventory_uninstall accepted-mixed-inventory built installed
+exercise_accepted_inventory_uninstall accepted-future-only added installed
+
+# Structurally valid marker drift is still identity drift.  Reject it before
+# publishing an uninstall journal or mutating the accepted boot.
+new_target
+prepare_prior_dkms accepted-inventory-drift installed
+run_stage >/dev/null
+install_live_hardware
+run_controller commit-boot.sh >/dev/null
+run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" >/dev/null
+accepted_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+accepted_receipt="$root/var/lib/hyperpixel2r-kms/accepted-state"
+sed -i 's/^source_state=added$/source_state=unregistered/' \
+  "$accepted_artifact/dkms-prior-state"
+if run_accepted_remote uninstall-accepted \
+  0.1.0 "$source_revision" "$release" >/dev/null 2>&1; then
+  fail 'accepted uninstall accepted a checksum-drifted valid DKMS inventory'
+fi
+assert_file "$accepted_receipt"
+assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-uninstall"
+assert_file "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko"
+
+# The same checksum remains authoritative after the artifact is detached and
+# across replay of an interrupted destructive phase.
+new_target
+prepare_prior_dkms accepted-detached-drift installed
+run_stage >/dev/null
+install_live_hardware
+run_controller commit-boot.sh >/dev/null
+run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" >/dev/null
+accepted_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+if HP2R_FIXTURE_INTERRUPT_AFTER=uninstall-artifact-detached \
+  run_accepted_remote uninstall-accepted \
+    0.1.0 "$source_revision" "$release" >/dev/null 2>&1; then
+  fail 'accepted uninstall ignored artifact-detached interruption'
+fi
+detached_artifact="$accepted_artifact.accepted-uninstall"
+sed -i 's/^source_state=added$/source_state=unregistered/' \
+  "$detached_artifact/dkms-prior-state"
+if run_accepted_remote uninstall-accepted \
+  0.1.0 "$source_revision" "$release" >/dev/null 2>&1; then
+  fail 'accepted uninstall replay accepted a checksum-drifted detached inventory'
+fi
+assert_file "$root/var/lib/hyperpixel2r-kms/accepted-uninstall"
+
+# Removing the new checksum field cannot downgrade a full inventory into a
+# legacy receipt.
+new_target
+prepare_prior_dkms accepted-hashless-full
+run_stage >/dev/null
+install_live_hardware
+run_controller commit-boot.sh >/dev/null
+run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" >/dev/null
+accepted_receipt="$root/var/lib/hyperpixel2r-kms/accepted-state"
+sed -i \
+  -e 's/^schema_version=2$/schema_version=1/' \
+  -e '/^prior_dkms_inventory_sha256=/d' \
+  "$accepted_receipt"
+if run_accepted_remote uninstall-accepted \
+  0.1.0 "$source_revision" "$release" >/dev/null 2>&1; then
+  fail 'accepted uninstall accepted a hashless full DKMS inventory'
+fi
+assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-uninstall"
+
+# True legacy scalar receipts and schema-2 uninstall journals remain
+# recoverable.  This is the only accepted hashless compatibility shape.
+new_target
+prepare_prior_dkms accepted-legacy-scalar
+legacy_sums="$fixture/prior-dkms-accepted-legacy.sums"
+(cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$legacy_sums"
+run_stage >/dev/null
+install_live_hardware
+run_controller commit-boot.sh >/dev/null
+accepted_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+printf 'registered\n' > "$accepted_artifact/dkms-prior-state"
+run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" >/dev/null
+accepted_receipt="$root/var/lib/hyperpixel2r-kms/accepted-state"
+sed -i \
+  -e 's/^schema_version=2$/schema_version=1/' \
+  -e '/^prior_dkms_inventory_sha256=/d' \
+  "$accepted_receipt"
+if HP2R_FIXTURE_INTERRUPT_AFTER=uninstall-journal-published \
+  run_accepted_remote uninstall-accepted \
+    0.1.0 "$source_revision" "$release" >/dev/null 2>&1; then
+  fail 'legacy accepted uninstall ignored journal interruption'
+fi
+grep -Fxq 'schema_version=2' \
+  "$root/var/lib/hyperpixel2r-kms/accepted-uninstall" ||
+  fail 'legacy accepted uninstall did not retain the schema-2 journal'
+run_accepted_remote uninstall-accepted \
+  0.1.0 "$source_revision" "$release" >/dev/null
+assert_prior_dkms "$legacy_sums" added
+run_accepted_remote finalize-uninstall-accepted >/dev/null
 
 # A verified release-source extraction has no ambient Git repository.  Its
 # exact source identity and regular kernel leaves must be sufficient for
@@ -1863,6 +2020,24 @@ sed -i \
   -e 's/^schema_version=3$/schema_version=1/' \
   -e '/^module_existed=/d' \
   -e '/^overlay_existed=/d' \
+  -e '/^prior_dkms_inventory_sha256=/d' \
+  "$state"
+run_controller rollback-boot.sh >/dev/null
+assert_prior_dkms "$prior_dkms_sums" added
+
+# Public schema-2 transactions already carried the leaf-presence fields but
+# predated the inventory checksum.  Exercise that runtime shape directly,
+# instead of covering only the older schema-1 compatibility path.
+new_target
+prepare_prior_dkms version-two-compatibility
+prior_dkms_sums="$fixture/prior-dkms-version-two.sums"
+(cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
+run_stage >/dev/null
+state="$root/var/lib/hyperpixel2r-kms/tryboot-state"
+first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+printf 'registered\n' > "$first_artifact/dkms-prior-state"
+sed -i \
+  -e 's/^schema_version=3$/schema_version=2/' \
   -e '/^prior_dkms_inventory_sha256=/d' \
   "$state"
 run_controller rollback-boot.sh >/dev/null
