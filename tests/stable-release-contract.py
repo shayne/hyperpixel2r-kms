@@ -10,6 +10,7 @@ import inspect
 import json
 import os
 import pathlib
+import subprocess
 import tempfile
 
 
@@ -227,6 +228,90 @@ def expect_rejected(label: str, function) -> None:
     except stable_release.ContractError:
         return
     raise AssertionError(f"stable release accepted hostile state: {label}")
+
+
+def exercise_real_git_local_tag_contract() -> None:
+    with tempfile.TemporaryDirectory(prefix="hp2r-stable-real-git.") as temporary:
+        repository = pathlib.Path(temporary) / "working"
+        repository.mkdir()
+
+        def git(*arguments: str, check: bool = True) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                ["git", *arguments],
+                cwd=repository,
+                text=True,
+                stdout=subprocess.PIPE,
+                check=check,
+            )
+
+        git("init", "--quiet")
+        git("config", "user.name", "Fixture Author")
+        git("config", "user.email", "fixture@example.invalid")
+        (repository / "fixture.txt").write_text("canonical tag fixture\n")
+        git("add", "fixture.txt")
+        commit_environment = os.environ.copy()
+        commit_environment.update(
+            {
+                "GIT_AUTHOR_DATE": "1700000000 +0000",
+                "GIT_COMMITTER_DATE": "1700000000 +0000",
+            }
+        )
+        subprocess.run(
+            ["git", "commit", "--quiet", "--message", "fixture"],
+            cwd=repository,
+            env=commit_environment,
+            check=True,
+        )
+        commit = git("rev-parse", "HEAD").stdout.strip()
+
+        previous = pathlib.Path.cwd()
+        os.chdir(repository)
+        try:
+            backend = stable_release.GhGitBackend()
+            timestamp = backend.commit_timestamp(commit)
+            tag_object = stable_release.canonical_tag_object(
+                TAG, commit, timestamp
+            )
+            created = backend.ensure_local_annotated_tag(
+                TAG, commit, timestamp, tag_object
+            )
+            assert created == tag_object
+            assert git("rev-parse", f"refs/tags/{TAG}").stdout.strip() == tag_object
+            assert git("cat-file", "-t", tag_object).stdout.strip() == "tag"
+            reused = backend.ensure_local_annotated_tag(
+                TAG, commit, timestamp, tag_object
+            )
+            assert reused == tag_object
+
+            backend.discard_local_tag(TAG, commit, tag_object)
+            assert (
+                git(
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    f"refs/tags/{TAG}",
+                    check=False,
+                ).returncode
+                == 1
+            )
+
+            git("update-ref", f"refs/tags/{TAG}", commit)
+            wrong_object = git("rev-parse", f"refs/tags/{TAG}").stdout.strip()
+            assert wrong_object == commit
+            assert wrong_object != tag_object
+            expect_rejected(
+                "real Git local tag has a different object",
+                lambda: backend.discard_local_tag(TAG, commit, tag_object),
+            )
+            assert (
+                git("rev-parse", f"refs/tags/{TAG}").stdout.strip()
+                == wrong_object
+            )
+        finally:
+            os.chdir(previous)
+
+
+exercise_real_git_local_tag_contract()
 
 
 with tempfile.TemporaryDirectory(prefix="hp2r-stable-release.") as temporary:

@@ -860,7 +860,7 @@ class GhGitBackend:
         if local_object != tag_object or local_commit != commit:
             raise ContractError("refusing to discard a different local stable tag")
         subprocess.run(
-            [self.git, "update-ref", "--delete", reference, tag_object],
+            [self.git, "update-ref", "-d", reference, tag_object],
             check=True,
         )
 
