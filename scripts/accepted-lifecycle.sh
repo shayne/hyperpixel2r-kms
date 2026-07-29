@@ -12,6 +12,11 @@ action=''
 driver_version=''
 source_revision=''
 kernel_release=''
+manifest_sha256=''
+module_file=''
+module_sha256=''
+overlay_file=''
+overlay_sha256=''
 while test "$#" -gt 0; do
   case "$1" in
     --target) test "$#" -ge 2 || exit 64; target="$2"; shift 2 ;;
@@ -19,6 +24,11 @@ while test "$#" -gt 0; do
     --driver-version) test "$#" -ge 2 || exit 64; driver_version="$2"; shift 2 ;;
     --source-revision) test "$#" -ge 2 || exit 64; source_revision="$2"; shift 2 ;;
     --kernel-release) test "$#" -ge 2 || exit 64; kernel_release="$2"; shift 2 ;;
+    --manifest-sha256) test "$#" -ge 2 || exit 64; manifest_sha256="$2"; shift 2 ;;
+    --module-file) test "$#" -ge 2 || exit 64; module_file="$2"; shift 2 ;;
+    --module-sha256) test "$#" -ge 2 || exit 64; module_sha256="$2"; shift 2 ;;
+    --overlay-file) test "$#" -ge 2 || exit 64; overlay_file="$2"; shift 2 ;;
+    --overlay-sha256) test "$#" -ge 2 || exit 64; overlay_sha256="$2"; shift 2 ;;
     -h|--help)
       echo 'Usage: accepted-lifecycle.sh --target TARGET --action ACTION [exact identity]'
       exit 0
@@ -29,16 +39,25 @@ done
 : "${target:?set HP2R_TARGET or pass --target}"
 hp2r_validate_target "$target"
 case "$action" in
-  record|stage-retained|uninstall|retire-inactive)
+  record|stage-retained|uninstall|retire-inactive|prepare-new)
     [[ "$driver_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 64
     [[ "$source_revision" =~ ^[0-9a-f]{40}$ ]] || exit 64
     hp2r_validate_release "$kernel_release"
     ;;
-  bind-staged|mark-committed|commit-retained|recover|accept-retained)
+  mark-committed|commit-retained|recover|mark-verified|finalize|finalize-uninstall)
     test -z "$driver_version$source_revision$kernel_release" || exit 64
     ;;
   *) echo 'unsupported accepted lifecycle action' >&2; exit 64 ;;
 esac
+if test "$action" = prepare-new; then
+  [[ "$manifest_sha256" =~ ^[0-9a-f]{64}$ ]] || exit 64
+  test "$module_file" = hyperpixel2r_kms.ko || exit 64
+  [[ "$module_sha256" =~ ^[0-9a-f]{64}$ ]] || exit 64
+  test "$overlay_file" = "hyperpixel2r-kms-${source_revision:0:12}.dtbo" || exit 64
+  [[ "$overlay_sha256" =~ ^[0-9a-f]{64}$ ]] || exit 64
+else
+  test -z "$manifest_sha256$module_file$module_sha256$overlay_file$overlay_sha256" || exit 64
+fi
 
 ssh_options=(-o BatchMode=yes -o ConnectTimeout=8 -o ConnectionAttempts=1)
 remote_stage=''
@@ -64,12 +83,14 @@ case "$action" in
     ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" \
       record-accepted "$driver_version" "$source_revision" "$kernel_release"
     ;;
+  prepare-new)
+    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" \
+      prepare-new-accepted "$driver_version" "$source_revision" "$kernel_release" \
+      "$manifest_sha256" "$module_file" "$module_sha256" "$overlay_file" "$overlay_sha256"
+    ;;
   stage-retained)
     ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" \
       stage-retained "$driver_version" "$source_revision" "$kernel_release"
-    ;;
-  bind-staged)
-    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" bind-staged-accepted
     ;;
   mark-committed)
     ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" mark-committed-accepted
@@ -80,8 +101,11 @@ case "$action" in
   recover)
     ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" recover-accepted
     ;;
-  accept-retained)
-    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" accept-retained
+  mark-verified)
+    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" mark-verified-accepted
+    ;;
+  finalize)
+    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" finalize-accepted
     ;;
   uninstall)
     ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" \
@@ -90,6 +114,9 @@ case "$action" in
   retire-inactive)
     ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" \
       retire-inactive "$driver_version" "$source_revision" "$kernel_release"
+    ;;
+  finalize-uninstall)
+    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" finalize-uninstall-accepted
     ;;
 esac
 ssh "${ssh_options[@]}" "$target" rm -rf -- "$remote_stage"

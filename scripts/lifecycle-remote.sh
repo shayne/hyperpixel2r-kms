@@ -14,6 +14,8 @@ accepted_state="$state_dir/accepted-state"
 accepted_stock_config="$state_dir/accepted-stock-config.txt"
 accepted_transition="$state_dir/accepted-transition"
 accepted_transition_prior_config="$state_dir/accepted-transition-prior-config.txt"
+accepted_uninstall="$state_dir/accepted-uninstall"
+accepted_uninstall_stock="$state_dir/accepted-uninstall-stock.txt"
 normal_config="${root}/boot/firmware/config.txt"
 tryboot_config="${root}/boot/firmware/tryboot.txt"
 artifact_root="${root}/usr/lib/hyperpixel2r-kms"
@@ -45,15 +47,43 @@ accepted_keys=(
   stock_config_sha256
 )
 accepted_transition_keys=(
-  schema_version phase prior_driver_version prior_source_revision prior_kernel_release
+  schema_version kind phase prior_driver_version prior_source_revision prior_kernel_release
   candidate_driver_version candidate_source_revision candidate_kernel_release
+  candidate_manifest_sha256 candidate_module_file candidate_module_sha256
+  candidate_overlay_file candidate_overlay_sha256
   prior_normal_config_sha256 candidate_normal_config_sha256 tryboot_config_sha256
   prior_dkms_status
+)
+accepted_uninstall_keys=(
+  schema_version phase driver_version source_revision kernel_release
+  manifest_sha256 module_file module_sha256 overlay_file overlay_sha256
+  stock_config_sha256 dkms_status prior_dkms_status artifact_prior
 )
 
 die() {
   printf '%s\n' "$*" >&2
   exit 1
+}
+
+accepted_workspace=''
+cleanup_accepted_workspace() {
+  local status=$?
+  trap - EXIT
+  if test -n "$accepted_workspace"; then
+    remove_transaction_workspace "$accepted_workspace" 2>/dev/null || true
+  fi
+  exit "$status"
+}
+trap cleanup_accepted_workspace EXIT
+
+fixture_interrupt_after() {
+  test -n "$root" || return 0
+  test "${HP2R_FIXTURE_INTERRUPT_AFTER:-}" = "$1" || return 0
+  printf 'fixture interruption after %s\n' "$1" >&2
+  if test "${HP2R_FIXTURE_PRESERVE_MUTATIONS:-}" = 1; then
+    trap - EXIT
+  fi
+  exit 97
 }
 
 dkms_available() {
@@ -1209,6 +1239,7 @@ stage() {
   published_state=false
   copy_was_created=false
   stage_complete=false
+  accepted_bound=false
 
   stage_cleanup() {
     local status=$?
@@ -1319,6 +1350,33 @@ stage() {
   printf '%s\n' "$prior_dkms_state" | sudo tee "$prior_state_snapshot" >/dev/null || die 'failed to write prior DKMS state snapshot'
   assert_owned_regular "$prior_state_snapshot" 600 || die 'prior DKMS state snapshot ownership drifted'
 
+  if sudo test -e "$accepted_state" || sudo test -L "$accepted_state"; then
+    assert_accepted_state || die 'accepted driver receipt is unsafe'
+    assert_accepted_transition || die 'accepted candidate journal is missing or unsafe'
+    test "$(accepted_transition_value kind)" = new ||
+      die 'accepted candidate journal has the wrong kind'
+    test "$(accepted_transition_value phase)" = prepared ||
+      die 'accepted candidate journal is not prepared'
+    test "$(accepted_transition_value candidate_driver_version)" = "$driver_version" &&
+      test "$(accepted_transition_value candidate_source_revision)" = "$revision" &&
+      test "$(accepted_transition_value candidate_kernel_release)" = "$release" &&
+      test "$(accepted_transition_value candidate_manifest_sha256)" = "$manifest_sha" &&
+      test "$(accepted_transition_value candidate_module_file)" = "$module_file" &&
+      test "$(accepted_transition_value candidate_module_sha256)" = "$module_sha" &&
+      test "$(accepted_transition_value candidate_overlay_file)" = "$overlay_file" &&
+      test "$(accepted_transition_value candidate_overlay_sha256)" = "$overlay_sha" ||
+      die 'accepted candidate journal differs from incoming artifact'
+    test "$(accepted_transition_value prior_normal_config_sha256)" = "$normal_sha" &&
+      test "$(accepted_transition_value candidate_normal_config_sha256)" = \
+        "$(sha "$candidate")" &&
+      test "$(accepted_transition_value prior_dkms_status)" = "$prior_dkms_state" ||
+      die 'accepted candidate journal differs from staged preconditions'
+    accepted_bound=true
+  else
+    test ! -L "$accepted_transition" && test ! -e "$accepted_transition" ||
+      die 'accepted candidate journal exists without an accepted receipt'
+  fi
+
   if sudo test -L "$artifact_dir"; then
     die 'stored inactive artifact is unsafe'
   elif sudo test -e "$artifact_dir"; then
@@ -1353,16 +1411,19 @@ stage() {
   sudo mv -f "$artifact_stage_dir" "$artifact_dir" || die 'failed to publish artifact tree'
   artifact_stage_dir=''
   created_artifact=true
+  fixture_interrupt_after candidate-artifact-published
   if copy_if_absent_or_exact "$artifact_dir/$module_file" "$module_path" 644 "$module_sha"; then
     if "$copy_was_created"; then created_module=true; fi
   else
     die 'failed to install module from incoming artifact'
   fi
+  fixture_interrupt_after candidate-module-installed
   if copy_if_absent_or_exact "$artifact_dir/$overlay_file" "$overlay_path" 644 "$overlay_sha" true; then
     if "$copy_was_created"; then created_overlay=true; fi
   else
     die 'failed to install overlay from incoming artifact'
   fi
+  fixture_interrupt_after candidate-overlay-installed
   if sudo test -L "$dkms_dir"; then
     die 'existing DKMS source tree is unsafe'
   elif sudo test -e "$dkms_dir"; then
@@ -1390,11 +1451,13 @@ stage() {
     unregistered) run_dkms add -m hyperpixel2r-kms -v "$driver_version" || die 'failed to register DKMS source'; dkms_added=true ;;
     *) die 'invalid DKMS status result' ;;
   esac
+  fixture_interrupt_after candidate-dkms-activated
   test "$(sha "$normal_config")" = "$normal_sha" || die 'normal boot config changed while staging tryboot candidate'
   candidate_snapshot="$(privileged_snapshot "$candidate" "$rollback_tmp" candidate)" || die 'failed to capture candidate config'
   candidate_sha="$(sha "$candidate_snapshot")" || die 'failed to hash candidate config snapshot'
   atomic_copy "$candidate_snapshot" "$tryboot_config" 644 "$candidate_sha" true || die 'failed to publish tryboot config'
   published_tryboot=true
+  fixture_interrupt_after candidate-tryboot-published
   test "$(sha "$normal_config")" = "$normal_sha" || die 'normal boot config changed while staging tryboot candidate'
   state_tmp="$(private_file "$rollback_tmp" state)" || die 'failed to create private tryboot state'
   {
@@ -1420,6 +1483,12 @@ stage() {
   expected_sha="$(sha "$state_snapshot")" || die 'failed to hash tryboot state snapshot'
   atomic_copy "$state_snapshot" "$state_file" 600 "$expected_sha" || die 'failed to publish tryboot state'
   published_state=true
+  fixture_interrupt_after candidate-tryboot-state-published
+  if "$accepted_bound"; then
+    set_accepted_transition_phase prepared staged ||
+      die 'failed to mark accepted candidate staged'
+    fixture_interrupt_after candidate-staged-published
+  fi
   sudo depmod -a "$release"
   sudo sync
   stage_complete=true
@@ -1821,58 +1890,141 @@ accepted_transition_value() {
   sudo awk -F= -v wanted="$key" '$1 == wanted { print $2 }' "$accepted_transition"
 }
 
-bind_staged_accepted() {
-  local transaction candidate_version candidate_revision candidate_release candidate_artifact
-  local prior_version prior_revision prior_release prior_status workspace prior_snapshot state_tmp state_sha
-  local prior_sha candidate_sha
+publish_accepted_transition() {
+  local kind="$1"
+  local candidate_version="$2"
+  local candidate_revision="$3"
+  local candidate_release="$4"
+  local candidate_manifest_sha="$5"
+  local candidate_module_file="$6"
+  local candidate_module_sha="$7"
+  local candidate_overlay_file="$8"
+  local candidate_overlay_sha="$9"
+  local prior_snapshot="${10}"
+  local candidate_snapshot="${11}"
+  local prior_status="${12}"
+  local workspace="${13}"
+  local prior_sha candidate_sha state_tmp state_sha
+
+  prior_sha="$(sha "$prior_snapshot")" || return
+  candidate_sha="$(sha "$candidate_snapshot")" || return
+  state_tmp="$(private_file "$workspace" accepted-transition)" || return
+  {
+    printf 'schema_version=2\n'
+    printf 'kind=%s\n' "$kind"
+    printf 'phase=prepared\n'
+    printf 'prior_driver_version=%s\n' "$(accepted_value driver_version)"
+    printf 'prior_source_revision=%s\n' "$(accepted_value source_revision)"
+    printf 'prior_kernel_release=%s\n' "$(accepted_value kernel_release)"
+    printf 'candidate_driver_version=%s\n' "$candidate_version"
+    printf 'candidate_source_revision=%s\n' "$candidate_revision"
+    printf 'candidate_kernel_release=%s\n' "$candidate_release"
+    printf 'candidate_manifest_sha256=%s\n' "$candidate_manifest_sha"
+    printf 'candidate_module_file=%s\n' "$candidate_module_file"
+    printf 'candidate_module_sha256=%s\n' "$candidate_module_sha"
+    printf 'candidate_overlay_file=%s\n' "$candidate_overlay_file"
+    printf 'candidate_overlay_sha256=%s\n' "$candidate_overlay_sha"
+    printf 'prior_normal_config_sha256=%s\n' "$prior_sha"
+    printf 'candidate_normal_config_sha256=%s\n' "$candidate_sha"
+    printf 'tryboot_config_sha256=%s\n' "$candidate_sha"
+    printf 'prior_dkms_status=%s\n' "$prior_status"
+  } | sudo tee "$state_tmp" >/dev/null || return
+  state_sha="$(sha "$state_tmp")" || return
+  atomic_copy "$prior_snapshot" "$accepted_transition_prior_config" 600 "$prior_sha" || return
+  atomic_copy "$state_tmp" "$accepted_transition" 600 "$state_sha" || return
+  assert_accepted_transition || return
+  fixture_interrupt_after accepted-transition-published
+}
+
+set_accepted_transition_phase() {
+  local expected="$1"
+  local next="$2"
+  local normal_sha="${3:-}"
+  local workspace state_tmp state_sha
+
+  assert_accepted_transition || return
+  test "$(accepted_transition_value phase)" = "$expected" || return
+  workspace="$(new_transaction_workspace)" || return
+  accepted_workspace="$workspace"
+  state_tmp="$(private_file "$workspace" accepted-transition)" || return
+  if test -n "$normal_sha"; then
+    sudo sed \
+      -e "s/^phase=$expected\$/phase=$next/" \
+      -e "s/^candidate_normal_config_sha256=.*/candidate_normal_config_sha256=$normal_sha/" \
+      "$accepted_transition" | sudo tee "$state_tmp" >/dev/null || return
+  else
+    sudo sed -e "s/^phase=$expected\$/phase=$next/" \
+      "$accepted_transition" | sudo tee "$state_tmp" >/dev/null || return
+  fi
+  state_sha="$(sha "$state_tmp")" || return
+  atomic_copy "$state_tmp" "$accepted_transition" 600 "$state_sha" || return
+  remove_transaction_workspace "$workspace" || return
+  accepted_workspace=''
+  assert_accepted_transition
+}
+
+prepare_new_accepted() {
+  local version="$1"
+  local revision="$2"
+  local release="$3"
+  local manifest_sha="$4"
+  local module_file="$5"
+  local module_sha="$6"
+  local overlay_file="$7"
+  local overlay_sha="$8"
+  local prior_version prior_status workspace prior_snapshot stock candidate stock_sha
 
   assert_accepted_state || die 'accepted driver state is missing or unsafe'
   test ! -L "$accepted_transition" && test ! -e "$accepted_transition" ||
     die 'an accepted driver transition is already active'
   test ! -L "$accepted_transition_prior_config" && test ! -e "$accepted_transition_prior_config" ||
     die 'orphan accepted transition config exists'
-  transaction="$(assert_transaction_state)" || die 'legacy candidate transaction is unsafe'
-  IFS=$'\t' read -r candidate_version candidate_revision candidate_release candidate_artifact <<<"$transaction"
+  test ! -L "$state_file" && test ! -e "$state_file" ||
+    die 'a legacy tryboot transaction is active'
+  test ! -L "$tryboot_config" && test ! -e "$tryboot_config" ||
+    die 'accepted transition requires an unused tryboot config'
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'unsafe candidate driver version'
+  [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || die 'unsafe candidate source revision'
+  [[ "$release" =~ ^[A-Za-z0-9._+-]+$ ]] || die 'unsafe candidate kernel release'
+  [[ "$manifest_sha" =~ ^[0-9a-f]{64}$ ]] || die 'unsafe candidate manifest checksum'
+  test "$module_file" = hyperpixel2r_kms.ko || die 'unsafe candidate module file'
+  [[ "$module_sha" =~ ^[0-9a-f]{64}$ ]] || die 'unsafe candidate module checksum'
+  test "$overlay_file" = "hyperpixel2r-kms-${revision:0:12}.dtbo" ||
+    die 'unsafe candidate overlay file'
+  [[ "$overlay_sha" =~ ^[0-9a-f]{64}$ ]] || die 'unsafe candidate overlay checksum'
+  test "$version:$revision:$release" != \
+    "$(accepted_value driver_version):$(accepted_value source_revision):$(accepted_value kernel_release)" ||
+    die 'candidate is already accepted'
   prior_version="$(accepted_value driver_version)"
-  prior_revision="$(accepted_value source_revision)"
-  prior_release="$(accepted_value kernel_release)"
-  test "$(state_value normal_config_sha256)" = "$(accepted_value normal_config_sha256)" ||
-    die 'legacy candidate was not staged from the accepted normal config'
-  prior_status="$(dkms_prior_state "$candidate_artifact")" ||
-    die 'legacy candidate prior DKMS state is unsafe'
-  workspace="$(new_transaction_workspace)" || die 'failed to create accepted binding workspace'
-  prior_snapshot="$(privileged_snapshot "$normal_config" "$workspace" bound-prior)" ||
-    die 'failed to snapshot bound prior normal config'
-  prior_sha="$(sha "$prior_snapshot")"
-  candidate_sha="$(state_value candidate_config_sha256)"
-  state_tmp="$(private_file "$workspace" accepted-transition)" ||
-    die 'failed to allocate bound transition state'
-  {
-    printf 'schema_version=1\n'
-    printf 'phase=staged\n'
-    printf 'prior_driver_version=%s\n' "$prior_version"
-    printf 'prior_source_revision=%s\n' "$prior_revision"
-    printf 'prior_kernel_release=%s\n' "$prior_release"
-    printf 'candidate_driver_version=%s\n' "$candidate_version"
-    printf 'candidate_source_revision=%s\n' "$candidate_revision"
-    printf 'candidate_kernel_release=%s\n' "$candidate_release"
-    printf 'prior_normal_config_sha256=%s\n' "$prior_sha"
-    printf 'candidate_normal_config_sha256=%s\n' "$candidate_sha"
-    printf 'tryboot_config_sha256=%s\n' "$candidate_sha"
-    printf 'prior_dkms_status=%s\n' "$prior_status"
-  } | sudo tee "$state_tmp" >/dev/null || die 'failed to write bound accepted transition'
-  state_sha="$(sha "$state_tmp")"
-  atomic_copy "$prior_snapshot" "$accepted_transition_prior_config" 600 "$prior_sha" ||
-    die 'failed to publish bound prior config'
-  atomic_copy "$state_tmp" "$accepted_transition" 600 "$state_sha" ||
-    die 'failed to publish bound accepted transition'
-  remove_transaction_workspace "$workspace" || die 'failed to remove accepted binding workspace'
-  assert_accepted_transition || die 'bound accepted transition failed validation'
-  printf 'bound staged %s\n' "$candidate_revision"
+  prior_status="$(validate_dkms_status "$prior_version")" ||
+    die 'accepted prior DKMS status is invalid'
+  case "$prior_status" in absent|unregistered|registered) ;; *) die 'accepted prior DKMS status is invalid';; esac
+  test "$(sha "$normal_config")" = "$(accepted_value normal_config_sha256)" ||
+    die 'accepted normal config drifted before transition'
+  workspace="$(new_transaction_workspace)" || die 'failed to create accepted transition workspace'
+  accepted_workspace="$workspace"
+  prior_snapshot="$(privileged_snapshot "$normal_config" "$workspace" accepted-prior)" ||
+    die 'failed to snapshot accepted normal config'
+  stock="$(private_file "$workspace" accepted-stock)" || die 'failed to allocate accepted stock'
+  write_surgical_stock_config "$prior_snapshot" "$(accepted_value overlay_file)" "$stock" "$workspace" ||
+    die 'accepted normal config cannot be separated from prior driver'
+  candidate="$(private_file "$workspace" accepted-candidate)" ||
+    die 'failed to allocate accepted candidate'
+  stock_sha="$(sha "$stock")"
+  atomic_copy "$stock" "$candidate" 600 "$stock_sha" || die 'failed to seed accepted candidate'
+  printf '\n# hyperpixel2r-kms one-shot candidate\ndtoverlay=%s\n' "$overlay_file" |
+    sudo tee -a "$candidate" >/dev/null || die 'failed to append accepted candidate'
+  publish_accepted_transition new "$version" "$revision" "$release" "$manifest_sha" \
+    "$module_file" "$module_sha" "$overlay_file" "$overlay_sha" \
+    "$prior_snapshot" "$candidate" "$prior_status" "$workspace" ||
+    die 'failed to publish accepted candidate journal'
+  remove_transaction_workspace "$workspace" || die 'failed to remove accepted transition workspace'
+  accepted_workspace=''
+  printf 'prepared accepted %s\n' "$revision"
 }
 
 mark_committed_accepted() {
-  local workspace state_tmp state_sha normal_sha
+  local normal_sha
 
   assert_accepted_transition || die 'accepted driver transition is missing or unsafe'
   test "$(accepted_transition_value phase)" = staged ||
@@ -1881,24 +2033,15 @@ mark_committed_accepted() {
     die 'legacy tryboot state survived commit'
   assert_owned_regular "$normal_config" boot || die 'committed normal config is unsafe'
   normal_sha="$(sha "$normal_config")"
-  workspace="$(new_transaction_workspace)" || die 'failed to create committed binding workspace'
-  state_tmp="$(private_file "$workspace" accepted-transition)" ||
-    die 'failed to allocate committed binding state'
-  sudo sed \
-    -e 's/^phase=staged$/phase=committed/' \
-    -e "s/^candidate_normal_config_sha256=.*/candidate_normal_config_sha256=$normal_sha/" \
-    "$accepted_transition" | sudo tee "$state_tmp" >/dev/null ||
-    die 'failed to write committed binding state'
-  state_sha="$(sha "$state_tmp")"
-  atomic_copy "$state_tmp" "$accepted_transition" 600 "$state_sha" ||
+  set_accepted_transition_phase staged committed "$normal_sha" ||
     die 'failed to publish committed binding state'
-  remove_transaction_workspace "$workspace" || die 'failed to remove committed binding workspace'
+  fixture_interrupt_after accepted-committed-published
   assert_accepted_transition || die 'committed binding failed validation'
   printf 'marked committed %s\n' "$(accepted_transition_value candidate_source_revision)"
 }
 
 assert_accepted_transition() {
-  local key count phase prior_version prior_revision prior_release candidate_version candidate_revision candidate_release
+  local key count kind phase prior_version prior_revision prior_release candidate_version candidate_revision candidate_release
 
   assert_owned_regular "$accepted_transition" 600 || return
   assert_owned_regular "$accepted_transition_prior_config" 600 || return
@@ -1908,9 +2051,11 @@ assert_accepted_transition() {
     count="$(sudo awk -F= -v wanted="$key" '$1 == wanted { count++ } END { print count + 0 }' "$accepted_transition")"
     test "$count" = 1 || return
   done
-  test "$(accepted_transition_value schema_version)" = 1 || return
+  test "$(accepted_transition_value schema_version)" = 2 || return
+  kind="$(accepted_transition_value kind)"
+  case "$kind" in new|retained) ;; *) return 1;; esac
   phase="$(accepted_transition_value phase)"
-  case "$phase" in staged|committed) ;; *) return 1;; esac
+  case "$phase" in prepared|staged|committed|verified|finalizing|receipt_published) ;; *) return 1;; esac
   prior_version="$(accepted_transition_value prior_driver_version)"
   prior_revision="$(accepted_transition_value prior_source_revision)"
   prior_release="$(accepted_transition_value prior_kernel_release)"
@@ -1923,15 +2068,35 @@ assert_accepted_transition() {
   [[ "$candidate_revision" =~ ^[0-9a-f]{40}$ ]] || return
   [[ "$prior_release" =~ ^[A-Za-z0-9._+-]+$ ]] || return
   [[ "$candidate_release" =~ ^[A-Za-z0-9._+-]+$ ]] || return
-  for key in prior_normal_config_sha256 candidate_normal_config_sha256 tryboot_config_sha256; do
+  for key in \
+    candidate_manifest_sha256 candidate_module_sha256 candidate_overlay_sha256 \
+    prior_normal_config_sha256 candidate_normal_config_sha256 tryboot_config_sha256; do
     [[ "$(accepted_transition_value "$key")" =~ ^[0-9a-f]{64}$ ]] || return
   done
+  test "$(accepted_transition_value candidate_module_file)" = hyperpixel2r_kms.ko || return
+  test "$(accepted_transition_value candidate_overlay_file)" = \
+    "hyperpixel2r-kms-${candidate_revision:0:12}.dtbo" || return
   case "$(accepted_transition_value prior_dkms_status)" in absent|unregistered|registered) ;; *) return 1;; esac
   test "$(sha "$accepted_transition_prior_config")" = \
     "$(accepted_transition_value prior_normal_config_sha256)" || return
-  test "$(accepted_value driver_version)" = "$prior_version" || return
-  test "$(accepted_value source_revision)" = "$prior_revision" || return
-  test "$(accepted_value kernel_release)" = "$prior_release" || return
+  if test "$phase" = receipt_published; then
+    test "$(accepted_value driver_version)" = "$candidate_version" || return
+    test "$(accepted_value source_revision)" = "$candidate_revision" || return
+    test "$(accepted_value kernel_release)" = "$candidate_release" || return
+  elif test "$phase" = finalizing; then
+    if test "$(accepted_value source_revision)" = "$prior_revision"; then
+      test "$(accepted_value driver_version)" = "$prior_version" || return
+      test "$(accepted_value kernel_release)" = "$prior_release" || return
+    else
+      test "$(accepted_value driver_version)" = "$candidate_version" || return
+      test "$(accepted_value source_revision)" = "$candidate_revision" || return
+      test "$(accepted_value kernel_release)" = "$candidate_release" || return
+    fi
+  else
+    test "$(accepted_value driver_version)" = "$prior_version" || return
+    test "$(accepted_value source_revision)" = "$prior_revision" || return
+    test "$(accepted_value kernel_release)" = "$prior_release" || return
+  fi
 }
 
 replace_active_dkms_source() {
@@ -1972,7 +2137,7 @@ stage_retained() {
   local release="$3"
   local prior_version prior_revision prior_release prior_artifact candidate_artifact candidate_manifest
   local prior_status module_file module_sha overlay_file overlay_sha module_path overlay_path
-  local workspace prior_snapshot stock candidate candidate_snapshot state_tmp state_sha prior_sha candidate_sha tryboot_sha
+  local workspace prior_snapshot stock candidate candidate_snapshot prior_sha candidate_sha tryboot_sha
   local prior=false candidate_prior=false
 
   assert_accepted_state || die 'accepted driver state is missing or unsafe'
@@ -2014,6 +2179,7 @@ stage_retained() {
     die 'accepted normal config drifted before retained transition'
 
   workspace="$(new_transaction_workspace)" || die 'failed to create retained transition workspace'
+  accepted_workspace="$workspace"
   prior_snapshot="$(privileged_snapshot "$normal_config" "$workspace" retained-prior)" ||
     die 'failed to snapshot accepted normal config'
   stock="$(private_file "$workspace" retained-stock)" || die 'failed to allocate retained stock'
@@ -2029,40 +2195,31 @@ stage_retained() {
     die 'failed to snapshot retained candidate config'
   tryboot_sha="$(sha "$candidate_snapshot")"
   prior_sha="$(sha "$prior_snapshot")"
-  state_tmp="$(private_file "$workspace" accepted-transition)" ||
-    die 'failed to allocate accepted transition state'
-  {
-    printf 'schema_version=1\n'
-    printf 'phase=staged\n'
-    printf 'prior_driver_version=%s\n' "$prior_version"
-    printf 'prior_source_revision=%s\n' "$prior_revision"
-    printf 'prior_kernel_release=%s\n' "$prior_release"
-    printf 'candidate_driver_version=%s\n' "$version"
-    printf 'candidate_source_revision=%s\n' "$revision"
-    printf 'candidate_kernel_release=%s\n' "$release"
-    printf 'prior_normal_config_sha256=%s\n' "$prior_sha"
-    printf 'candidate_normal_config_sha256=%s\n' "$candidate_sha"
-    printf 'tryboot_config_sha256=%s\n' "$tryboot_sha"
-    printf 'prior_dkms_status=%s\n' "$prior_status"
-  } | sudo tee "$state_tmp" >/dev/null || die 'failed to write accepted transition state'
-  state_sha="$(sha "$state_tmp")"
+  publish_accepted_transition retained "$version" "$revision" "$release" \
+    "$(sha "$candidate_manifest")" "$module_file" "$module_sha" \
+    "$overlay_file" "$overlay_sha" "$prior_snapshot" "$candidate_snapshot" \
+    "$prior_status" "$workspace" || die 'failed to publish retained transition journal'
 
-  # Complete preflight precedes the first active mutation.
+  # The complete durable journal precedes the first active mutation.
   assert_owned_regular "$candidate_artifact/$module_file" 644 || die 'retained module is unsafe'
   assert_owned_regular "$candidate_artifact/$overlay_file" 644 || die 'retained overlay is unsafe'
   copy_if_absent_or_exact "$candidate_artifact/$overlay_file" "$overlay_path" 644 "$overlay_sha" true ||
     die 'failed to install retained overlay'
+  fixture_interrupt_after retained-overlay-installed
   atomic_copy "$candidate_artifact/$module_file" "$module_path" 644 "$module_sha" ||
     die 'failed to install retained module'
+  fixture_interrupt_after retained-module-installed
   replace_active_dkms_source "$prior_version" "$prior_artifact" "$prior_status" \
     "$version" "$candidate_artifact" || die 'failed to activate retained DKMS source'
+  fixture_interrupt_after retained-dkms-activated
   atomic_copy "$candidate_snapshot" "$tryboot_config" 644 "$tryboot_sha" true ||
     die 'failed to publish retained tryboot config'
-  atomic_copy "$prior_snapshot" "$accepted_transition_prior_config" 600 "$prior_sha" ||
-    die 'failed to publish retained prior config'
-  atomic_copy "$state_tmp" "$accepted_transition" 600 "$state_sha" ||
-    die 'failed to publish retained transition state'
+  fixture_interrupt_after retained-tryboot-published
+  set_accepted_transition_phase prepared staged ||
+    die 'failed to mark retained transition staged'
+  fixture_interrupt_after retained-staged-published
   remove_transaction_workspace "$workspace" || die 'failed to remove retained transition workspace'
+  accepted_workspace=''
   sudo depmod -a "$release"
   sudo sync
   assert_accepted_transition || die 'retained transition failed validation'
@@ -2087,6 +2244,7 @@ commit_retained() {
   test "$(sha "$normal_config")" = "$(accepted_transition_value prior_normal_config_sha256)" ||
     die 'normal config drifted before retained commit'
   workspace="$(new_transaction_workspace)" || die 'failed to create retained commit workspace'
+  accepted_workspace="$workspace"
   prior_snapshot="$(privileged_snapshot "$normal_config" "$workspace" commit-prior)" ||
     die 'failed to snapshot prior normal config'
   stock="$(private_file "$workspace" commit-stock)" || die 'failed to allocate commit stock'
@@ -2103,18 +2261,13 @@ commit_retained() {
     die 'failed to snapshot retained normal config'
   atomic_copy "$normal_snapshot" "$normal_config" 644 "$normal_sha" true ||
     die 'failed to publish retained normal config'
+  fixture_interrupt_after retained-normal-published
   sudo rm -- "$tryboot_config" || die 'failed to remove retained tryboot config'
-  state_tmp="$(private_file "$workspace" accepted-transition)" ||
-    die 'failed to allocate committed transition state'
-  sudo sed \
-    -e 's/^phase=staged$/phase=committed/' \
-    -e "s/^candidate_normal_config_sha256=.*/candidate_normal_config_sha256=$normal_sha/" \
-    "$accepted_transition" | sudo tee "$state_tmp" >/dev/null ||
-    die 'failed to write committed transition state'
-  state_sha="$(sha "$state_tmp")"
-  atomic_copy "$state_tmp" "$accepted_transition" 600 "$state_sha" ||
-    die 'failed to publish committed transition state'
   remove_transaction_workspace "$workspace" || die 'failed to remove retained commit workspace'
+  accepted_workspace=''
+  set_accepted_transition_phase staged committed "$normal_sha" ||
+    die 'failed to publish committed transition state'
+  fixture_interrupt_after retained-committed-published
   sudo sync
   assert_accepted_transition || die 'committed retained transition failed validation'
   printf 'committed retained %s\n' "$revision"
@@ -2135,49 +2288,127 @@ restore_prior_from_accepted_transition() {
   prior_artifact="$artifact_root/$prior_version/$prior_revision/$prior_release"
   candidate_artifact="$artifact_root/$candidate_version/$candidate_revision/$candidate_release"
   prior_manifest="$prior_artifact/manifest.txt"
-  candidate_manifest="$candidate_artifact/manifest.txt"
+  assert_artifact_tree "$prior_artifact" false 2>/dev/null ||
+    assert_artifact_tree "$prior_artifact" true || return
   prior_module="$(manifest_value "$prior_manifest" module_file)"
   prior_module_sha="$(manifest_value "$prior_manifest" module_sha256)"
   prior_overlay="$(manifest_value "$prior_manifest" overlay_file)"
   prior_overlay_sha="$(manifest_value "$prior_manifest" overlay_sha256)"
-  candidate_overlay="$(manifest_value "$candidate_manifest" overlay_file)"
   module_path="${root}/lib/modules/$prior_release/extra/$prior_module"
   prior_overlay_path="${root}/boot/firmware/overlays/$prior_overlay"
-  candidate_overlay_path="${root}/boot/firmware/overlays/$candidate_overlay"
   prior_status="$(accepted_transition_value prior_dkms_status)"
   prior_dir="$dkms_root/hyperpixel2r-kms-$prior_version"
   candidate_dir="$dkms_root/hyperpixel2r-kms-$candidate_version"
-  candidate_status="$(validate_dkms_status "$candidate_version")" || return
-  if test "$candidate_status" = registered; then
-    run_dkms remove -m hyperpixel2r-kms -v "$candidate_version" --all || return
+  if ! sudo test -e "$candidate_artifact" && ! sudo test -L "$candidate_artifact"; then
+    assert_source_tree_shape "$prior_dir" "$prior_artifact/dkms-source" || return
+    assert_owned_regular "$module_path" 644 || return
+    test "$(sha "$module_path")" = "$prior_module_sha" || return
+    assert_owned_regular "$prior_overlay_path" boot || return
+    test "$(sha "$prior_overlay_path")" = "$prior_overlay_sha" || return
+    test "$(sha "$normal_config")" = \
+      "$(accepted_transition_value prior_normal_config_sha256)" || return
+    sudo rm -f -- "$tryboot_config"
+    sudo rm -- "$accepted_transition" || return
+    sudo rm -- "$accepted_transition_prior_config" || return
+    sudo sync
+    return
   fi
-  remove_exact_tree "$candidate_dir" || return
-  if test "$prior_dir" != "$candidate_dir" && sudo test -e "$prior_dir"; then
-    remove_exact_tree "$prior_dir" || return
+  candidate_manifest="$candidate_artifact/manifest.txt"
+  candidate_overlay="$(manifest_value "$candidate_manifest" overlay_file)"
+  candidate_overlay_path="${root}/boot/firmware/overlays/$candidate_overlay"
+  if assert_source_tree_shape "$candidate_dir" "$candidate_artifact/dkms-source" 2>/dev/null; then
+    candidate_status="$(validate_dkms_status "$candidate_version")" || return
+    if test "$candidate_status" = registered; then
+      run_dkms remove -m hyperpixel2r-kms -v "$candidate_version" --all || return
+    fi
+    remove_exact_tree "$candidate_dir" || return
+  elif test "$candidate_dir" != "$prior_dir" && sudo test -e "$candidate_dir"; then
+    return 1
   fi
-  materialize_source_tree "$prior_artifact/dkms-source" "$prior_dir" || return
+  if sudo test -e "$prior_dir"; then
+    assert_source_tree_shape "$prior_dir" "$prior_artifact/dkms-source" ||
+      remove_exact_tree "$prior_dir" || return
+  fi
+  if ! sudo test -e "$prior_dir"; then
+    materialize_source_tree "$prior_artifact/dkms-source" "$prior_dir" || return
+  fi
   if test "$prior_status" = registered; then
     run_dkms add -m hyperpixel2r-kms -v "$prior_version" || return
   fi
   atomic_copy "$prior_artifact/$prior_module" "$module_path" 644 "$prior_module_sha" || return
   copy_if_absent_or_exact "$prior_artifact/$prior_overlay" "$prior_overlay_path" 644 "$prior_overlay_sha" true || return
   if test "$candidate_overlay_path" != "$prior_overlay_path"; then
-    assert_owned_regular "$candidate_overlay_path" boot || return
-    test "$(sha "$candidate_overlay_path")" = "$(manifest_value "$candidate_manifest" overlay_sha256)" || return
-    sudo rm -- "$candidate_overlay_path" || return
+    if sudo test -e "$candidate_overlay_path" || sudo test -L "$candidate_overlay_path"; then
+      assert_owned_regular "$candidate_overlay_path" boot || return
+      test "$(sha "$candidate_overlay_path")" = "$(manifest_value "$candidate_manifest" overlay_sha256)" || return
+      sudo rm -- "$candidate_overlay_path" || return
+    fi
   fi
   atomic_copy "$accepted_transition_prior_config" "$normal_config" 644 \
     "$(accepted_transition_value prior_normal_config_sha256)" true || return
   sudo rm -f -- "$tryboot_config"
-  sudo rm -- "$accepted_transition" "$accepted_transition_prior_config" || return
+  retire_unaccepted_transition_artifact || return
+  sudo rm -- "$accepted_transition" || return
+  sudo rm -- "$accepted_transition_prior_config" || return
   sudo depmod -a "$prior_release"
   sudo sync
 }
 
+retire_unaccepted_transition_artifact() {
+  local version revision release artifact manifest prior=false
+
+  assert_accepted_transition || return
+  test "$(accepted_transition_value kind)" = new || return 0
+  version="$(accepted_transition_value candidate_driver_version)"
+  revision="$(accepted_transition_value candidate_source_revision)"
+  release="$(accepted_transition_value candidate_kernel_release)"
+  artifact="$artifact_root/$version/$revision/$release"
+  if ! sudo test -e "$artifact" && ! sudo test -L "$artifact"; then
+    return 0
+  fi
+  if sudo test -L "$artifact/prior-tryboot.txt"; then return 1
+  elif sudo test -e "$artifact/prior-tryboot.txt"; then prior=true
+  fi
+  assert_artifact_tree "$artifact" "$prior" || return
+  manifest="$artifact/manifest.txt"
+  test "$(sha "$manifest")" = \
+    "$(accepted_transition_value candidate_manifest_sha256)" || return
+  test "$(manifest_value "$manifest" driver_version)" = "$version" || return
+  test "$(manifest_value "$manifest" source_revision)" = "$revision" || return
+  test "$(manifest_value "$manifest" kernel_release)" = "$release" || return
+  test "$(manifest_value "$manifest" module_file)" = \
+    "$(accepted_transition_value candidate_module_file)" || return
+  test "$(manifest_value "$manifest" module_sha256)" = \
+    "$(accepted_transition_value candidate_module_sha256)" || return
+  test "$(manifest_value "$manifest" overlay_file)" = \
+    "$(accepted_transition_value candidate_overlay_file)" || return
+  test "$(manifest_value "$manifest" overlay_sha256)" = \
+    "$(accepted_transition_value candidate_overlay_sha256)" || return
+  remove_artifact_tree "$artifact" "$prior"
+}
+
 recover_accepted() {
+  if ! sudo test -e "$accepted_transition" && ! sudo test -L "$accepted_transition"; then
+    assert_accepted_state || die 'accepted driver receipt is missing or unsafe'
+    if sudo test -e "$accepted_transition_prior_config" || sudo test -L "$accepted_transition_prior_config"; then
+      assert_owned_regular "$accepted_transition_prior_config" 600 ||
+        die 'orphan accepted recovery config is unsafe'
+      sudo rm -- "$accepted_transition_prior_config" ||
+        die 'failed to clear orphan accepted recovery config'
+    fi
+    printf 'accepted recovery already complete\n'
+    return
+  fi
   assert_accepted_transition || die 'accepted driver transition is missing or unsafe'
+  case "$(accepted_transition_value phase)" in
+    prepared|staged|committed|verified) ;;
+    *) die 'accepted transition is already finalizing'
+      ;;
+  esac
   if sudo test -e "$state_file"; then
     rollback
+    retire_unaccepted_transition_artifact ||
+      die 'failed to retire recovered unaccepted driver artifact'
     sudo rm -- "$accepted_transition" "$accepted_transition_prior_config" ||
       die 'failed to clear recovered accepted binding'
     assert_accepted_state || die 'restored accepted driver receipt is unsafe'
@@ -2189,13 +2420,39 @@ recover_accepted() {
   printf 'recovered accepted %s\n' "$(accepted_value source_revision)"
 }
 
-accept_retained() {
-  local version revision release artifact manifest module_file module_sha overlay_file overlay_sha
-  local workspace receipt receipt_sha normal_sha prior_overlay prior_overlay_path
-
-  assert_accepted_transition || die 'accepted retained transition is missing or unsafe'
+mark_verified_accepted() {
+  assert_accepted_transition || die 'accepted driver transition is missing or unsafe'
   test "$(accepted_transition_value phase)" = committed ||
-    die 'accepted retained transition is not committed'
+    die 'accepted driver transition is not committed'
+  set_accepted_transition_phase committed verified ||
+    die 'failed to publish verified accepted transition'
+  fixture_interrupt_after accepted-verified-published
+  printf 'verified accepted %s\n' "$(accepted_transition_value candidate_source_revision)"
+}
+
+finalize_accepted() {
+  local version revision release artifact manifest module_file module_sha overlay_file overlay_sha
+  local workspace receipt receipt_sha normal_sha prior_version prior_revision prior_release
+  local prior_artifact prior_manifest prior_overlay prior_overlay_sha prior_overlay_path stock_sha phase
+
+  if ! sudo test -e "$accepted_transition" && ! sudo test -L "$accepted_transition"; then
+    assert_accepted_state || die 'accepted driver receipt is missing or unsafe'
+    if sudo test -e "$accepted_transition_prior_config" || sudo test -L "$accepted_transition_prior_config"; then
+      assert_owned_regular "$accepted_transition_prior_config" 600 ||
+        die 'orphan accepted transition config is unsafe'
+      sudo rm -- "$accepted_transition_prior_config" ||
+        die 'failed to clear orphan accepted transition config'
+    fi
+    printf 'accepted transition already finalized\n'
+    return
+  fi
+
+  assert_accepted_transition || die 'accepted transition is missing or unsafe'
+  phase="$(accepted_transition_value phase)"
+  case "$phase" in verified|finalizing|receipt_published) ;; *)
+    die 'accepted transition is not verified'
+    ;;
+  esac
   version="$(accepted_transition_value candidate_driver_version)"
   revision="$(accepted_transition_value candidate_source_revision)"
   release="$(accepted_transition_value candidate_kernel_release)"
@@ -2205,6 +2462,13 @@ accept_retained() {
   module_sha="$(manifest_value "$manifest" module_sha256)"
   overlay_file="$(manifest_value "$manifest" overlay_file)"
   overlay_sha="$(manifest_value "$manifest" overlay_sha256)"
+  test "$(sha "$manifest")" = "$(accepted_transition_value candidate_manifest_sha256)" ||
+    die 'candidate manifest differs from accepted transition'
+  test "$module_file" = "$(accepted_transition_value candidate_module_file)" &&
+    test "$module_sha" = "$(accepted_transition_value candidate_module_sha256)" &&
+    test "$overlay_file" = "$(accepted_transition_value candidate_overlay_file)" &&
+    test "$overlay_sha" = "$(accepted_transition_value candidate_overlay_sha256)" ||
+    die 'candidate artifacts differ from accepted transition'
   normal_sha="$(sha "$normal_config")"
   test "$normal_sha" = "$(accepted_transition_value candidate_normal_config_sha256)" ||
     die 'candidate normal config is not committed'
@@ -2216,129 +2480,400 @@ accept_retained() {
     die 'candidate overlay is not accepted'
   test "$(sha "${root}/boot/firmware/overlays/$overlay_file")" = "$overlay_sha" ||
     die 'candidate overlay differs'
-  prior_overlay="$(accepted_value overlay_file)"
+  prior_version="$(accepted_transition_value prior_driver_version)"
+  prior_revision="$(accepted_transition_value prior_source_revision)"
+  prior_release="$(accepted_transition_value prior_kernel_release)"
+  prior_artifact="$artifact_root/$prior_version/$prior_revision/$prior_release"
+  prior_manifest="$prior_artifact/manifest.txt"
+  prior_overlay="$(manifest_value "$prior_manifest" overlay_file)"
+  prior_overlay_sha="$(manifest_value "$prior_manifest" overlay_sha256)"
   prior_overlay_path="${root}/boot/firmware/overlays/$prior_overlay"
-  if test "$prior_overlay" != "$overlay_file"; then
-    assert_owned_regular "$prior_overlay_path" boot || die 'prior accepted overlay is unsafe'
-    test "$(sha "$prior_overlay_path")" = "$(accepted_value overlay_sha256)" ||
-      die 'prior accepted overlay drifted'
+  if test "$(accepted_value source_revision)" = "$prior_revision"; then
+    stock_sha="$(accepted_value stock_config_sha256)"
+  else
+    test "$(accepted_value source_revision)" = "$revision" ||
+      die 'accepted receipt is neither transition endpoint'
+    stock_sha="$(accepted_value stock_config_sha256)"
   fi
-  workspace="$(new_transaction_workspace)" || die 'failed to create retained acceptance workspace'
-  receipt="$(private_file "$workspace" accepted-state)" || die 'failed to allocate retained receipt'
-  {
-    printf 'schema_version=1\n'
-    printf 'driver_version=%s\n' "$version"
-    printf 'source_revision=%s\n' "$revision"
-    printf 'kernel_release=%s\n' "$release"
-    printf 'manifest_sha256=%s\n' "$(sha "$manifest")"
-    printf 'module_file=%s\n' "$module_file"
-    printf 'module_sha256=%s\n' "$module_sha"
-    printf 'overlay_file=%s\n' "$overlay_file"
-    printf 'overlay_sha256=%s\n' "$overlay_sha"
-    printf 'normal_config_sha256=%s\n' "$normal_sha"
-    printf 'stock_config_sha256=%s\n' "$(accepted_value stock_config_sha256)"
-  } | sudo tee "$receipt" >/dev/null || die 'failed to write retained receipt'
-  receipt_sha="$(sha "$receipt")"
-  atomic_copy "$receipt" "$accepted_state" 600 "$receipt_sha" ||
-    die 'failed to publish retained accepted receipt'
-  if test "$prior_overlay" != "$overlay_file"; then
-    sudo rm -- "$prior_overlay_path" || die 'failed to retire prior installed overlay'
+  if test "$phase" = verified; then
+    set_accepted_transition_phase verified finalizing ||
+      die 'failed to publish acceptance finalizer'
+    fixture_interrupt_after accepted-finalizing-published
+    phase=finalizing
   fi
-  sudo rm -- "$accepted_transition" "$accepted_transition_prior_config" ||
-    die 'failed to clear accepted transition'
-  remove_transaction_workspace "$workspace" || die 'failed to remove retained acceptance workspace'
+  if test "$phase" = finalizing; then
+    if test "$(accepted_value source_revision)" = "$prior_revision"; then
+      workspace="$(new_transaction_workspace)" || die 'failed to create acceptance workspace'
+      accepted_workspace="$workspace"
+      receipt="$(private_file "$workspace" accepted-state)" || die 'failed to allocate accepted receipt'
+      {
+        printf 'schema_version=1\n'
+        printf 'driver_version=%s\n' "$version"
+        printf 'source_revision=%s\n' "$revision"
+        printf 'kernel_release=%s\n' "$release"
+        printf 'manifest_sha256=%s\n' "$(sha "$manifest")"
+        printf 'module_file=%s\n' "$module_file"
+        printf 'module_sha256=%s\n' "$module_sha"
+        printf 'overlay_file=%s\n' "$overlay_file"
+        printf 'overlay_sha256=%s\n' "$overlay_sha"
+        printf 'normal_config_sha256=%s\n' "$normal_sha"
+        printf 'stock_config_sha256=%s\n' "$stock_sha"
+      } | sudo tee "$receipt" >/dev/null || die 'failed to write accepted receipt'
+      receipt_sha="$(sha "$receipt")"
+      atomic_copy "$receipt" "$accepted_state" 600 "$receipt_sha" ||
+        die 'failed to publish accepted receipt'
+      remove_transaction_workspace "$workspace" || die 'failed to remove acceptance workspace'
+      accepted_workspace=''
+      fixture_interrupt_after accepted-receipt-published
+    fi
+    set_accepted_transition_phase finalizing receipt_published ||
+      die 'failed to publish accepted receipt phase'
+    fixture_interrupt_after accepted-receipt-phase-published
+  fi
+  if test "$prior_overlay" != "$overlay_file"; then
+    if sudo test -e "$prior_overlay_path" || sudo test -L "$prior_overlay_path"; then
+      assert_owned_regular "$prior_overlay_path" boot || die 'prior accepted overlay is unsafe'
+      test "$(sha "$prior_overlay_path")" = "$prior_overlay_sha" ||
+        die 'prior accepted overlay drifted'
+      sudo rm -- "$prior_overlay_path" || die 'failed to retire prior installed overlay'
+    fi
+  fi
+  fixture_interrupt_after accepted-prior-retired
+  sudo rm -- "$accepted_transition" || die 'failed to clear accepted transition journal'
+  fixture_interrupt_after accepted-journal-cleared
+  sudo rm -- "$accepted_transition_prior_config" ||
+    die 'failed to clear accepted transition config'
   sudo sync
-  assert_accepted_state || die 'retained accepted receipt failed validation'
-  printf 'accepted retained %s\n' "$revision"
+  assert_accepted_state || die 'accepted receipt failed validation'
+  printf 'accepted %s\n' "$revision"
+}
+
+accepted_uninstall_value() {
+  local key="$1"
+  assert_owned_regular "$accepted_uninstall" 600 || return
+  sudo awk -F= -v wanted="$key" '$1 == wanted { print $2 }' "$accepted_uninstall"
+}
+
+assert_accepted_uninstall() {
+  local key count phase version revision release artifact detached prior
+
+  assert_owned_regular "$accepted_uninstall" 600 || return
+  assert_owned_regular "$accepted_uninstall_stock" 600 || return
+  test "$(sudo awk 'END { print NR }' "$accepted_uninstall")" = \
+    "${#accepted_uninstall_keys[@]}" || return
+  sudo awk -F= 'NF != 2 || $1 == "" || $2 == "" { exit 1 }' "$accepted_uninstall" || return
+  for key in "${accepted_uninstall_keys[@]}"; do
+    count="$(sudo awk -F= -v wanted="$key" '$1 == wanted { count++ } END { print count + 0 }' "$accepted_uninstall")"
+    test "$count" = 1 || return
+  done
+  test "$(accepted_uninstall_value schema_version)" = 2 || return
+  phase="$(accepted_uninstall_value phase)"
+  case "$phase" in prepared|boot_restored|dkms_restored|module_removed|overlay_removed|artifact_detached|receipt_removed|artifact_removed) ;; *) return 1;; esac
+  version="$(accepted_uninstall_value driver_version)"
+  revision="$(accepted_uninstall_value source_revision)"
+  release="$(accepted_uninstall_value kernel_release)"
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return
+  [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || return
+  [[ "$release" =~ ^[A-Za-z0-9._+-]+$ ]] || return
+  for key in manifest_sha256 module_sha256 overlay_sha256 stock_config_sha256; do
+    [[ "$(accepted_uninstall_value "$key")" =~ ^[0-9a-f]{64}$ ]] || return
+  done
+  test "$(accepted_uninstall_value module_file)" = hyperpixel2r_kms.ko || return
+  test "$(accepted_uninstall_value overlay_file)" = \
+    "hyperpixel2r-kms-${revision:0:12}.dtbo" || return
+  case "$(accepted_uninstall_value dkms_status)" in absent|unregistered|registered) ;; *) return 1;; esac
+  case "$(accepted_uninstall_value prior_dkms_status)" in absent|unregistered|registered) ;; *) return 1;; esac
+  case "$(accepted_uninstall_value artifact_prior)" in true|false) ;; *) return 1;; esac
+  test "$(sha "$accepted_uninstall_stock")" = \
+    "$(accepted_uninstall_value stock_config_sha256)" || return
+  artifact="$artifact_root/$version/$revision/$release"
+  detached="${artifact}.accepted-uninstall"
+  prior="$(accepted_uninstall_value artifact_prior)"
+  if sudo test -e "$artifact" || sudo test -L "$artifact"; then
+    assert_artifact_tree "$artifact" "$prior" || return
+    test "$(sha "$artifact/manifest.txt")" = \
+      "$(accepted_uninstall_value manifest_sha256)" || return
+  elif sudo test -e "$detached" || sudo test -L "$detached"; then
+    assert_artifact_tree "$detached" "$prior" || return
+    test "$(sha "$detached/manifest.txt")" = \
+      "$(accepted_uninstall_value manifest_sha256)" || return
+  else
+    case "$phase" in receipt_removed|artifact_removed) ;; *) return 1;; esac
+  fi
+}
+
+set_accepted_uninstall_phase() {
+  local expected="$1"
+  local next="$2"
+  local workspace state_tmp state_sha
+  assert_accepted_uninstall || return
+  test "$(accepted_uninstall_value phase)" = "$expected" || return
+  workspace="$(new_transaction_workspace)" || return
+  accepted_workspace="$workspace"
+  state_tmp="$(private_file "$workspace" accepted-uninstall)" || return
+  sudo sed -e "s/^phase=$expected\$/phase=$next/" "$accepted_uninstall" |
+    sudo tee "$state_tmp" >/dev/null || return
+  state_sha="$(sha "$state_tmp")" || return
+  atomic_copy "$state_tmp" "$accepted_uninstall" 600 "$state_sha" || return
+  remove_transaction_workspace "$workspace" || return
+  accepted_workspace=''
+  assert_accepted_uninstall
+}
+
+assert_accepted_receipt_matches_uninstall() {
+  local key count
+  assert_owned_regular "$accepted_state" 600 || return
+  assert_owned_regular "$accepted_stock_config" 600 || return
+  test "$(sudo awk 'END { print NR }' "$accepted_state")" = "${#accepted_keys[@]}" || return
+  for key in "${accepted_keys[@]}"; do
+    count="$(sudo awk -F= -v wanted="$key" '$1 == wanted { count++ } END { print count + 0 }' "$accepted_state")"
+    test "$count" = 1 || return
+  done
+  test "$(accepted_value schema_version)" = 1 || return
+  test "$(accepted_value driver_version)" = "$(accepted_uninstall_value driver_version)" || return
+  test "$(accepted_value source_revision)" = "$(accepted_uninstall_value source_revision)" || return
+  test "$(accepted_value kernel_release)" = "$(accepted_uninstall_value kernel_release)" || return
+  test "$(accepted_value manifest_sha256)" = "$(accepted_uninstall_value manifest_sha256)" || return
+  test "$(accepted_value module_file)" = "$(accepted_uninstall_value module_file)" || return
+  test "$(accepted_value module_sha256)" = "$(accepted_uninstall_value module_sha256)" || return
+  test "$(accepted_value overlay_file)" = "$(accepted_uninstall_value overlay_file)" || return
+  test "$(accepted_value overlay_sha256)" = "$(accepted_uninstall_value overlay_sha256)" || return
+  test "$(sha "$accepted_stock_config")" = "$(accepted_value stock_config_sha256)" || return
 }
 
 uninstall_accepted() {
   local version="$1"
   local revision="$2"
   local release="$3"
-  local artifact manifest module_file module_sha overlay_file overlay_sha module_path overlay_path
-  local workspace current_snapshot boot_candidate boot_sha prior=false prior_dkms_state_value dkms_dir dkms_status
+  local artifact detached manifest module_file module_sha overlay_file overlay_sha
+  local module_path overlay_path workspace current_snapshot boot_candidate boot_sha prior=false
+  local prior_dkms_state_value dkms_dir dkms_status state_tmp state_sha phase current_status
 
-  assert_accepted_state || die 'accepted driver state is missing or unsafe'
-  test "$(accepted_value driver_version)" = "$version" &&
-    test "$(accepted_value source_revision)" = "$revision" &&
-    test "$(accepted_value kernel_release)" = "$release" ||
-    die 'requested uninstall identity is not accepted'
   test ! -L "$state_file" && test ! -e "$state_file" ||
     die 'refusing accepted uninstall while a tryboot transaction is active'
+  test ! -L "$accepted_transition" && test ! -e "$accepted_transition" ||
+    die 'refusing accepted uninstall while a transition is active'
+  if ! sudo test -e "$accepted_uninstall" && ! sudo test -L "$accepted_uninstall"; then
+    assert_accepted_state || die 'accepted driver state is missing or unsafe'
+    test "$(accepted_value driver_version)" = "$version" &&
+      test "$(accepted_value source_revision)" = "$revision" &&
+      test "$(accepted_value kernel_release)" = "$release" ||
+      die 'requested uninstall identity is not accepted'
+    test ! -L "$accepted_uninstall_stock" && test ! -e "$accepted_uninstall_stock" ||
+      die 'orphan accepted uninstall stock exists'
+    artifact="$artifact_root/$version/$revision/$release"
+    manifest="$artifact/manifest.txt"
+    module_file="$(accepted_value module_file)"
+    module_sha="$(accepted_value module_sha256)"
+    overlay_file="$(accepted_value overlay_file)"
+    overlay_sha="$(accepted_value overlay_sha256)"
+    module_path="${root}/lib/modules/$release/extra/$module_file"
+    overlay_path="${root}/boot/firmware/overlays/$overlay_file"
+    assert_owned_regular "$module_path" 644 || die 'accepted module is unsafe'
+    assert_owned_regular "$overlay_path" boot || die 'accepted overlay is unsafe'
+    test "$(sha "$module_path")" = "$module_sha" || die 'accepted module drifted'
+    test "$(sha "$overlay_path")" = "$overlay_sha" || die 'accepted overlay drifted'
+    prior_dkms_state_value="$(dkms_prior_state "$artifact")" ||
+      die 'accepted prior DKMS state is unsafe'
+    dkms_dir="$dkms_root/hyperpixel2r-kms-$version"
+    assert_source_tree_shape "$dkms_dir" "$artifact/dkms-source" ||
+      die 'active DKMS source is not the accepted source'
+    dkms_status="$(validate_dkms_status "$version")" || die 'accepted DKMS state is invalid'
+    if sudo test -e "$artifact/prior-tryboot.txt"; then prior=true; fi
+    workspace="$(new_transaction_workspace)" || die 'failed to create accepted uninstall workspace'
+    accepted_workspace="$workspace"
+    current_snapshot="$(privileged_snapshot "$normal_config" "$workspace" uninstall-normal)" ||
+      die 'failed to snapshot normal boot config'
+    boot_candidate="$(private_file "$workspace" uninstall-stock)" ||
+      die 'failed to allocate uninstall boot config'
+    if test "$(sha "$current_snapshot")" = "$(accepted_value normal_config_sha256)"; then
+      atomic_copy "$accepted_stock_config" "$boot_candidate" 600 \
+        "$(accepted_value stock_config_sha256)" ||
+        die 'failed to prepare proven stock config'
+    else
+      write_surgical_stock_config "$current_snapshot" "$overlay_file" "$boot_candidate" "$workspace" ||
+        die 'changed boot config cannot be separated from the accepted driver'
+    fi
+    boot_sha="$(sha "$boot_candidate")"
+    atomic_copy "$boot_candidate" "$accepted_uninstall_stock" 600 "$boot_sha" ||
+      die 'failed to publish accepted uninstall stock'
+    state_tmp="$(private_file "$workspace" accepted-uninstall)" ||
+      die 'failed to allocate accepted uninstall journal'
+    {
+      printf 'schema_version=2\n'
+      printf 'phase=prepared\n'
+      printf 'driver_version=%s\n' "$version"
+      printf 'source_revision=%s\n' "$revision"
+      printf 'kernel_release=%s\n' "$release"
+      printf 'manifest_sha256=%s\n' "$(sha "$manifest")"
+      printf 'module_file=%s\n' "$module_file"
+      printf 'module_sha256=%s\n' "$module_sha"
+      printf 'overlay_file=%s\n' "$overlay_file"
+      printf 'overlay_sha256=%s\n' "$overlay_sha"
+      printf 'stock_config_sha256=%s\n' "$boot_sha"
+      printf 'dkms_status=%s\n' "$dkms_status"
+      printf 'prior_dkms_status=%s\n' "$prior_dkms_state_value"
+      printf 'artifact_prior=%s\n' "$prior"
+    } | sudo tee "$state_tmp" >/dev/null || die 'failed to write accepted uninstall journal'
+    state_sha="$(sha "$state_tmp")"
+    atomic_copy "$state_tmp" "$accepted_uninstall" 600 "$state_sha" ||
+      die 'failed to publish accepted uninstall journal'
+    remove_transaction_workspace "$workspace" || die 'failed to remove accepted uninstall workspace'
+    accepted_workspace=''
+    assert_accepted_uninstall || die 'accepted uninstall journal failed validation'
+    fixture_interrupt_after uninstall-journal-published
+  else
+    assert_accepted_uninstall || die 'accepted uninstall journal is unsafe'
+    test "$(accepted_uninstall_value driver_version)" = "$version" &&
+      test "$(accepted_uninstall_value source_revision)" = "$revision" &&
+      test "$(accepted_uninstall_value kernel_release)" = "$release" ||
+      die 'requested uninstall identity differs from active journal'
+  fi
+
   artifact="$artifact_root/$version/$revision/$release"
-  manifest="$artifact/manifest.txt"
-  module_file="$(accepted_value module_file)"
-  module_sha="$(accepted_value module_sha256)"
-  overlay_file="$(accepted_value overlay_file)"
-  overlay_sha="$(accepted_value overlay_sha256)"
+  detached="${artifact}.accepted-uninstall"
+  module_file="$(accepted_uninstall_value module_file)"
+  module_sha="$(accepted_uninstall_value module_sha256)"
+  overlay_file="$(accepted_uninstall_value overlay_file)"
+  overlay_sha="$(accepted_uninstall_value overlay_sha256)"
   module_path="${root}/lib/modules/$release/extra/$module_file"
   overlay_path="${root}/boot/firmware/overlays/$overlay_file"
-  assert_owned_regular "$module_path" 644 || die 'accepted module is unsafe'
-  assert_owned_regular "$overlay_path" boot || die 'accepted overlay is unsafe'
-  test "$(sha "$module_path")" = "$module_sha" || die 'accepted module drifted'
-  test "$(sha "$overlay_path")" = "$overlay_sha" || die 'accepted overlay drifted'
-  assert_owned_regular "$normal_config" boot || die 'normal boot config is unsafe'
-  prior_dkms_state_value="$(dkms_prior_state "$artifact")" ||
-    die 'accepted prior DKMS state is unsafe'
   dkms_dir="$dkms_root/hyperpixel2r-kms-$version"
-  assert_source_tree_shape "$dkms_dir" "$artifact/dkms-source" ||
-    die 'active DKMS source is not the accepted source'
-  dkms_status="$(validate_dkms_status "$version")" || die 'accepted DKMS state is invalid'
-  case "$dkms_status" in absent|unregistered|registered) ;; *) die 'accepted DKMS state is invalid';; esac
-  case "$prior_dkms_state_value" in
-    absent) ;;
-    unregistered|registered)
-      assert_source_tree_shape "$artifact/prior-dkms" ||
-        die 'accepted prior DKMS source is unsafe'
-      ;;
-    *) die 'accepted prior DKMS state is invalid' ;;
-  esac
-
-  workspace="$(new_transaction_workspace)" || die 'failed to create accepted uninstall workspace'
-  current_snapshot="$(privileged_snapshot "$normal_config" "$workspace" uninstall-normal)" ||
-    die 'failed to snapshot normal boot config'
-  boot_candidate="$(private_file "$workspace" uninstall-stock)" ||
-    die 'failed to allocate uninstall boot config'
-  if test "$(sha "$current_snapshot")" = "$(accepted_value normal_config_sha256)"; then
-    expected_stock_sha="$(accepted_value stock_config_sha256)"
-    atomic_copy "$accepted_stock_config" "$boot_candidate" 600 "$expected_stock_sha" ||
-      die 'failed to prepare proven stock config'
-  else
-    write_surgical_stock_config "$current_snapshot" "$overlay_file" "$boot_candidate" "$workspace" ||
-      die 'changed boot config cannot be surgically separated from the accepted driver'
+  phase="$(accepted_uninstall_value phase)"
+  if test "$phase" = prepared; then
+    atomic_copy "$accepted_uninstall_stock" "$normal_config" 644 \
+      "$(accepted_uninstall_value stock_config_sha256)" true ||
+      die 'failed to publish stock normal boot config'
+    fixture_interrupt_after uninstall-boot-restored
+    set_accepted_uninstall_phase prepared boot_restored ||
+      die 'failed to publish boot-restored uninstall phase'
+    phase=boot_restored
   fi
-  boot_sha="$(sha "$boot_candidate")"
-
-  # Every target above is checksum- and relationship-proven before the first
-  # mutation.  The boot publication comes first so no normal boot ever points
-  # at an overlay removed later in this exact transaction.
-  atomic_copy "$boot_candidate" "$normal_config" 644 "$boot_sha" true ||
-    die 'failed to publish stock normal boot config'
-  if test "$dkms_status" = registered; then
-    run_dkms remove -m hyperpixel2r-kms -v "$version" --all ||
-      die 'failed to remove accepted DKMS registration'
-  fi
-  remove_exact_tree "$dkms_dir" || die 'failed to remove accepted DKMS source'
-  if test "$prior_dkms_state_value" != absent; then
-    materialize_source_tree "$artifact/prior-dkms" "$dkms_dir" ||
-      die 'failed to restore prior DKMS source'
-    if test "$prior_dkms_state_value" = registered; then
-      run_dkms add -m hyperpixel2r-kms -v "$version" ||
-        die 'failed to restore prior DKMS registration'
+  if test "$phase" = boot_restored; then
+    if sudo test -e "$dkms_dir" || sudo test -L "$dkms_dir"; then
+      if assert_source_tree_shape "$dkms_dir" "$artifact/dkms-source" 2>/dev/null; then
+        current_status="$(validate_dkms_status "$version")" || die 'active DKMS status is invalid'
+        if test "$current_status" = registered; then
+          run_dkms remove -m hyperpixel2r-kms -v "$version" --all ||
+            die 'failed to remove accepted DKMS registration'
+        fi
+        remove_exact_tree "$dkms_dir" || die 'failed to remove accepted DKMS source'
+      elif test "$(accepted_uninstall_value prior_dkms_status)" != absent &&
+        assert_source_tree_shape "$dkms_dir" "$artifact/prior-dkms" 2>/dev/null; then
+        :
+      else
+        die 'DKMS source is neither accepted nor proven prior'
+      fi
     fi
+    if test "$(accepted_uninstall_value prior_dkms_status)" != absent &&
+      ! sudo test -e "$dkms_dir"; then
+      materialize_source_tree "$artifact/prior-dkms" "$dkms_dir" ||
+        die 'failed to restore prior DKMS source'
+      if test "$(accepted_uninstall_value prior_dkms_status)" = registered; then
+        run_dkms add -m hyperpixel2r-kms -v "$version" ||
+          die 'failed to restore prior DKMS registration'
+      fi
+    fi
+    fixture_interrupt_after uninstall-dkms-restored
+    set_accepted_uninstall_phase boot_restored dkms_restored ||
+      die 'failed to publish DKMS-restored uninstall phase'
+    phase=dkms_restored
   fi
-  sudo rm -- "$module_path" "$overlay_path" || die 'failed to remove accepted driver leaves'
+  if test "$phase" = dkms_restored; then
+    if sudo test -e "$module_path" || sudo test -L "$module_path"; then
+      assert_owned_regular "$module_path" 644 || die 'accepted module became unsafe'
+      test "$(sha "$module_path")" = "$module_sha" || die 'accepted module drifted'
+      sudo rm -- "$module_path" || die 'failed to remove accepted module'
+    fi
+    fixture_interrupt_after uninstall-module-removed
+    set_accepted_uninstall_phase dkms_restored module_removed ||
+      die 'failed to publish module-removed uninstall phase'
+    phase=module_removed
+  fi
+  if test "$phase" = module_removed; then
+    if sudo test -e "$overlay_path" || sudo test -L "$overlay_path"; then
+      assert_owned_regular "$overlay_path" boot || die 'accepted overlay became unsafe'
+      test "$(sha "$overlay_path")" = "$overlay_sha" || die 'accepted overlay drifted'
+      sudo rm -- "$overlay_path" || die 'failed to remove accepted overlay'
+    fi
+    fixture_interrupt_after uninstall-overlay-removed
+    set_accepted_uninstall_phase module_removed overlay_removed ||
+      die 'failed to publish overlay-removed uninstall phase'
+    phase=overlay_removed
+  fi
+  if test "$phase" = overlay_removed; then
+    if sudo test -e "$artifact" || sudo test -L "$artifact"; then
+      assert_artifact_tree "$artifact" "$(accepted_uninstall_value artifact_prior)" ||
+        die 'accepted artifact became unsafe'
+      test ! -L "$detached" && test ! -e "$detached" ||
+        die 'accepted artifact tombstone already exists'
+      sudo mv -- "$artifact" "$detached" || die 'failed to detach accepted artifact'
+    fi
+    fixture_interrupt_after uninstall-artifact-detached
+    set_accepted_uninstall_phase overlay_removed artifact_detached ||
+      die 'failed to publish artifact-detached uninstall phase'
+    phase=artifact_detached
+  fi
+  if test "$phase" = artifact_detached; then
+    if sudo test -e "$accepted_state" || sudo test -L "$accepted_state"; then
+      assert_accepted_receipt_matches_uninstall || die 'accepted receipt became unsafe'
+      sudo rm -- "$accepted_state" || die 'failed to remove accepted receipt'
+    fi
+    fixture_interrupt_after uninstall-receipt-removed
+    if sudo test -e "$accepted_stock_config" || sudo test -L "$accepted_stock_config"; then
+      assert_owned_regular "$accepted_stock_config" 600 || die 'accepted stock became unsafe'
+      sudo rm -- "$accepted_stock_config" || die 'failed to remove accepted stock receipt'
+    fi
+    set_accepted_uninstall_phase artifact_detached receipt_removed ||
+      die 'failed to publish receipt-removed uninstall phase'
+  fi
   sudo depmod -a "$release"
-  if sudo test -L "$artifact/prior-tryboot.txt"; then die 'unsafe prior tryboot receipt'
-  elif sudo test -e "$artifact/prior-tryboot.txt"; then prior=true
-  fi
-  remove_artifact_tree "$artifact" "$prior" || die 'failed to remove accepted artifact bundle'
-  sudo rm -- "$accepted_state" "$accepted_stock_config" ||
-    die 'failed to remove accepted driver receipt'
-  remove_transaction_workspace "$workspace" || die 'failed to remove accepted uninstall workspace'
   sudo sync
   printf 'uninstalled accepted %s\n' "$revision"
+}
+
+finalize_uninstall_accepted() {
+  local version revision release artifact detached phase
+
+  if ! sudo test -e "$accepted_uninstall" && ! sudo test -L "$accepted_uninstall"; then
+    if sudo test -e "$accepted_uninstall_stock" || sudo test -L "$accepted_uninstall_stock"; then
+      assert_owned_regular "$accepted_uninstall_stock" 600 ||
+        die 'orphan accepted uninstall stock is unsafe'
+      sudo rm -- "$accepted_uninstall_stock" ||
+        die 'failed to clear orphan accepted uninstall stock'
+    fi
+    printf 'accepted uninstall already finalized\n'
+    return
+  fi
+  assert_accepted_uninstall || die 'accepted uninstall journal is unsafe'
+  phase="$(accepted_uninstall_value phase)"
+  case "$phase" in receipt_removed|artifact_removed) ;; *)
+    die 'accepted uninstall is not ready to finalize'
+    ;;
+  esac
+  version="$(accepted_uninstall_value driver_version)"
+  revision="$(accepted_uninstall_value source_revision)"
+  release="$(accepted_uninstall_value kernel_release)"
+  artifact="$artifact_root/$version/$revision/$release"
+  detached="${artifact}.accepted-uninstall"
+  if test "$phase" = receipt_removed; then
+    test ! -L "$artifact" && test ! -e "$artifact" ||
+      die 'accepted artifact was republished after detach'
+    if sudo test -e "$detached" || sudo test -L "$detached"; then
+      assert_artifact_tree "$detached" "$(accepted_uninstall_value artifact_prior)" ||
+        die 'detached accepted artifact is unsafe'
+      sudo rm -rf -- "$detached" || die 'failed to remove detached accepted artifact'
+    fi
+    fixture_interrupt_after uninstall-artifact-removed
+    set_accepted_uninstall_phase receipt_removed artifact_removed ||
+      die 'failed to publish artifact-removed uninstall phase'
+  fi
+  sudo rm -- "$accepted_uninstall" || die 'failed to clear accepted uninstall journal'
+  fixture_interrupt_after uninstall-journal-cleared
+  sudo rm -- "$accepted_uninstall_stock" ||
+    die 'failed to clear accepted uninstall stock'
+  sudo sync
+  printf 'finalized accepted uninstall %s\n' "$revision"
 }
 
 retire_inactive_accepted() {
@@ -2357,6 +2892,10 @@ retire_inactive_accepted() {
   test ! -L "$state_file" && test ! -e "$state_file" ||
     die 'refusing inactive retirement during a legacy transition'
   artifact="$artifact_root/$version/$revision/$release"
+  if ! sudo test -e "$artifact" && ! sudo test -L "$artifact"; then
+    printf 'inactive artifact already retired %s\n' "$revision"
+    return
+  fi
   if sudo test -L "$artifact/prior-tryboot.txt"; then die 'unsafe inactive prior tryboot receipt'
   elif sudo test -e "$artifact/prior-tryboot.txt"; then prior=true
   fi
@@ -2529,15 +3068,17 @@ case "${1-}" in
   commit) commit ;;
   rollback) rollback ;;
   record-accepted) shift; record_accepted "$@" ;;
-  bind-staged-accepted) bind_staged_accepted ;;
+  prepare-new-accepted) shift; prepare_new_accepted "$@" ;;
   mark-committed-accepted) mark_committed_accepted ;;
   stage-retained) shift; stage_retained "$@" ;;
   commit-retained) commit_retained ;;
   recover-accepted) recover_accepted ;;
-  accept-retained) accept_retained ;;
+  mark-verified-accepted) mark_verified_accepted ;;
+  finalize-accepted) finalize_accepted ;;
   uninstall-accepted) shift; uninstall_accepted "$@" ;;
+  finalize-uninstall-accepted) finalize_uninstall_accepted ;;
   retire-inactive) shift; retire_inactive_accepted "$@" ;;
   uninstall) uninstall ;;
   cleanup-legacy-planeradar) shift; cleanup_legacy_planeradar "$@" ;;
-  *) die 'usage: lifecycle-remote.sh {stage|identity|commit|rollback|record-accepted|bind-staged-accepted|mark-committed-accepted|stage-retained|commit-retained|recover-accepted|accept-retained|uninstall-accepted|retire-inactive|uninstall|cleanup-legacy-planeradar}' ;;
+  *) die 'usage: lifecycle-remote.sh {stage|identity|commit|rollback|record-accepted|prepare-new-accepted|mark-committed-accepted|stage-retained|commit-retained|recover-accepted|mark-verified-accepted|finalize-accepted|uninstall-accepted|finalize-uninstall-accepted|retire-inactive|uninstall|cleanup-legacy-planeradar}' ;;
 esac

@@ -586,23 +586,29 @@ SCRIPT
 
 run_stage() {
   local fixture_release="${HP2R_FIXTURE_RELEASE_OVERRIDE:-$release}"
+  local fixture_artifact="${HP2R_FIXTURE_ARTIFACT_DIR_OVERRIDE:-$repo_root/dist/artifacts/$release}"
+  local fixture_source_root="${HP2R_FIXTURE_SOURCE_ROOT_OVERRIDE:-$repo_root}"
   local result
 
   if PATH="$bin:$PATH" \
     HP2R_FIXTURE_ROOT="$root" \
     HP2R_FIXTURE_RELEASE="$fixture_release" \
     HP2R_FIXTURE_LOG="$log" \
-    HP2R_FIXTURE_REPO_ROOT="$repo_root" \
+    HP2R_FIXTURE_REPO_ROOT="$fixture_source_root" \
     HP2R_RELEASE_SOURCE_ROOT="${HP2R_RELEASE_SOURCE_ROOT:-}" \
     HP2R_TARGET=pi@fixture \
     "$repo_root/scripts/stage-tryboot.sh" \
-      --artifact-dir "$repo_root/dist/artifacts/$release" \
+      --artifact-dir "$fixture_artifact" \
       --replace-overlay vc4-kms-dpi-hyperpixel2r; then
-    assert_no_private_workspaces
+    if test "${HP2R_FIXTURE_PRESERVE_MUTATIONS:-}" != 1; then
+      assert_no_private_workspaces
+    fi
     return
   else
     result=$?
-    assert_no_private_workspaces
+    if test "${HP2R_FIXTURE_PRESERVE_MUTATIONS:-}" != 1; then
+      assert_no_private_workspaces
+    fi
     return "$result"
   fi
 }
@@ -842,9 +848,88 @@ grep -Fxq 'schema_version=1' "$accepted_receipt" ||
 if grep -Eq '^[[:space:]]*dtoverlay=.*hyperpixel2r' "$stock_config"; then
   fail 'accepted stock boot candidate retained a driver declaration'
 fi
+accepted_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+new_revision='cccccccccccccccccccccccccccccccccccccccc'
+new_overlay='hyperpixel2r-kms-cccccccccccc.dtbo'
+if HP2R_FIXTURE_INTERRUPT_AFTER=accepted-transition-published \
+  run_accepted_remote prepare-new-accepted \
+    0.1.0 "$new_revision" "$release" "$(printf d%.0s {1..64})" \
+    hyperpixel2r_kms.ko "$(printf e%.0s {1..64})" \
+    "$new_overlay" "$(printf f%.0s {1..64})" >/dev/null 2>&1; then
+  fail 'new transition ignored interruption after pre-mutation journal publication'
+fi
+new_transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
+assert_file "$new_transition"
+grep -Fxq 'schema_version=2' "$new_transition" ||
+  fail 'new transition did not publish the complete v2 journal'
+grep -Fxq 'kind=new' "$new_transition" ||
+  fail 'new transition journal lost its candidate kind'
+grep -Fxq "candidate_source_revision=$new_revision" "$new_transition" ||
+  fail 'new transition journal lost its exact candidate identity'
+assert_absent "$root/usr/lib/hyperpixel2r-kms/0.1.0/$new_revision/$release"
+assert_absent "$root/boot/firmware/tryboot.txt"
+grep -Fxq "dtoverlay=$overlay_file" "$root/boot/firmware/config.txt" ||
+  fail 'new journal publication mutated the accepted boot config'
+run_accepted_remote recover-accepted >/dev/null
+assert_absent "$new_transition"
+grep -Fxq "source_revision=$source_revision" "$accepted_receipt" ||
+  fail 'new prepared-transition recovery changed the accepted receipt'
+
+new_stage_revision='dddddddddddddddddddddddddddddddddddddddd'
+new_stage_overlay='hyperpixel2r-kms-dddddddddddd.dtbo'
+new_stage_source="$fixture/new-stage-source"
+new_stage_artifact="$new_stage_source/dist/artifacts/$release"
+mkdir -p "$(dirname "$new_stage_artifact")"
+cp -a "$accepted_artifact" "$new_stage_artifact"
+mv "$new_stage_artifact/$overlay_file" "$new_stage_artifact/$new_stage_overlay"
+printf 'new accepted candidate module\n' >> "$new_stage_artifact/hyperpixel2r_kms.ko"
+printf 'new accepted candidate overlay\n' >> "$new_stage_artifact/$new_stage_overlay"
+new_stage_module_sha="$(sha256sum "$new_stage_artifact/hyperpixel2r_kms.ko" | awk '{print $1}')"
+new_stage_overlay_sha="$(sha256sum "$new_stage_artifact/$new_stage_overlay" | awk '{print $1}')"
+sed -i \
+  -e "s/^source_revision\t.*/source_revision\t$new_stage_revision/" \
+  -e "s/^module_sha256\t.*/module_sha256\t$new_stage_module_sha/" \
+  -e "s/^overlay_file\t.*/overlay_file\t$new_stage_overlay/" \
+  -e "s/^overlay_sha256\t.*/overlay_sha256\t$new_stage_overlay_sha/" \
+  "$new_stage_artifact/manifest.txt"
+printf '%s  %s\n' "$new_stage_module_sha" hyperpixel2r_kms.ko \
+  > "$new_stage_artifact/module.sha256"
+printf '%s  %s\n' "$new_stage_overlay_sha" "$new_stage_overlay" \
+  > "$new_stage_artifact/overlay.sha256"
+new_stage_manifest_sha="$(sha256sum "$new_stage_artifact/manifest.txt" | awk '{print $1}')"
+
+for boundary in \
+  candidate-artifact-published candidate-module-installed candidate-overlay-installed \
+  candidate-dkms-activated candidate-tryboot-published \
+  candidate-tryboot-state-published candidate-staged-published
+do
+  run_accepted_remote prepare-new-accepted \
+    0.1.0 "$new_stage_revision" "$release" "$new_stage_manifest_sha" \
+    hyperpixel2r_kms.ko "$new_stage_module_sha" \
+    "$new_stage_overlay" "$new_stage_overlay_sha" >/dev/null
+  if HP2R_FIXTURE_INTERRUPT_AFTER="$boundary" \
+    HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
+    HP2R_FIXTURE_ARTIFACT_DIR_OVERRIDE="$new_stage_artifact" \
+    HP2R_FIXTURE_SOURCE_ROOT_OVERRIDE="$new_stage_source" \
+    run_stage >/dev/null 2>&1; then
+    fail "new accepted stage ignored interruption at $boundary"
+  fi
+  assert_file "$new_transition"
+  run_accepted_remote recover-accepted >/dev/null
+  assert_absent "$new_transition"
+  assert_absent "$root/usr/lib/hyperpixel2r-kms/0.1.0/$new_stage_revision/$release"
+  assert_absent "$root/boot/firmware/tryboot.txt"
+  grep -Fxq "dtoverlay=$overlay_file" "$root/boot/firmware/config.txt" ||
+    fail "new accepted recovery after $boundary did not restore prior boot"
+  grep -Fxq "source_revision=$source_revision" "$accepted_receipt" ||
+    fail "new accepted recovery after $boundary changed the accepted receipt"
+  find "$root/var/lib/hyperpixel2r-kms" -mindepth 1 -maxdepth 1 \
+    -type d -name '.hp2r-transaction.*' -exec rm -rf -- {} +
+  assert_no_private_workspaces
+done
+
 retained_revision='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 retained_overlay='hyperpixel2r-kms-bbbbbbbbbbbb.dtbo'
-accepted_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
 retained_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$retained_revision/$release"
 mkdir -p "$(dirname "$retained_artifact")"
 cp -a "$accepted_artifact" "$retained_artifact"
@@ -853,6 +938,21 @@ sed -i \
   -e "s/^source_revision\t.*/source_revision\t$retained_revision/" \
   -e "s/^overlay_file\t.*/overlay_file\t$retained_overlay/" \
   "$retained_artifact/manifest.txt"
+
+for boundary in \
+  accepted-transition-published retained-overlay-installed retained-module-installed \
+  retained-dkms-activated retained-tryboot-published retained-staged-published
+do
+  if HP2R_FIXTURE_INTERRUPT_AFTER="$boundary" \
+    run_accepted_remote stage-retained 0.1.0 "$retained_revision" "$release" >/dev/null 2>&1; then
+    fail "retained transition accepted interruption at $boundary"
+  fi
+  assert_file "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  run_accepted_remote recover-accepted >/dev/null
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  grep -Fxq "dtoverlay=$overlay_file" "$root/boot/firmware/config.txt" ||
+    fail "retained recovery after $boundary did not restore prior boot"
+done
 
 run_accepted_remote stage-retained 0.1.0 "$retained_revision" "$release" >/dev/null
 assert_file "$root/var/lib/hyperpixel2r-kms/accepted-transition"
@@ -871,10 +971,40 @@ grep -Fxq "dtoverlay=$overlay_file" "$root/boot/firmware/config.txt" ||
 
 run_accepted_remote stage-retained 0.1.0 "$retained_revision" "$release" >/dev/null
 run_accepted_remote commit-retained >/dev/null
-run_accepted_remote accept-retained >/dev/null
+run_accepted_remote mark-verified-accepted >/dev/null
+assert_file "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+grep -Fxq 'phase=verified' "$root/var/lib/hyperpixel2r-kms/accepted-transition" ||
+  fail 'driver acceptance did not retain the verified transition journal'
+for boundary in \
+  accepted-finalizing-published accepted-receipt-published \
+  accepted-receipt-phase-published accepted-prior-retired accepted-journal-cleared
+do
+  if HP2R_FIXTURE_INTERRUPT_AFTER="$boundary" \
+    run_accepted_remote finalize-accepted >/dev/null 2>&1; then
+    fail "accepted finalizer ignored interruption at $boundary"
+  fi
+  if test "$boundary" = accepted-journal-cleared; then
+    assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  else
+    assert_file "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  fi
+done
+run_accepted_remote finalize-accepted >/dev/null
+run_accepted_remote finalize-accepted >/dev/null
 grep -Fxq "source_revision=$retained_revision" "$accepted_receipt" ||
   fail 'retained acceptance did not rotate the exact receipt'
 printf 'dtparam=audio=on\n' >> "$root/boot/firmware/config.txt"
+for boundary in \
+  uninstall-journal-published uninstall-boot-restored uninstall-dkms-restored \
+  uninstall-module-removed uninstall-overlay-removed uninstall-artifact-detached \
+  uninstall-receipt-removed
+do
+  if HP2R_FIXTURE_INTERRUPT_AFTER="$boundary" \
+    run_accepted_remote uninstall-accepted 0.1.0 "$retained_revision" "$release" >/dev/null 2>&1; then
+    fail "accepted uninstall ignored interruption at $boundary"
+  fi
+  assert_file "$root/var/lib/hyperpixel2r-kms/accepted-uninstall"
+done
 run_accepted_remote uninstall-accepted 0.1.0 "$retained_revision" "$release" >/dev/null
 grep -Fxq '[all]' "$root/boot/firmware/config.txt" ||
   fail 'accepted uninstall did not restore the proven stock boot candidate'
@@ -883,8 +1013,20 @@ grep -Fxq 'dtparam=audio=on' "$root/boot/firmware/config.txt" ||
 assert_absent "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko"
 assert_absent "$root/boot/firmware/overlays/$retained_overlay"
 assert_absent "$accepted_receipt"
+assert_file "$root/var/lib/hyperpixel2r-kms/accepted-uninstall"
 run_accepted_remote retire-inactive 0.1.0 "$source_revision" "$release" >/dev/null
 assert_absent "$accepted_artifact"
+if HP2R_FIXTURE_INTERRUPT_AFTER=uninstall-artifact-removed \
+  run_accepted_remote finalize-uninstall-accepted >/dev/null 2>&1; then
+  fail 'accepted uninstall finalizer ignored artifact-removal interruption'
+fi
+assert_file "$root/var/lib/hyperpixel2r-kms/accepted-uninstall"
+if HP2R_FIXTURE_INTERRUPT_AFTER=uninstall-journal-cleared \
+  run_accepted_remote finalize-uninstall-accepted >/dev/null 2>&1; then
+  fail 'accepted uninstall finalizer ignored journal-clear interruption'
+fi
+run_accepted_remote finalize-uninstall-accepted >/dev/null
+assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-uninstall"
 
 # A verified release-source extraction has no ambient Git repository.  Its
 # exact source identity and regular kernel leaves must be sufficient for
