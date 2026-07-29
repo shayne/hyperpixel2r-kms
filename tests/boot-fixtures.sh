@@ -50,7 +50,12 @@ assert_incoming_stage_cleaned() {
 
 new_target() {
   rm -rf -- "$root" "$bin" "$bin_no_dkms" "$log"
-  mkdir -p "$root/boot/firmware/overlays" "$root/tmp" "$root/var/lib" "$bin"
+  mkdir -p \
+    "$root/boot/firmware/overlays" \
+    "$root/lib/modules/$release" \
+    "$root/tmp" \
+    "$root/var/lib" \
+    "$bin"
   chmod 1777 "$root/tmp"
   printf '[all]\ndtoverlay=vc4-kms-dpi-hyperpixel2r,rotate=90\n' \
     > "$root/boot/firmware/config.txt"
@@ -329,6 +334,18 @@ test -n "$relative"
 printf '%s\n' "$HP2R_FIXTURE_ROOT/lib/modules/$release/$relative"
 SCRIPT
 
+  install -m 0755 /dev/stdin "$bin/gzip" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+if test "${HP2R_FIXTURE_GZIP_BOMB:-}" = 1; then
+  test "${1-}" = -dc
+  head -c 9437184 /dev/zero
+  : > "$HP2R_FIXTURE_ROOT/tmp/gzip-bomb-completed"
+  exit 0
+fi
+exec /usr/bin/gzip "$@"
+SCRIPT
+
   install -m 0755 /dev/stdin "$bin/reboot" <<'SCRIPT'
 #!/usr/bin/env bash
 exit 64
@@ -447,7 +464,11 @@ case "${1-}" in
     if test -f "$marker"; then
       while IFS=$'\t' read -r recorded_kernel recorded_arch recorded_state extra; do
         test -z "$extra" || exit 65
-        rm -f -- "$HP2R_FIXTURE_ROOT/lib/modules/$recorded_kernel/updates/dkms/hyperpixel2r_kms.ko"
+        rm -f -- \
+          "$HP2R_FIXTURE_ROOT/lib/modules/$recorded_kernel/updates/dkms/hyperpixel2r_kms.ko" \
+          "$HP2R_FIXTURE_ROOT/lib/modules/$recorded_kernel/updates/dkms/hyperpixel2r_kms.ko.xz" \
+          "$HP2R_FIXTURE_ROOT/lib/modules/$recorded_kernel/updates/dkms/hyperpixel2r_kms.ko.zst" \
+          "$HP2R_FIXTURE_ROOT/lib/modules/$recorded_kernel/updates/dkms/hyperpixel2r_kms.ko.gz"
       done < <(sed -n '2,$p' "$marker")
     fi
     rm -f -- "$marker"
@@ -852,6 +873,69 @@ prepare_exact_candidate_dkms() {
       ;;
     *) fail "unsupported exact candidate DKMS registration fixture: $registration" ;;
   esac
+}
+
+prepare_installed_rollback_shape() {
+  local shape="$1"
+  local label="$2"
+
+  shared_extra_module="$root/lib/modules/$release/extra/hyperpixel2r_kms.ko"
+  shared_extra_sha=none
+  case "$shape" in
+    created)
+      prepare_exact_candidate_dkms installed
+      ;;
+    shared)
+      prepare_prior_dkms "$label" installed
+      mkdir -p "$(dirname "$shared_extra_module")"
+      cp "$candidate_manifest_module" "$shared_extra_module"
+      chown root:root "$shared_extra_module"
+      chmod 0644 "$shared_extra_module"
+      shared_extra_sha="$(sha256sum "$shared_extra_module" | awk '{ print $1 }')"
+      ;;
+    *) fail "unsupported rollback matrix shape: $shape" ;;
+  esac
+  prior_installed_module="$root/lib/modules/$release/updates/dkms/hyperpixel2r_kms.ko"
+  prior_installed_sha="$(sha256sum "$prior_installed_module" | awk '{ print $1 }')"
+  PATH="$bin:$PATH" HP2R_FIXTURE_ROOT="$root" HP2R_FIXTURE_RELEASE="$release" depmod -a "$release"
+  run_stage >/dev/null
+  state="$root/var/lib/hyperpixel2r-kms/tryboot-state"
+  grep -Fxq 'schema_version=3' "$state" ||
+    fail "rollback matrix shape is not schema 3: $shape"
+  if test "$shape" = shared; then
+    grep -Fxq 'module_existed=true' "$state" ||
+      fail 'shared rollback matrix did not record its preexisting module'
+  else
+    grep -Fxq 'module_existed=false' "$state" ||
+      fail 'created rollback matrix did not record its transaction-created module'
+  fi
+  first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+  assert_dkms_inventory "$first_artifact/dkms-prior-state" added \
+    "$release"$'\taarch64\tinstalled'
+}
+
+assert_installed_rollback_shape_restored() {
+  local shape="$1"
+  local boundary="$2"
+
+  assert_file "$prior_installed_module"
+  test "$(sha256sum "$prior_installed_module" | awk '{ print $1 }')" = "$prior_installed_sha" ||
+    fail "$shape replay after $boundary changed prior module bytes"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/rollback-state"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/rollback-candidate-dkms-state"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/rollback-candidate-tryboot.txt"
+  if test "$shape" = shared; then
+    assert_file "$shared_extra_module"
+    test "$(sha256sum "$shared_extra_module" | awk '{ print $1 }')" = "$shared_extra_sha" ||
+      fail "shared replay after $boundary changed the preexisting /extra module"
+  else
+    assert_absent "$shared_extra_module"
+  fi
+  assert_absent "$shared_extra_module.hp2r-rollback-hold"
+  grep -Fxq 'hyperpixel2r_kms.ko: updates/dkms/hyperpixel2r_kms.ko' \
+    "$root/lib/modules/$release/modules.dep" ||
+    fail "$shape replay after $boundary did not resolve prior DKMS"
 }
 
 run_fixture_dkms() {
@@ -2083,6 +2167,53 @@ grep -Fxq 'hyperpixel2r_kms.ko: extra/hyperpixel2r_kms.ko' \
   "$root/lib/modules/$release/modules.dep" ||
   fail 'stage accepted exact bytes from the wrong module leaf'
 
+# A final regular module leaf is not safe when a mutable ancestor in the
+# kernel-module path is a symlink.  Reject the path chain before it can become
+# candidate authority.
+new_target
+module_release_root="$root/lib/modules/$release"
+mkdir -p "$module_release_root"
+mv "$module_release_root" "$module_release_root.real"
+ln -s "$release.real" "$module_release_root"
+if run_stage >/dev/null 2>&1; then
+  fail 'stage accepted a symlinked kernel-module path ancestor'
+fi
+assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+
+# Compressed modules are decoded only to a fixed output ceiling.  The fixture
+# producer writes a completion marker after 9 MiB; a bounded reader closes the
+# pipe before that marker can be published.
+new_target
+prepare_exact_candidate_dkms installed
+compressed_installed_module="$root/lib/modules/$release/updates/dkms/hyperpixel2r_kms.ko.gz"
+gzip -c "$candidate_manifest_module" > "$compressed_installed_module"
+rm -f -- "$root/lib/modules/$release/updates/dkms/hyperpixel2r_kms.ko"
+chown root:root "$compressed_installed_module"
+chmod 0644 "$compressed_installed_module"
+PATH="$bin:$PATH" HP2R_FIXTURE_ROOT="$root" HP2R_FIXTURE_RELEASE="$release" depmod -a "$release"
+if HP2R_FIXTURE_GZIP_BOMB=1 run_stage >/dev/null 2>&1; then
+  fail 'stage accepted oversized compressed module output'
+fi
+assert_absent "$root/tmp/gzip-bomb-completed"
+assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+
+# A valid compressed installed leaf remains supported.  It is byte-exact but
+# still detached because only the manifest /extra path can become candidate
+# authority.
+new_target
+prepare_exact_candidate_dkms installed
+compressed_installed_module="$root/lib/modules/$release/updates/dkms/hyperpixel2r_kms.ko.gz"
+gzip -c "$candidate_manifest_module" > "$compressed_installed_module"
+rm -f -- "$root/lib/modules/$release/updates/dkms/hyperpixel2r_kms.ko"
+chown root:root "$compressed_installed_module"
+chmod 0644 "$compressed_installed_module"
+PATH="$bin:$PATH" HP2R_FIXTURE_ROOT="$root" HP2R_FIXTURE_RELEASE="$release" depmod -a "$release"
+run_stage >/dev/null
+assert_absent "$compressed_installed_module"
+grep -Fxq 'hyperpixel2r_kms.ko: extra/hyperpixel2r_kms.ko' \
+  "$root/lib/modules/$release/modules.dep" ||
+  fail 'valid compressed module staging did not select manifest /extra'
+
 new_target
 prepare_prior_dkms successful-rollback
 prior_dkms_sums="$fixture/prior-dkms-successful.sums"
@@ -2247,49 +2378,39 @@ grep -Fxq 'hyperpixel2r_kms.ko: updates/dkms/hyperpixel2r_kms.ko' \
 # survive a process exit with only the fixed journal, fixed candidate
 # inventory, transaction bundle, and adjacent hold as authority.  Delete all
 # private workspaces before replay to prove recovery does not depend on them.
-for rollback_boundary in \
-  rollback-journal-published \
-  rollback-candidate-held-unpublished rollback-candidate-held \
-  rollback-prior-restored-unpublished rollback-prior-restored \
-  rollback-boot-restored-unpublished rollback-boot-restored \
-  rollback-candidate-removed-unpublished \
-  rollback-depmod-verified rollback-transaction-retired-unpublished
-do
-  new_target
-  prepare_exact_candidate_dkms installed
-  prior_installed_module="$root/lib/modules/$release/updates/dkms/hyperpixel2r_kms.ko"
-  prior_installed_sha="$(sha256sum "$prior_installed_module" | awk '{ print $1 }')"
-  PATH="$bin:$PATH" HP2R_FIXTURE_ROOT="$root" HP2R_FIXTURE_RELEASE="$release" depmod -a "$release"
-  run_stage >/dev/null
-  if HP2R_FIXTURE_DKMS_REJECT_EXTRA_COLLISION=1 \
-    HP2R_FIXTURE_INTERRUPT_AFTER="$rollback_boundary" \
-    HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
-    run_controller rollback-boot.sh >/dev/null 2>&1; then
-    fail "rollback ignored interruption at $rollback_boundary"
-  else
-    failure_status=$?
-  fi
-  test "$failure_status" = 97 ||
-    fail "rollback interruption at $rollback_boundary returned $failure_status"
-  assert_file "$root/var/lib/hyperpixel2r-kms/rollback-state"
-  assert_file "$root/var/lib/hyperpixel2r-kms/rollback-candidate-dkms-state"
-  test "$(stat -c '%U:%G:%a' "$root/var/lib/hyperpixel2r-kms/rollback-state")" = root:root:600 ||
-    fail "rollback journal ownership drifted at $rollback_boundary"
-  find "$root/var/lib/hyperpixel2r-kms" -mindepth 1 -maxdepth 1 \
-    -type d -name '.hp2r-transaction.*' -exec rm -rf -- {} +
-  HP2R_FIXTURE_DKMS_REJECT_EXTRA_COLLISION=1 \
-    run_controller rollback-boot.sh >/dev/null
-  assert_file "$prior_installed_module"
-  test "$(sha256sum "$prior_installed_module" | awk '{ print $1 }')" = "$prior_installed_sha" ||
-    fail "rollback replay after $rollback_boundary changed prior module bytes"
-  assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
-  assert_absent "$root/var/lib/hyperpixel2r-kms/rollback-state"
-  assert_absent "$root/var/lib/hyperpixel2r-kms/rollback-candidate-dkms-state"
-  assert_absent "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko"
-  assert_absent "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko.hp2r-rollback-hold"
-  grep -Fxq 'hyperpixel2r_kms.ko: updates/dkms/hyperpixel2r_kms.ko' \
-    "$root/lib/modules/$release/modules.dep" ||
-    fail "rollback replay after $rollback_boundary did not resolve prior DKMS"
+for rollback_module_shape in created shared; do
+  for rollback_boundary in \
+    rollback-journal-published \
+    rollback-candidate-held-unpublished rollback-candidate-held \
+    rollback-prior-restored-unpublished rollback-prior-restored \
+    rollback-boot-restored-unpublished rollback-boot-restored \
+    rollback-candidate-removed-unpublished \
+    rollback-depmod-verified rollback-transaction-retired-unpublished
+  do
+    new_target
+    prepare_installed_rollback_shape "$rollback_module_shape" \
+      "forward-$rollback_module_shape-$rollback_boundary"
+    if HP2R_FIXTURE_DKMS_REJECT_EXTRA_COLLISION=1 \
+      HP2R_FIXTURE_INTERRUPT_AFTER="$rollback_boundary" \
+      HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
+      run_controller rollback-boot.sh >/dev/null 2>&1; then
+      fail "$rollback_module_shape rollback ignored interruption at $rollback_boundary"
+    else
+      failure_status=$?
+    fi
+    test "$failure_status" = 97 ||
+      fail "$rollback_module_shape rollback interruption at $rollback_boundary returned $failure_status"
+    assert_file "$root/var/lib/hyperpixel2r-kms/rollback-state"
+    assert_file "$root/var/lib/hyperpixel2r-kms/rollback-candidate-dkms-state"
+    test "$(stat -c '%U:%G:%a' "$root/var/lib/hyperpixel2r-kms/rollback-state")" = root:root:600 ||
+      fail "$rollback_module_shape journal ownership drifted at $rollback_boundary"
+    find "$root/var/lib/hyperpixel2r-kms" -mindepth 1 -maxdepth 1 \
+      -type d -name '.hp2r-transaction.*' -exec rm -rf -- {} +
+    HP2R_FIXTURE_DKMS_REJECT_EXTRA_COLLISION=1 \
+      run_controller rollback-boot.sh >/dev/null
+    assert_installed_rollback_shape_restored "$rollback_module_shape" \
+      "$rollback_boundary"
+  done
 done
 
 # A durable journal binds boot state as well as transaction and module state.
@@ -2335,52 +2456,44 @@ done
 # compensation at each publication/operation boundary, delete private
 # workspaces, then require one rollback invocation to finish compensation and
 # the requested rollback.
-for compensation_boundary in \
-  rollback-compensate-mode-published \
-  rollback-compensate-dkms-restored \
-  rollback-compensate-module-restored \
-  rollback-compensate-boot-restored \
-  rollback-compensate-depmod-verified \
-  rollback-compensate-aux-removed
-do
-  new_target
-  prepare_exact_candidate_dkms installed
-  prior_installed_module="$root/lib/modules/$release/updates/dkms/hyperpixel2r_kms.ko"
-  prior_installed_sha="$(sha256sum "$prior_installed_module" | awk '{ print $1 }')"
-  PATH="$bin:$PATH" HP2R_FIXTURE_ROOT="$root" HP2R_FIXTURE_RELEASE="$release" depmod -a "$release"
-  run_stage >/dev/null
-  if HP2R_FIXTURE_DKMS_REJECT_EXTRA_COLLISION=1 \
-    HP2R_FIXTURE_FAIL_MV=dkms-new \
-    HP2R_FIXTURE_INTERRUPT_AFTER="$compensation_boundary" \
-    HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
-    run_controller rollback-boot.sh >"$fixture/last-stage-output" 2>&1; then
-    fail "rollback compensation ignored interruption at $compensation_boundary"
-  else
-    failure_status=$?
-  fi
-  if test "$failure_status" != 97; then
-    cat "$fixture/last-stage-output" >&2
-    fail "rollback compensation interruption at $compensation_boundary returned $failure_status"
-  fi
-  assert_file "$root/var/lib/hyperpixel2r-kms/rollback-state"
-  grep -Fxq 'mode=compensate' "$root/var/lib/hyperpixel2r-kms/rollback-state" ||
-    fail "rollback compensation did not persist mode at $compensation_boundary"
-  if test "$compensation_boundary" != rollback-compensate-aux-removed; then
-    assert_file "$root/var/lib/hyperpixel2r-kms/rollback-candidate-dkms-state"
-  fi
-  find "$root/var/lib/hyperpixel2r-kms" -mindepth 1 -maxdepth 1 \
-    -type d -name '.hp2r-transaction.*' -exec rm -rf -- {} +
-  HP2R_FIXTURE_DKMS_REJECT_EXTRA_COLLISION=1 \
-    run_controller rollback-boot.sh >/dev/null
-  assert_file "$prior_installed_module"
-  test "$(sha256sum "$prior_installed_module" | awk '{ print $1 }')" = "$prior_installed_sha" ||
-    fail "compensation replay after $compensation_boundary changed prior module"
-  assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
-  assert_absent "$root/var/lib/hyperpixel2r-kms/rollback-state"
-  assert_absent "$root/var/lib/hyperpixel2r-kms/rollback-candidate-dkms-state"
-  assert_absent "$root/var/lib/hyperpixel2r-kms/rollback-candidate-tryboot.txt"
-  assert_absent "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko"
-  assert_absent "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko.hp2r-rollback-hold"
+for rollback_module_shape in created shared; do
+  for compensation_boundary in \
+    rollback-compensate-mode-published \
+    rollback-compensate-dkms-restored \
+    rollback-compensate-module-restored \
+    rollback-compensate-boot-restored \
+    rollback-compensate-depmod-verified \
+    rollback-compensate-aux-removed
+  do
+    new_target
+    prepare_installed_rollback_shape "$rollback_module_shape" \
+      "compensate-$rollback_module_shape-$compensation_boundary"
+    if HP2R_FIXTURE_DKMS_REJECT_EXTRA_COLLISION=1 \
+      HP2R_FIXTURE_FAIL_MV=dkms-new \
+      HP2R_FIXTURE_INTERRUPT_AFTER="$compensation_boundary" \
+      HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
+      run_controller rollback-boot.sh >"$fixture/last-stage-output" 2>&1; then
+      fail "$rollback_module_shape compensation ignored interruption at $compensation_boundary"
+    else
+      failure_status=$?
+    fi
+    if test "$failure_status" != 97; then
+      cat "$fixture/last-stage-output" >&2
+      fail "$rollback_module_shape compensation interruption at $compensation_boundary returned $failure_status"
+    fi
+    assert_file "$root/var/lib/hyperpixel2r-kms/rollback-state"
+    grep -Fxq 'mode=compensate' "$root/var/lib/hyperpixel2r-kms/rollback-state" ||
+      fail "$rollback_module_shape compensation did not persist mode at $compensation_boundary"
+    if test "$compensation_boundary" != rollback-compensate-aux-removed; then
+      assert_file "$root/var/lib/hyperpixel2r-kms/rollback-candidate-dkms-state"
+    fi
+    find "$root/var/lib/hyperpixel2r-kms" -mindepth 1 -maxdepth 1 \
+      -type d -name '.hp2r-transaction.*' -exec rm -rf -- {} +
+    HP2R_FIXTURE_DKMS_REJECT_EXTRA_COLLISION=1 \
+      run_controller rollback-boot.sh >/dev/null
+    assert_installed_rollback_shape_restored "$rollback_module_shape" \
+      "$compensation_boundary"
+  done
 done
 
 # A depmod-verified compensation journal may outlive its inventory auxiliary,

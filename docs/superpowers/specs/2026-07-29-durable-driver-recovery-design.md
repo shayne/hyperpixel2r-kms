@@ -22,7 +22,11 @@ same collision and left the schema-3 transaction live.
 
 Staging must resolve `hyperpixel2r_kms` through the generated
 `modules.dep`, decode `.ko`, `.ko.xz`, `.ko.zst`, or `.ko.gz` as required, and
-compare the uncompressed bytes with the manifest module SHA-256.
+compare the uncompressed bytes with the manifest module SHA-256. The
+`/lib/modules` root, exact kernel-release directory, and every directory below
+it in the resolved path must be root-owned real directories, not symlinks.
+Compressed content is decoded through a private root-owned workspace with an
+8 MiB output ceiling; overflow, truncation, or a failed decoder is rejected.
 
 An installed DKMS registration is not candidate authority, even when its
 source and uncompressed module bytes equal the manifest. Staging may preserve
@@ -101,12 +105,16 @@ Executable fixtures must reproduce:
   (`module_existed=true`);
 - interruption before and after every durable phase publication, module hold,
   DKMS restore, boot restoration, depmod verification, transaction removal,
-  and compensation operation;
+  and compensation operation, for both transaction-created
+  (`module_existed=false`) and shared (`module_existed=true`) schema-3 module
+  shapes with an installed prior running-kernel row;
 - a simulated reboot at every durable phase, followed by successful resume;
 - candidate and restored tryboot or overlay drift at durable phases;
 - live candidate DKMS inventory drift at verified compensation cleanup;
 - malformed, symlinked, wrongly owned, or checksum-drifted journal, inventory,
   and hold files;
+- a symlinked kernel-module path ancestor, oversized compressed output, and a
+  valid bounded compressed module;
 - transaction schema 1, 2, and 3 compatibility; and
 - unchanged accepted lifecycle fixtures.
 

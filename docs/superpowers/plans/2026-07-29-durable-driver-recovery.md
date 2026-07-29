@@ -75,8 +75,11 @@ source equality without checking resolved bytes.
 - [ ] **Step 1: Add the minimal resolver**
 
 Parse the unique `hyperpixel2r_kms.ko:` row in `modules.dep`, validate its
-relative path and suffix, reject symlinks, decompress bounded owned leaves, and
-return the uncompressed SHA-256.
+relative path and suffix, require root-owned non-symlink directories from the
+kernel-module root through the resolved leaf, and decode compressed leaves
+through a private root-owned file with an 8 MiB output ceiling. Reject
+overflow, truncation, and decoder failure before returning the uncompressed
+SHA-256.
 
 - [ ] **Step 2: Enforce stage resolution**
 
@@ -114,14 +117,17 @@ without `--force`.
 For every journal publication and destructive boundary, inject a one-shot
 process exit, assert journal/hold/transaction checksums remain valid, simulate
 a reboot by recreating only the command environment, rerun rollback, and assert
-the exact prior inventory and normal boot state.
+the exact prior inventory and normal boot state. Run the table for both
+transaction-created and preexisting `/extra` module leaves in live-shaped
+schema-3 transactions with an installed prior running-kernel DKMS row.
 
 - [ ] **Step 3: Add compensation interruption table**
 
 Inject failure during prior restore, enter durable compensation, interrupt
 before and after candidate inventory, source, held module, depmod, and journal
 cleanup operations, then resume and assert the exact candidate transaction is
-replayable.
+replayable. Run the same table for both transaction-created and shared
+schema-3 module leaves.
 
 - [ ] **Step 4: Add hostile durable-state cases**
 

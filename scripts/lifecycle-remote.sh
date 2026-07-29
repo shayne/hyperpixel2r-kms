@@ -23,6 +23,7 @@ normal_config="${root}/boot/firmware/config.txt"
 tryboot_config="${root}/boot/firmware/tryboot.txt"
 artifact_root="${root}/usr/lib/hyperpixel2r-kms"
 dkms_root="${root}/usr/src"
+module_uncompressed_limit=8388608
 if test -n "$root"; then
   dkms_command=dkms
 else
@@ -949,6 +950,46 @@ validate_dkms_status() {
   validate_named_dkms_status hyperpixel2r-kms "$version"
 }
 
+assert_module_directory() {
+  local path="$1"
+
+  sudo test ! -L "$path" && sudo test -d "$path" || {
+    printf 'unsafe kernel-module directory: %s\n' "$path" >&2
+    return 1
+  }
+  test "$(sudo stat -c '%U:%G' "$path")" = root:root || {
+    printf 'kernel-module directory ownership drift: %s\n' "$path" >&2
+    return 1
+  }
+}
+
+assert_kernel_module_root() {
+  local release="$1"
+  local modules_root="${root}/lib/modules"
+
+  [[ "$release" =~ ^[A-Za-z0-9._+-]+$ ]] || return
+  assert_module_directory "$modules_root" || return
+  assert_module_directory "$modules_root/$release"
+}
+
+assert_resolved_module_path_chain() {
+  local release="$1"
+  local relative="$2"
+  local module_root="${root}/lib/modules/$release"
+
+  assert_kernel_module_root "$release" || return
+  case "$relative" in
+    extra/*)
+      assert_module_directory "$module_root/extra"
+      ;;
+    updates/dkms/*)
+      assert_module_directory "$module_root/updates" &&
+        assert_module_directory "$module_root/updates/dkms"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 resolved_module_path() {
   local release="$1"
   local module="$2"
@@ -978,30 +1019,75 @@ resolved_module_path() {
     updates/dkms/"$module".ko.gz) ;;
     *) printf 'resolved module has an unsupported leaf: %s\n' "$path" >&2; return 1 ;;
   esac
+  assert_resolved_module_path_chain "$release" "$relative" || return
   assert_owned_regular "$path" 644 || return
   printf '%s\n' "$path"
 }
 
 module_leaf_sha() {
   local path="$1"
+  local workspace="$2"
+  local decoded size result
+  local -a decoder=() pipeline_status=()
 
   assert_owned_regular "$path" 644 || return
   case "$path" in
-    *.ko) sha "$path" ;;
-    *.ko.xz) sudo xz -dc -- "$path" | sha256sum | awk '{ print $1 }' ;;
-    *.ko.zst) sudo zstd -dc -- "$path" | sha256sum | awk '{ print $1 }' ;;
-    *.ko.gz) sudo gzip -dc -- "$path" | sha256sum | awk '{ print $1 }' ;;
+    *.ko)
+      size="$(sudo stat -c '%s' "$path")" || return
+      test "$size" -le "$module_uncompressed_limit" || {
+        echo 'resolved module exceeds its uncompressed size limit' >&2
+        return 1
+      }
+      sha "$path"
+      return
+      ;;
+    *.ko.xz) decoder=(sudo xz -dc -- "$path") ;;
+    *.ko.zst) decoder=(sudo zstd -dc -- "$path") ;;
+    *.ko.gz) decoder=(sudo gzip -dc -- "$path") ;;
     *) return 1 ;;
   esac
+  assert_private_workspace "$workspace" || return
+  decoded="$(private_file "$workspace" resolved-module)" || return
+  set +e
+  "${decoder[@]}" |
+    sudo head -c "$((module_uncompressed_limit + 1))" |
+    sudo tee "$decoded" >/dev/null
+  pipeline_status=("${PIPESTATUS[@]}")
+  set -e
+  test "${pipeline_status[1]}" = 0 && test "${pipeline_status[2]}" = 0 || {
+    sudo rm -f -- "$decoded" || true
+    return 1
+  }
+  size="$(sudo stat -c '%s' "$decoded")" || {
+    sudo rm -f -- "$decoded" || true
+    return 1
+  }
+  test "$size" -le "$module_uncompressed_limit" || {
+    echo 'resolved module exceeds its uncompressed size limit' >&2
+    sudo rm -f -- "$decoded" || true
+    return 1
+  }
+  test "${pipeline_status[0]}" = 0 || {
+    echo 'resolved module decompression failed' >&2
+    sudo rm -f -- "$decoded" || true
+    return 1
+  }
+  result="$(sha "$decoded")" || {
+    sudo rm -f -- "$decoded" || true
+    return 1
+  }
+  sudo rm -f -- "$decoded" || return
+  printf '%s\n' "$result"
 }
 
 resolved_module_sha() {
   local release="$1"
   local module="$2"
+  local workspace="$3"
   local path
 
   path="$(resolved_module_path "$release" "$module")" || return
-  module_leaf_sha "$path"
+  module_leaf_sha "$path" "$workspace"
 }
 
 validate_named_dkms_status() {
@@ -1614,6 +1700,8 @@ stage() {
   test "$module_file" = hyperpixel2r_kms.ko || die 'unsafe incoming module file'
   [[ "$overlay_file" = "hyperpixel2r-kms-${revision:0:12}.dtbo" ]] || die 'unsafe incoming overlay file'
   test "$applied_dtb_file" = hyperpixel2r-kms-applied.dtb || die 'unsafe incoming applied dtb file'
+  assert_kernel_module_root "$release" ||
+    die 'running kernel module root is unsafe'
   test ! -L "$state_file" && test ! -e "$state_file" || die 'refusing active tryboot transaction'
   rollback_tmp="$(new_transaction_workspace)" || die 'failed to create private stage workspace'
   trap stage_cleanup EXIT
@@ -1773,7 +1861,7 @@ stage() {
       sudo depmod -a "$release" || die 'failed to refresh module resolution before DKMS reuse'
       resolved_path="$(resolved_module_path "$release" hyperpixel2r_kms)" ||
         die 'failed to resolve installed module before DKMS reuse'
-      resolved_sha="$(module_leaf_sha "$resolved_path")" ||
+      resolved_sha="$(module_leaf_sha "$resolved_path" "$rollback_tmp")" ||
         die 'failed to hash installed module before DKMS reuse'
       if test "$resolved_path" != "$module_path" ||
         test "$resolved_sha" != "$module_sha"; then
@@ -1815,7 +1903,7 @@ stage() {
   esac
   sudo depmod -a "$release" || die 'failed to refresh candidate module resolution'
   test "$(resolved_module_path "$release" hyperpixel2r_kms)" = "$module_path" &&
-    test "$(module_leaf_sha "$module_path")" = "$module_sha" ||
+    test "$(module_leaf_sha "$module_path" "$rollback_tmp")" = "$module_sha" ||
     die 'candidate module is not selected by running-kernel resolution'
   fixture_interrupt_after candidate-dkms-activated
   test "$(sha "$normal_config")" = "$normal_sha" || die 'normal boot config changed while staging tryboot candidate'
@@ -2407,7 +2495,7 @@ verify_prior_module_resolution() {
     esac
     assert_owned_regular "$path" 644
   elif test "$rb_module_existed" = true; then
-    test "$(resolved_module_sha "$rb_release" hyperpixel2r_kms)" = "$rb_module_sha"
+    test "$(resolved_module_sha "$rb_release" hyperpixel2r_kms "$rb_workspace")" = "$rb_module_sha"
   else
     sudo test ! -L "$rb_module_path" && sudo test ! -e "$rb_module_path"
   fi
@@ -2465,7 +2553,7 @@ compensate_rollback() {
       echo 'failed to refresh candidate resolution during compensation' >&2
       return 1
     }
-    test "$(resolved_module_sha "$rb_release" hyperpixel2r_kms)" = "$rb_module_sha" ||
+    test "$(resolved_module_sha "$rb_release" hyperpixel2r_kms "$rb_workspace")" = "$rb_module_sha" ||
       { echo 'candidate resolution is not exact after compensation' >&2; return 1; }
     sudo sync
     rb_phase=depmod-verified
@@ -2478,7 +2566,7 @@ compensate_rollback() {
     assert_source_tree_shape "$rb_dkms_dir" "$rb_artifact/dkms-source" ||
       return
     test "$(sha "$tryboot_config")" = "$rb_candidate_tryboot_sha" || return
-    test "$(resolved_module_sha "$rb_release" hyperpixel2r_kms)" = "$rb_module_sha" ||
+    test "$(resolved_module_sha "$rb_release" hyperpixel2r_kms "$rb_workspace")" = "$rb_module_sha" ||
       return
   fi
   assert_source_tree_shape "$rb_dkms_dir" "$rb_artifact/dkms-source" || return

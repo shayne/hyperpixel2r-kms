@@ -25,6 +25,12 @@ stage step fails, it restores the previous tryboot file and removes every new
 candidate leaf, source tree, DKMS registration, artifact, and state file.
 Normal boot config is never rewritten by a trial.
 
+Before candidate publication, staging requires a root-owned non-symlink
+kernel-module directory chain and verifies that `depmod` selects the exact
+manifest `/extra` leaf. Compressed installed modules are decoded only through
+a private root-owned workspace with an 8 MiB output ceiling; overflow,
+truncation, or decoder failure stops staging.
+
 If normal config already names a different HyperPixel overlay, name that exact
 overlay explicitly. `--replace-overlay` parses declarations by overlay name,
 including parameters, and rejects zero, multiple, unsafe, or conflicting
