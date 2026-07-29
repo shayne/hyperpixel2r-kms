@@ -6,9 +6,9 @@ is not an accident. Display drivers are where a one-line configuration change
 can turn into an evening with a serial console, so the project chooses one
 known shape over a heroic compatibility matrix.
 
-<!-- HP2R_CURRENT_RELEASE=v0.1.0-rc.14 -->
+<!-- HP2R_CURRENT_RELEASE=v0.1.0-rc.16 -->
 
-Current release: `v0.1.0-rc.14` is a release candidate. It has host-side build
+Current release: `v0.1.0-rc.16` is a release candidate. It has host-side build
 and boot-lifecycle checks, reproducible source packaging, and signed GitHub
 provenance. It is still a release candidate, which is a useful warning label:
 the package can prove what it built, but it cannot make every future Raspberry
@@ -91,8 +91,8 @@ match the Pi in front of you. GitHub Actions creates provenance and SBOM
 attestations for the published payloads.
 
 ```sh
-gh release download v0.1.0-rc.14 -R shayne/hyperpixel2r-kms -D dist/v0.1.0-rc.14
-cd dist/v0.1.0-rc.14
+gh release download v0.1.0-rc.16 -R shayne/hyperpixel2r-kms -D dist/v0.1.0-rc.16
+cd dist/v0.1.0-rc.16
 sha256sum -c SHA256SUMS
 gh attestation verify hyperpixel2r-kms-source.tar.zst \
   -R shayne/hyperpixel2r-kms \
@@ -101,6 +101,17 @@ gh attestation verify hyperpixel2r-kms-source.tar.zst \
 
 The source archive is the durable fallback. An exact archive is a convenience,
 not a substitute for checking that the Pi in front of you still matches it.
+
+Stable releases have a stricter two-step path. The draft workflow verifies,
+packages, checksums, and attests the four release files, then creates an
+unpublished GitHub draft. It does not create the stable tag. After that exact
+draft has passed hardware acceptance, the promotion workflow downloads it
+again and checks its release ID, asset IDs, sizes, digests, manifest, SBOM,
+source identity, and attestations. Only then does it create the annotated tag
+and publish the same draft. Promotion does not build or upload anything.
+
+There is no published stable release yet. The current public release remains
+the candidate named above.
 
 ## Provenance and license
 

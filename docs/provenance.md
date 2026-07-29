@@ -46,12 +46,23 @@ with Python 3.12 and on macOS with Python 3.13. The `referencing` constraint is
 intentional: newer releases require a Python 3.13-only typing feature, so they
 would make the Linux release job fail before it could validate anything.
 
-Manual release dispatch has two deliberately separate identities. The dispatch
-commit is where GitHub finds and runs `release.yml`; the selected `source_ref`
-is the checked-out source that becomes the manifest, archive, annotated tag,
-and release target. The workflow proves the first exists, then derives the
-second from `HEAD`. That prevents a convenient UI context value from quietly
-releasing the wrong commit.
+The numbered release-candidate workflow verifies and packages its selected
+source before it creates an annotated tag. That path remains separate from
+stable publication.
+
+A stable release takes two workflows. `stable-draft.yml` runs only from
+`main`. It verifies the source, builds the deterministic files twice, checks
+the manifest and SPDX document, and creates attestations before it uploads an
+unpublished draft. The draft targets the full source commit, but the stable
+tag does not exist yet.
+
+Hardware acceptance records the draft's GitHub release ID and a fingerprint of
+every asset ID, name, size, and digest. `stable-promote.yml` requires those
+values. It downloads the draft into a fresh bounded directory, checks the
+files and source archive again, and verifies attestations from the fixed draft
+workflow on `main`. If anything moved, promotion stops. If everything still
+matches, it creates the annotated tag and changes only the draft and
+prerelease flags. It never rebuilds, re-attests, or replaces an accepted file.
 
 The release process uses a pinned Debian Trixie Slim OCI image digest for the
 cross-build container. Tags move; digests do not. Kernel source packages and

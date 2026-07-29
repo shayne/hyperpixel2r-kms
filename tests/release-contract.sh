@@ -10,6 +10,8 @@ test -x "$repo_root/scripts/package-release.sh" || {
   exit 1
 }
 
+PYTHONDONTWRITEBYTECODE=1 python3 "$repo_root/tests/stable-release-contract.py"
+
 test -f "$repo_root/release/driver-manifest.schema.json" || {
   printf 'missing release manifest schema\n' >&2
   exit 1
@@ -23,7 +25,12 @@ import sys
 root = pathlib.Path(sys.argv[1])
 failures = []
 
-for relative in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
+for relative in (
+    ".github/workflows/ci.yml",
+    ".github/workflows/release.yml",
+    ".github/workflows/stable-draft.yml",
+    ".github/workflows/stable-promote.yml",
+):
     path = root / relative
     if not path.is_file():
         failures.append(f"missing release workflow: {relative}")
@@ -106,6 +113,9 @@ if ci_workflow.is_file():
 tag_validator = root / "scripts" / "validate-release-tag.sh"
 if not tag_validator.is_file() or not tag_validator.stat().st_mode & 0o111:
     failures.append("missing executable release tag/version validator")
+stable_tag_validator = root / "scripts" / "validate-stable-release-tag.sh"
+if not stable_tag_validator.is_file() or not stable_tag_validator.stat().st_mode & 0o111:
+    failures.append("missing executable stable release tag/version validator")
 
 release_workflow = root / ".github" / "workflows" / "release.yml"
 if release_workflow.is_file():
@@ -143,6 +153,75 @@ if release_workflow.is_file():
        'git push origin "refs/tags/$TAG:refs/tags/$TAG"' not in workflow or \
        'test "$tag_commit" = "$RELEASE_COMMIT"' not in workflow:
         failures.append("release workflow tag race check and push must target the selected source exactly")
+
+stable_draft = root / ".github" / "workflows" / "stable-draft.yml"
+if stable_draft.is_file():
+    workflow = stable_draft.read_text()
+    ordered_steps = [
+        "Confirm absent stable tag and bind selected source",
+        "Verify the selected source before stable packaging",
+        "Build reproducible stable draft assets",
+        "Validate stable metadata and checksums",
+        "Attest every stable draft subject",
+        "Attest the stable SPDX bill of materials",
+        "Create unpublished stable draft without a tag",
+    ]
+    offsets = [workflow.find(step) for step in ordered_steps]
+    if -1 in offsets or offsets != sorted(offsets):
+        failures.append("stable draft workflow must validate and attest before draft creation")
+    for required in (
+        "permissions:\n  contents: write\n  id-token: write\n  attestations: write",
+        "scripts/validate-stable-release-tag.sh",
+        "scripts/stable_release.py draft",
+        "HP2R_STABLE_DRAFT_RELEASE_ID",
+        "HP2R_STABLE_DRAFT_ASSET_FINGERPRINT",
+        'test "$source_commit" = "$DISPATCH_COMMIT"',
+    ):
+        if required not in workflow:
+            failures.append(f"stable draft workflow contract is missing: {required}")
+    if "git tag" in workflow or "refs/tags/$TAG:refs/tags/$TAG" in workflow:
+        failures.append("stable draft workflow must not create or push the stable tag")
+
+stable_promote = root / ".github" / "workflows" / "stable-promote.yml"
+if stable_promote.is_file():
+    workflow = stable_promote.read_text()
+    ordered_steps = [
+        "Confirm promotion inputs and absent stable tag",
+        "Download the exact accepted stable draft",
+        "Verify stable checksums, schema, SPDX, and source identity",
+        "Verify stable draft attestations",
+        "Create annotated tag and publish the unchanged draft",
+        "Verify published stable identity",
+    ]
+    offsets = [workflow.find(step) for step in ordered_steps]
+    if -1 in offsets or offsets != sorted(offsets):
+        failures.append("stable promotion workflow must verify everything before tag creation")
+    for required in (
+        "permissions:\n  contents: write",
+        "release_id:",
+        "asset_fingerprint:",
+        "scripts/stable_release.py verify",
+        "scripts/stable_release.py publish",
+        "--signer-repo shayne/hyperpixel2r-kms",
+        "--signer-workflow shayne/hyperpixel2r-kms/.github/workflows/stable-draft.yml",
+        "--source-ref refs/heads/main",
+        "--deny-self-hosted-runners",
+        'git config user.name "github-actions[bot]"',
+        'git config user.email "41898282+github-actions[bot]@users.noreply.github.com"',
+    ):
+        if required not in workflow:
+            failures.append(f"stable promotion workflow contract is missing: {required}")
+    forbidden = (
+        "package-release",
+        "build-driver",
+        "action-gh-release",
+        "release upload",
+        "/releases/assets?name=",
+        "actions/attest@",
+    )
+    for value in forbidden:
+        if value in workflow:
+            failures.append(f"stable promotion must not build, attest, or replace assets: {value}")
 
 for relative in ("scripts/build-driver.sh", "scripts/package-release.sh"):
     text = (root / relative).read_text()
@@ -479,6 +558,15 @@ PY
 "$fixture/scripts/validate-release-tag.sh" "v0.1.0-rc.3" "$source_revision"
 if "$fixture/scripts/validate-release-tag.sh" "v0.1.1-rc.3" "$source_revision"; then
   printf 'release tag validator accepted a tag whose base version mismatches the driver\n' >&2
+  exit 1
+fi
+"$fixture/scripts/validate-stable-release-tag.sh" "v0.1.0" "$source_revision"
+if "$fixture/scripts/validate-stable-release-tag.sh" "v0.1.0-rc.3" "$source_revision"; then
+  printf 'stable tag validator accepted a release-candidate tag\n' >&2
+  exit 1
+fi
+if "$fixture/scripts/validate-stable-release-tag.sh" "v0.1.1" "$source_revision"; then
+  printf 'stable tag validator accepted a tag whose version mismatches the driver\n' >&2
   exit 1
 fi
 

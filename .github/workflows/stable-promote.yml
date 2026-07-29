@@ -1,0 +1,172 @@
+name: Promote accepted stable driver draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Canonical accepted stable tag
+        required: true
+        type: string
+      source_commit:
+        description: Full accepted source commit
+        required: true
+        type: string
+      release_id:
+        description: Durable GitHub draft release ID
+        required: true
+        type: string
+      asset_fingerprint:
+        description: Accepted ID, name, size, and digest fingerprint
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out accepted stable source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 0
+
+      - name: Set up mise
+        uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4.2.3
+
+      - name: Install stable verification tools
+        run: sudo apt-get update && sudo apt-get install --yes zstd
+
+      - name: Confirm promotion inputs and absent stable tag
+        env:
+          TAG: ${{ inputs.tag }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          ASSET_FINGERPRINT: ${{ inputs.asset_fingerprint }}
+          DISPATCH_COMMIT: ${{ github.sha }}
+        run: |
+          test "$GITHUB_REPOSITORY" = shayne/hyperpixel2r-kms
+          test "$GITHUB_REF" = refs/heads/main
+          test "$(git rev-parse 'HEAD^{commit}')" = "$SOURCE_COMMIT"
+          git cat-file -e "$DISPATCH_COMMIT:.github/workflows/stable-promote.yml"
+          ./scripts/validate-stable-release-tag.sh "$TAG" "$SOURCE_COMMIT"
+          [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$ASSET_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]]
+          git fetch --tags --force
+          if git rev-parse --verify --quiet "refs/tags/$TAG"; then
+            echo "stable tag already exists: $TAG" >&2
+            exit 1
+          fi
+
+      - name: Download the exact accepted stable draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          ASSET_FINGERPRINT: ${{ inputs.asset_fingerprint }}
+        run: |
+          python3 scripts/stable_release.py verify \
+            --tag "$TAG" \
+            --commit "$SOURCE_COMMIT" \
+            --release-id "$RELEASE_ID" \
+            --asset-fingerprint "$ASSET_FINGERPRINT" \
+            --downloads "$RUNNER_TEMP/stable-accepted" \
+            --record "$RUNNER_TEMP/stable-verification.json"
+
+      - name: Verify stable checksums, schema, SPDX, and source identity
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          downloads="$RUNNER_TEMP/stable-accepted"
+          (
+            cd "$downloads"
+            sha256sum -c SHA256SUMS
+          )
+          mise run validate-release-metadata -- \
+            "$downloads/driver-manifest.json" \
+            "$downloads/SBOM.spdx.json"
+          source_tree="$(git rev-parse "$SOURCE_COMMIT^{tree}")"
+          jq -e --arg commit "$SOURCE_COMMIT" --arg tree "$source_tree" \
+            '.source.commit == $commit and .source.tree == $tree' \
+            "$downloads/driver-manifest.json" >/dev/null
+          zstd -q -d -c "$downloads/hyperpixel2r-kms-source.tar.zst" > "$RUNNER_TEMP/stable-source.tar"
+          python3 - "$RUNNER_TEMP/stable-source.tar" <<'PY'
+          import pathlib
+          import sys
+          import tarfile
+          with tarfile.open(sys.argv[1]) as archive:
+              members = archive.getmembers()
+              assert members
+              for member in members:
+                  path = pathlib.PurePosixPath(member.name)
+                  assert not path.is_absolute()
+                  assert ".." not in path.parts
+                  assert not member.issym()
+                  assert not member.islnk()
+          PY
+          mkdir "$RUNNER_TEMP/stable-source"
+          tar -C "$RUNNER_TEMP/stable-source" -xf "$RUNNER_TEMP/stable-source.tar"
+          source_root="$(find "$RUNNER_TEMP/stable-source" -mindepth 1 -maxdepth 1 -type d)"
+          test -n "$source_root"
+          test "$(printf '%s\n' "$source_root" | wc -l | tr -d ' ')" = 1
+          bash -eu -c \
+            'source "$1/scripts/common.sh"; hp2r_validate_release_source "$1" "$2" "$3"' \
+            bash "$source_root" "$SOURCE_COMMIT" "$source_tree"
+
+      - name: Verify stable draft attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          downloads="$RUNNER_TEMP/stable-accepted"
+          while read -r digest name extra; do
+            test -z "$extra"
+            test -n "$digest" && test -n "$name"
+            gh attestation verify "$downloads/$name" \
+              --repo shayne/hyperpixel2r-kms \
+              --signer-repo shayne/hyperpixel2r-kms \
+              --signer-workflow shayne/hyperpixel2r-kms/.github/workflows/stable-draft.yml \
+              --source-ref refs/heads/main \
+              --source-digest "$SOURCE_COMMIT" \
+              --deny-self-hosted-runners
+          done < "$downloads/SHA256SUMS"
+          gh attestation verify "$downloads/hyperpixel2r-kms-source.tar.zst" \
+            --repo shayne/hyperpixel2r-kms \
+            --signer-repo shayne/hyperpixel2r-kms \
+            --signer-workflow shayne/hyperpixel2r-kms/.github/workflows/stable-draft.yml \
+            --source-ref refs/heads/main \
+            --source-digest "$SOURCE_COMMIT" \
+            --predicate-type https://spdx.dev/Document/v2.3 \
+            --deny-self-hosted-runners
+
+      - name: Create annotated tag and publish the unchanged draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          python3 scripts/stable_release.py publish \
+            --record "$RUNNER_TEMP/stable-verification.json" \
+            --downloads "$RUNNER_TEMP/stable-accepted"
+
+      - name: Verify published stable identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          ASSET_FINGERPRINT: ${{ inputs.asset_fingerprint }}
+        run: |
+          test "$(git rev-parse "$TAG^{}")" = "$SOURCE_COMMIT"
+          gh api "repos/shayne/hyperpixel2r-kms/releases/$RELEASE_ID" |
+            jq -e --arg tag "$TAG" --arg commit "$SOURCE_COMMIT" '
+              .tag_name == $tag and
+              .target_commitish == $commit and
+              .draft == false and
+              .prerelease == false
+            ' >/dev/null
+          test "$(jq -r .asset_fingerprint "$RUNNER_TEMP/stable-verification.json")" = \
+            "$ASSET_FINGERPRINT"
