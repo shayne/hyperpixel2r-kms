@@ -10,6 +10,7 @@ scripts=(
   scripts/commit-boot.sh
   scripts/rollback-boot.sh
   scripts/uninstall.sh
+  scripts/accepted-lifecycle.sh
   scripts/lifecycle-remote.sh
 )
 for relative in "${scripts[@]}"; do

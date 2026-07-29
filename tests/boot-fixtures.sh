@@ -630,6 +630,14 @@ run_controller() {
   fi
 }
 
+run_accepted_remote() {
+  PATH="$bin:$PATH" \
+    HP2R_FIXTURE_ROOT="$root" \
+    HP2R_INSTALL_ROOT="$root" \
+    HP2R_FIXTURE_LOG="$log" \
+    bash "$repo_root/scripts/lifecycle-remote.sh" "$@"
+}
+
 install_live_hardware() {
   mkdir -p \
     "$root/sys/module/hyperpixel2r_kms" \
@@ -816,6 +824,67 @@ if HP2R_FIXTURE_BOOT_MODE=755 run_stage; then
 else
   fail 'stage rejected the Raspberry Pi VFAT boot-file mode'
 fi
+
+# Accepted lifecycle ownership is a separate durable protocol.  It records the
+# exact retained bundle and a surgical stock-boot candidate, then uninstalls
+# only that receipt without enumerating sibling artifacts.
+new_target
+run_stage >/dev/null
+install_live_hardware
+run_controller commit-boot.sh >/dev/null
+run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" >/dev/null
+accepted_receipt="$root/var/lib/hyperpixel2r-kms/accepted-state"
+stock_config="$root/var/lib/hyperpixel2r-kms/accepted-stock-config.txt"
+assert_file "$accepted_receipt"
+assert_file "$stock_config"
+grep -Fxq 'schema_version=1' "$accepted_receipt" ||
+  fail 'accepted driver receipt schema is missing'
+if grep -Eq '^[[:space:]]*dtoverlay=.*hyperpixel2r' "$stock_config"; then
+  fail 'accepted stock boot candidate retained a driver declaration'
+fi
+retained_revision='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+retained_overlay='hyperpixel2r-kms-bbbbbbbbbbbb.dtbo'
+accepted_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+retained_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$retained_revision/$release"
+mkdir -p "$(dirname "$retained_artifact")"
+cp -a "$accepted_artifact" "$retained_artifact"
+mv "$retained_artifact/$overlay_file" "$retained_artifact/$retained_overlay"
+sed -i \
+  -e "s/^source_revision\t.*/source_revision\t$retained_revision/" \
+  -e "s/^overlay_file\t.*/overlay_file\t$retained_overlay/" \
+  "$retained_artifact/manifest.txt"
+
+run_accepted_remote stage-retained 0.1.0 "$retained_revision" "$release" >/dev/null
+assert_file "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+run_accepted_remote recover-accepted >/dev/null
+assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+grep -Fxq "dtoverlay=$overlay_file" "$root/boot/firmware/config.txt" ||
+  fail 'pre-commit accepted recovery did not restore the prior overlay'
+
+run_accepted_remote stage-retained 0.1.0 "$retained_revision" "$release" >/dev/null
+run_accepted_remote commit-retained >/dev/null
+grep -Fxq "dtoverlay=$retained_overlay" "$root/boot/firmware/config.txt" ||
+  fail 'retained commit did not publish the candidate overlay'
+run_accepted_remote recover-accepted >/dev/null
+grep -Fxq "dtoverlay=$overlay_file" "$root/boot/firmware/config.txt" ||
+  fail 'post-commit accepted recovery did not restore the prior overlay'
+
+run_accepted_remote stage-retained 0.1.0 "$retained_revision" "$release" >/dev/null
+run_accepted_remote commit-retained >/dev/null
+run_accepted_remote accept-retained >/dev/null
+grep -Fxq "source_revision=$retained_revision" "$accepted_receipt" ||
+  fail 'retained acceptance did not rotate the exact receipt'
+printf 'dtparam=audio=on\n' >> "$root/boot/firmware/config.txt"
+run_accepted_remote uninstall-accepted 0.1.0 "$retained_revision" "$release" >/dev/null
+grep -Fxq '[all]' "$root/boot/firmware/config.txt" ||
+  fail 'accepted uninstall did not restore the proven stock boot candidate'
+grep -Fxq 'dtparam=audio=on' "$root/boot/firmware/config.txt" ||
+  fail 'accepted uninstall did not preserve an unrelated changed boot line'
+assert_absent "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko"
+assert_absent "$root/boot/firmware/overlays/$retained_overlay"
+assert_absent "$accepted_receipt"
+run_accepted_remote retire-inactive 0.1.0 "$source_revision" "$release" >/dev/null
+assert_absent "$accepted_artifact"
 
 # A verified release-source extraction has no ambient Git repository.  Its
 # exact source identity and regular kernel leaves must be sufficient for
