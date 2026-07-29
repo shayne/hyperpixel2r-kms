@@ -37,14 +37,18 @@ if test -n "$expected_overlay_file"; then [[ "$expected_overlay_file" =~ ^hyperp
 ssh_options=(-o BatchMode=yes -o ConnectTimeout=8 -o ConnectionAttempts=1)
 release="$(ssh "${ssh_options[@]}" "$target" uname -r)"
 hp2r_validate_release "$release"
+remote_expected_driver_version="${expected_driver_version:-none}"
+remote_expected_overlay_file="${expected_overlay_file:-none}"
 
-ssh "${ssh_options[@]}" "$target" bash -s -- "$expected_boot" "$release" "$json" "$expected_driver_version" "$expected_overlay_file" <<'REMOTE'
+ssh "${ssh_options[@]}" "$target" bash -s -- "$expected_boot" "$release" "$json" "$remote_expected_driver_version" "$remote_expected_overlay_file" <<'REMOTE'
 set -euo pipefail
 expected_boot="$1"
 release="$2"
 json="$3"
 expected_driver_version="$4"
 expected_overlay_file="$5"
+if test "$expected_driver_version" = none; then expected_driver_version=''; fi
+if test "$expected_overlay_file" = none; then expected_overlay_file=''; fi
 root="${HP2R_INSTALL_ROOT:-}"
 path() { printf '%s%s\n' "$root" "$1"; }
 tryboot_flag="$(path /proc/device-tree/chosen/bootloader/tryboot)"

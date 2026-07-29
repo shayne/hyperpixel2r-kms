@@ -52,10 +52,15 @@ mise run rollback-boot
 
 Rollback validates the private transaction state, complete stored manifest,
 and checksum-proven regular candidate leaves before it changes anything. It
-restores the pre-stage `tryboot.txt`, the exact pre-stage DKMS source tree and
-its registration state, then removes only candidate module and overlay leaves
-before rebooting normally. If there was no prior DKMS tree, it removes the
-candidate tree. The normal config was left alone, so the known-good display
+restores the pre-stage `tryboot.txt` and the exact pre-stage DKMS source tree.
+It also restores whether that source was merely added, built for the target
+kernel, or installed for it. A prior installed driver is rebuilt and installed
+for that exact kernel before `depmod` runs.
+
+The transaction records whether the module and overlay files already existed.
+Rollback removes only files created by staging; exact files shared with the
+prior normal boot stay in place. If there was no prior DKMS tree, it removes
+the candidate tree. Normal config was left alone, so the known-good display
 configuration gets another turn without reconstructing it from a
 half-remembered command history.
 
