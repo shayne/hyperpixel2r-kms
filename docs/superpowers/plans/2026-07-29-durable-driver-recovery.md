@@ -4,7 +4,7 @@
 
 **Goal:** Make candidate activation byte-exact and make rollback of an installed prior DKMS inventory durable and crash-resumable.
 
-**Architecture:** Stage verifies the uncompressed module selected by `modules.dep` and removes a mismatched prior registration before publishing tryboot. Rollback persists a versioned root-owned journal and candidate inventory, atomically holds the candidate module under a non-loadable adjacent name, and resumes rollback or compensation from exact durable phases.
+**Architecture:** Stage verifies both the uncompressed bytes and exact `/extra` path selected by `modules.dep`, removing prior installed registration state before publishing tryboot. Rollback persists a versioned root-owned journal and candidate inventory, atomically holds the candidate module under a non-loadable adjacent name, and resumes rollback or compensation from exact durable phases.
 
 **Tech Stack:** Bash, Raspberry Pi OS DKMS and depmod, Docker-hosted executable shell fixtures, mise, GitButler.
 
@@ -42,11 +42,12 @@ candidate source but whose installed module bytes are a literal mismatch.
 Assert that successful stage removes the installed registration, runs depmod,
 and leaves `modules.dep` resolving the manifest module under `extra`.
 
-- [ ] **Step 3: Add the exact-reuse scenario**
+- [ ] **Step 3: Add the exact-byte wrong-leaf scenario**
 
 Create the same installed prior state with resolved uncompressed bytes exactly
-equal to the manifest module. Assert that stage preserves the installed DKMS
-registration and still resolves manifest-exact bytes.
+equal to the manifest module. Assert that stage still detaches the installed
+DKMS registration because `updates/dkms` is not the manifest-bound candidate
+leaf, and resolves `/extra/hyperpixel2r_kms.ko`.
 
 - [ ] **Step 4: Verify RED**
 
@@ -69,7 +70,7 @@ source equality without checking resolved bytes.
 - Produces: `resolved_module_sha256 RELEASE MODULE`, which accepts only fixed
   `extra` or `updates/dkms` leaves and returns the uncompressed SHA-256.
 - Produces: stage behavior that publishes tryboot only after depmod resolves
-  manifest-exact bytes.
+  manifest-exact bytes from the exact `/extra` leaf.
 
 - [ ] **Step 1: Add the minimal resolver**
 
@@ -79,16 +80,17 @@ return the uncompressed SHA-256.
 
 - [ ] **Step 2: Enforce stage resolution**
 
-After candidate `/extra` publication, compare current resolution with the
-manifest. Exact source plus exact resolved bytes may reuse the registration.
-Exact source plus mismatched resolved bytes follows the existing
-inventory-backed DKMS replacement path. Run depmod and require exact candidate
-resolution before tryboot publication.
+After candidate `/extra` publication, compare the current resolved path and
+bytes with the manifest. Any `updates/dkms` resolution follows the
+inventory-backed DKMS replacement path, even when its uncompressed bytes are
+equal. Run depmod and require the exact manifest-bound `/extra` path and bytes
+before tryboot publication.
 
 - [ ] **Step 3: Verify GREEN**
 
-Run `mise run test-boot-scripts`. Both mismatch replacement and exact reuse
-must pass without weakening existing stage-cleanup fixtures.
+Run `mise run test-boot-scripts`. Both mismatch replacement and exact-byte
+wrong-leaf replacement must pass without weakening existing stage-cleanup
+fixtures.
 
 ### Task 3: Add RED durable rollback and compensation fixtures
 
@@ -125,7 +127,9 @@ replayable.
 
 Reject journal, inventory, or hold symlinks; wrong ownership/mode; bad phase;
 transaction-hash drift; module-hash drift; and simultaneous candidate plus hold
-states.
+states. Reject candidate or restored tryboot/overlay drift and verified
+compensation whose live DKMS inventory differs from its checksum-bound
+candidate inventory.
 
 - [ ] **Step 5: Verify RED**
 
@@ -151,9 +155,11 @@ atomic phase publication, fsync-by-`sync`, and transaction identity binding.
 
 - [ ] **Step 2: Add atomic candidate hold**
 
-Move only a manifest-validated transaction-created `/extra` leaf to
-`hyperpixel2r_kms.ko.hp2r-rollback-hold`. Accept exact before or after state on
-resume and reject every ambiguous state.
+Move the manifest-validated `/extra` leaf to
+`hyperpixel2r_kms.ko.hp2r-rollback-hold`, including a leaf that existed before
+staging when an installed prior DKMS row must be restored. Accept exact before
+or after state on resume, restore shared leaves after DKMS installation, and
+reject every ambiguous state.
 
 - [ ] **Step 3: Add forward rollback phases**
 
@@ -167,6 +173,8 @@ journal state in recoverable order.
 On an ordinary failure, publish `mode=compensate` before changing candidate
 state. Resume exact candidate source/inventory, held module, overlay, tryboot,
 and depmod resolution until the original transaction is fully replayable.
+Recapture the live DKMS inventory and compare it with the journal checksum
+immediately before clearing durable recovery authority.
 
 - [ ] **Step 5: Preserve compatibility**
 

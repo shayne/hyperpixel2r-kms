@@ -949,7 +949,7 @@ validate_dkms_status() {
   validate_named_dkms_status hyperpixel2r-kms "$version"
 }
 
-resolved_module_sha() {
+resolved_module_path() {
   local release="$1"
   local module="$2"
   local module_root="${root}/lib/modules/$release"
@@ -979,12 +979,29 @@ resolved_module_sha() {
     *) printf 'resolved module has an unsupported leaf: %s\n' "$path" >&2; return 1 ;;
   esac
   assert_owned_regular "$path" 644 || return
+  printf '%s\n' "$path"
+}
+
+module_leaf_sha() {
+  local path="$1"
+
+  assert_owned_regular "$path" 644 || return
   case "$path" in
     *.ko) sha "$path" ;;
     *.ko.xz) sudo xz -dc -- "$path" | sha256sum | awk '{ print $1 }' ;;
     *.ko.zst) sudo zstd -dc -- "$path" | sha256sum | awk '{ print $1 }' ;;
     *.ko.gz) sudo gzip -dc -- "$path" | sha256sum | awk '{ print $1 }' ;;
+    *) return 1 ;;
   esac
+}
+
+resolved_module_sha() {
+  local release="$1"
+  local module="$2"
+  local path
+
+  path="$(resolved_module_path "$release" "$module")" || return
+  module_leaf_sha "$path"
 }
 
 validate_named_dkms_status() {
@@ -1547,6 +1564,7 @@ stage() {
   stage_complete=false
   accepted_bound=false
   accepted_prior_dkms_state=''
+  resolved_path=''
 
   stage_cleanup() {
     local status=$?
@@ -1753,9 +1771,12 @@ stage() {
   elif sudo test -e "$dkms_dir"; then
     if assert_source_tree_shape "$dkms_dir" "$artifact_dir/dkms-source" 2>/dev/null; then
       sudo depmod -a "$release" || die 'failed to refresh module resolution before DKMS reuse'
-      resolved_sha="$(resolved_module_sha "$release" hyperpixel2r_kms)" ||
+      resolved_path="$(resolved_module_path "$release" hyperpixel2r_kms)" ||
         die 'failed to resolve installed module before DKMS reuse'
-      if test "$resolved_sha" != "$module_sha"; then
+      resolved_sha="$(module_leaf_sha "$resolved_path")" ||
+        die 'failed to hash installed module before DKMS reuse'
+      if test "$resolved_path" != "$module_path" ||
+        test "$resolved_sha" != "$module_sha"; then
         case "$prior_dkms_state" in
           registered|added|built|installed)
             run_dkms remove -m hyperpixel2r-kms -v "$driver_version" --all ||
@@ -1793,7 +1814,8 @@ stage() {
     *) die 'invalid DKMS status result' ;;
   esac
   sudo depmod -a "$release" || die 'failed to refresh candidate module resolution'
-  test "$(resolved_module_sha "$release" hyperpixel2r_kms)" = "$module_sha" ||
+  test "$(resolved_module_path "$release" hyperpixel2r_kms)" = "$module_path" &&
+    test "$(module_leaf_sha "$module_path")" = "$module_sha" ||
     die 'candidate module is not selected by running-kernel resolution'
   fixture_interrupt_after candidate-dkms-activated
   test "$(sha "$normal_config")" = "$normal_sha" || die 'normal boot config changed while staging tryboot candidate'
@@ -1988,13 +2010,6 @@ assert_rollback_module_state() {
     }
     hold_present=true
   fi
-  if test "$rb_module_existed" = true; then
-    test "$module_present:$hold_present" = true:false || {
-      echo 'preexisting rollback module state is ambiguous' >&2
-      return 1
-    }
-    return 0
-  fi
   if test "$rb_mode" = compensate; then
     if test "$rb_phase" = depmod-verified; then
       test "$module_present:$hold_present" = true:false || {
@@ -2009,14 +2024,121 @@ assert_rollback_module_state() {
     fi
     return 0
   fi
-  case "$rb_phase:$module_present:$hold_present" in
-    prepared:true:false|prepared:false:true) ;;
-    candidate-held:false:true|prior-restored:false:true) ;;
-    boot-restored:false:true|boot-restored:false:false) ;;
-    depmod-verified:false:false) ;;
-    *) echo 'forward rollback module and hold state is ambiguous' >&2; return 1 ;;
-  esac
+  if test "$rb_module_existed" = true; then
+    case "$rb_phase:$module_present:$hold_present" in
+      prepared:true:false|prepared:false:true) ;;
+      candidate-held:false:true) ;;
+      prior-restored:false:true|prior-restored:true:false) ;;
+      boot-restored:true:false|depmod-verified:true:false) ;;
+      *) echo 'forward shared-module rollback state is ambiguous' >&2; return 1 ;;
+    esac
+  else
+    case "$rb_phase:$module_present:$hold_present" in
+      prepared:true:false|prepared:false:true) ;;
+      candidate-held:false:true) ;;
+      prior-restored:false:true|prior-restored:false:false) ;;
+      boot-restored:false:false|depmod-verified:false:false) ;;
+      *) echo 'forward rollback module and hold state is ambiguous' >&2; return 1 ;;
+    esac
+  fi
   return 0
+}
+
+boot_file_matches_sha() {
+  local path="$1"
+  local expected_sha="$2"
+  local kind="$3"
+  local mode
+
+  sudo test ! -L "$path" && sudo test -f "$path" || return
+  test "$(sudo stat -c '%U:%G' "$path")" = root:root || return
+  mode="$(sudo stat -c '%a' "$path")" || return
+  case "$kind:$mode" in
+    tryboot:600|tryboot:644|tryboot:755|overlay:644|overlay:755) ;;
+    *) return 1 ;;
+  esac
+  test "$(sha "$path")" = "$expected_sha"
+}
+
+rollback_tryboot_matches_candidate() {
+  boot_file_matches_sha "$tryboot_config" "$rb_candidate_tryboot_sha" tryboot
+}
+
+rollback_tryboot_matches_prior() {
+  if test "$rb_tryboot_existed" = true; then
+    boot_file_matches_sha "$tryboot_config" \
+      "$(sha "$rb_artifact/prior-tryboot.txt")" tryboot
+  else
+    sudo test ! -L "$tryboot_config" && sudo test ! -e "$tryboot_config"
+  fi
+}
+
+rollback_overlay_matches_candidate() {
+  boot_file_matches_sha "$rb_overlay_path" "$rb_overlay_sha" overlay
+}
+
+rollback_overlay_matches_prior() {
+  if test "$rb_overlay_existed" = true; then
+    rollback_overlay_matches_candidate
+  else
+    sudo test ! -L "$rb_overlay_path" && sudo test ! -e "$rb_overlay_path"
+  fi
+}
+
+assert_rollback_boot_state() {
+  local tryboot_candidate=false tryboot_prior=false
+  local overlay_candidate=false overlay_prior=false
+
+  if rollback_tryboot_matches_candidate; then tryboot_candidate=true; fi
+  if rollback_tryboot_matches_prior; then tryboot_prior=true; fi
+  if rollback_overlay_matches_candidate; then overlay_candidate=true; fi
+  if rollback_overlay_matches_prior; then overlay_prior=true; fi
+
+  if test "$rb_mode" = compensate; then
+    if test "$rb_phase" = depmod-verified; then
+      test "$tryboot_candidate:$overlay_candidate" = true:true || {
+        echo 'verified compensation boot state is not the exact candidate' >&2
+        return 1
+      }
+    else
+      test "$tryboot_candidate" = true || test "$tryboot_prior" = true || {
+        echo 'compensation tryboot state is neither candidate nor prior' >&2
+        return 1
+      }
+      test "$overlay_candidate" = true || test "$overlay_prior" = true || {
+        echo 'compensation overlay state is neither candidate nor prior' >&2
+        return 1
+      }
+    fi
+    return 0
+  fi
+
+  case "$rb_phase" in
+    prepared|candidate-held)
+      test "$tryboot_candidate:$overlay_candidate" = true:true || {
+        printf 'forward rollback candidate boot state drifted: tryboot=%s overlay=%s\n' \
+          "$tryboot_candidate" "$overlay_candidate" >&2
+        return 1
+      }
+      ;;
+    prior-restored)
+      test "$tryboot_candidate" = true || test "$tryboot_prior" = true || {
+        echo 'forward rollback tryboot state drifted during restoration' >&2
+        return 1
+      }
+      test "$overlay_candidate" = true || test "$overlay_prior" = true || {
+        echo 'forward rollback overlay state drifted during restoration' >&2
+        return 1
+      }
+      ;;
+    boot-restored|depmod-verified)
+      test "$tryboot_prior:$overlay_prior" = true:true || {
+        echo 'forward rollback restored boot state drifted' >&2
+        return 1
+      }
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 assert_rollback_journal() {
@@ -2109,6 +2231,12 @@ assert_rollback_journal() {
   rb_module_path="${root}/lib/modules/$release/extra/$module_file"
   rb_module_hold="${rb_module_path}.hp2r-rollback-hold"
   rb_module_sha="$module_sha"
+  rb_artifact="$artifact"
+  rb_candidate_tryboot_sha="$candidate_tryboot_sha"
+  rb_tryboot_existed="$(rollback_value tryboot_existed)"
+  rb_overlay_existed="$(rollback_value overlay_existed)"
+  rb_overlay_path="${root}/boot/firmware/overlays/$overlay_file"
+  rb_overlay_sha="$overlay_sha"
   assert_rollback_module_state || return
 
   if "$finalizing" || "$auxiliaries_optional"; then
@@ -2132,6 +2260,7 @@ assert_rollback_journal() {
     assert_owned_regular "$rollback_candidate_tryboot" 600 || return
     test "$(sha "$rollback_candidate_tryboot")" = "$candidate_tryboot_sha" || return
   fi
+  assert_rollback_boot_state
 }
 
 write_rollback_journal() {
@@ -2300,25 +2429,23 @@ compensate_rollback() {
     }
     fixture_interrupt_after rollback-compensate-dkms-restored
 
-    if test "$rb_module_existed" = false; then
-      candidate_path_state=absent
-      if sudo test -L "$rb_module_path" || sudo test -L "$rb_module_hold"; then return 1; fi
-      if sudo test -e "$rb_module_path"; then
-        assert_owned_regular "$rb_module_path" 644 || return
-        test "$(sha "$rb_module_path")" = "$rb_module_sha" || return
-        candidate_path_state=module
-      fi
-      if sudo test -e "$rb_module_hold"; then
-        test "$candidate_path_state" = absent || return
-        assert_owned_regular "$rb_module_hold" 644 || return
-        test "$(sha "$rb_module_hold")" = "$rb_module_sha" || return
-        sudo mv -f -- "$rb_module_hold" "$rb_module_path" || return
-        candidate_path_state=module
-      fi
-      if test "$candidate_path_state" = absent; then
-        atomic_copy "$rb_artifact/$rb_module_file" "$rb_module_path" 644 "$rb_module_sha" ||
-          { echo 'failed to restore candidate module during compensation' >&2; return 1; }
-      fi
+    candidate_path_state=absent
+    if sudo test -L "$rb_module_path" || sudo test -L "$rb_module_hold"; then return 1; fi
+    if sudo test -e "$rb_module_path"; then
+      assert_owned_regular "$rb_module_path" 644 || return
+      test "$(sha "$rb_module_path")" = "$rb_module_sha" || return
+      candidate_path_state=module
+    fi
+    if sudo test -e "$rb_module_hold"; then
+      test "$candidate_path_state" = absent || return
+      assert_owned_regular "$rb_module_hold" 644 || return
+      test "$(sha "$rb_module_hold")" = "$rb_module_sha" || return
+      sudo mv -f -- "$rb_module_hold" "$rb_module_path" || return
+      candidate_path_state=module
+    fi
+    if test "$candidate_path_state" = absent; then
+      atomic_copy "$rb_artifact/$rb_module_file" "$rb_module_path" 644 "$rb_module_sha" ||
+        { echo 'failed to restore candidate module during compensation' >&2; return 1; }
     fi
     if test "$rb_overlay_existed" = false; then
       atomic_copy "$rb_artifact/$rb_overlay_file" "$rb_overlay_path" 644 \
@@ -2350,19 +2477,20 @@ compensate_rollback() {
   else
     assert_source_tree_shape "$rb_dkms_dir" "$rb_artifact/dkms-source" ||
       return
-    if sudo test -e "$rollback_candidate_inventory"; then
-      current_inventory="$rollback_candidate_inventory"
-    else
-      current_inventory="$(private_file "$rb_workspace" compensation-inventory)" ||
-        return
-      capture_dkms_inventory "$rb_version" "$current_inventory" "$rb_workspace" ||
-        return
-      test "$(sha "$current_inventory")" = "$rb_candidate_inventory_sha" || return
-    fi
     test "$(sha "$tryboot_config")" = "$rb_candidate_tryboot_sha" || return
     test "$(resolved_module_sha "$rb_release" hyperpixel2r_kms)" = "$rb_module_sha" ||
       return
   fi
+  assert_source_tree_shape "$rb_dkms_dir" "$rb_artifact/dkms-source" || return
+  current_inventory="$(private_file "$rb_workspace" compensation-live-inventory)" ||
+    return
+  capture_dkms_inventory "$rb_version" "$current_inventory" "$rb_workspace" ||
+    return
+  test "$(sha "$current_inventory")" = "$rb_candidate_inventory_sha" || {
+    echo 'live candidate DKMS inventory drifted before compensation cleanup' >&2
+    return 1
+  }
+  assert_rollback_boot_state || return
   sudo rm -f -- "$rollback_candidate_tryboot" "$rollback_candidate_inventory" ||
     { echo 'failed to remove durable compensation auxiliaries' >&2; return 1; }
   sudo sync
@@ -2502,30 +2630,28 @@ rollback() {
   fi
 
   if test "$rb_phase" = prepared; then
-    if test "$rb_module_existed" = false; then
-      if sudo test -L "$rb_module_path" || sudo test -L "$rb_module_hold"; then
-        die 'candidate module hold state is unsafe'
-      elif sudo test -e "$rb_module_path" && sudo test -e "$rb_module_hold"; then
-        die 'candidate module and rollback hold coexist'
-      elif sudo test -e "$rb_module_path"; then
-        assert_owned_regular "$rb_module_path" 644 ||
-          die 'candidate module is unsafe before hold'
-        test "$(sha "$rb_module_path")" = "$rb_module_sha" ||
-          die 'candidate module drifted before hold'
-        sudo mv -f -- "$rb_module_path" "$rb_module_hold" ||
-          die 'failed to hold candidate module'
-      elif sudo test -e "$rb_module_hold"; then
-        assert_owned_regular "$rb_module_hold" 644 ||
-          die 'candidate module hold is unsafe'
-        test "$(sha "$rb_module_hold")" = "$rb_module_sha" ||
-          die 'candidate module hold drifted'
-      else
-        die 'candidate module and rollback hold are both absent'
-      fi
-      sudo depmod -a "$rb_release" ||
-        die 'failed to refresh resolution after candidate hold'
-      sudo sync
+    if sudo test -L "$rb_module_path" || sudo test -L "$rb_module_hold"; then
+      die 'candidate module hold state is unsafe'
+    elif sudo test -e "$rb_module_path" && sudo test -e "$rb_module_hold"; then
+      die 'candidate module and rollback hold coexist'
+    elif sudo test -e "$rb_module_path"; then
+      assert_owned_regular "$rb_module_path" 644 ||
+        die 'candidate module is unsafe before hold'
+      test "$(sha "$rb_module_path")" = "$rb_module_sha" ||
+        die 'candidate module drifted before hold'
+      sudo mv -f -- "$rb_module_path" "$rb_module_hold" ||
+        die 'failed to hold candidate module'
+    elif sudo test -e "$rb_module_hold"; then
+      assert_owned_regular "$rb_module_hold" 644 ||
+        die 'candidate module hold is unsafe'
+      test "$(sha "$rb_module_hold")" = "$rb_module_sha" ||
+        die 'candidate module hold drifted'
+    else
+      die 'candidate module and rollback hold are both absent'
     fi
+    sudo depmod -a "$rb_release" ||
+      die 'failed to refresh resolution after candidate hold'
+    sudo sync
     fixture_interrupt_after rollback-candidate-held-unpublished
     rb_phase=candidate-held
     write_rollback_journal rollback "$rb_phase" ||
@@ -2557,6 +2683,28 @@ rollback() {
       sudo rm -f -- "$rb_overlay_path" ||
         die 'failed to remove candidate overlay'
     fi
+    if sudo test -L "$rb_module_hold" || sudo test -L "$rb_module_path"; then
+      die 'candidate module finalization state is unsafe'
+    elif sudo test -e "$rb_module_hold"; then
+      assert_owned_regular "$rb_module_hold" 644 ||
+        die 'candidate module hold is unsafe before finalization'
+      test "$(sha "$rb_module_hold")" = "$rb_module_sha" ||
+        die 'candidate module hold drifted before finalization'
+      if test "$rb_module_existed" = true; then
+        sudo mv -f -- "$rb_module_hold" "$rb_module_path" ||
+          die 'failed to restore preexisting candidate module'
+      else
+        sudo rm -f -- "$rb_module_hold" ||
+          die 'failed to remove held candidate module'
+      fi
+    elif test "$rb_module_existed" = true; then
+      assert_owned_regular "$rb_module_path" 644 ||
+        die 'preexisting candidate module is missing after finalization'
+      test "$(sha "$rb_module_path")" = "$rb_module_sha" ||
+        die 'preexisting candidate module drifted after finalization'
+    elif sudo test -e "$rb_module_path"; then
+      die 'candidate module returned after prior DKMS restore'
+    fi
     sudo sync
     fixture_interrupt_after rollback-boot-restored-unpublished
     rb_phase=boot-restored
@@ -2566,20 +2714,6 @@ rollback() {
   fi
 
   if test "$rb_phase" = boot-restored; then
-    if test "$rb_module_existed" = false; then
-      if sudo test -L "$rb_module_hold" || sudo test -L "$rb_module_path"; then
-        die 'candidate module removal state is unsafe'
-      elif sudo test -e "$rb_module_hold"; then
-        assert_owned_regular "$rb_module_hold" 644 ||
-          die 'candidate module hold is unsafe before removal'
-        test "$(sha "$rb_module_hold")" = "$rb_module_sha" ||
-          die 'candidate module hold drifted before removal'
-        sudo rm -f -- "$rb_module_hold" ||
-          die 'failed to remove held candidate module'
-      elif sudo test -e "$rb_module_path"; then
-        die 'candidate module returned after prior DKMS restore'
-      fi
-    fi
     fixture_interrupt_after rollback-candidate-removed-unpublished
     sudo depmod -a "$rb_release" ||
       die 'failed to refresh prior module resolution'
@@ -2596,6 +2730,8 @@ rollback() {
     die 'durable rollback reached an invalid phase'
   verify_prior_module_resolution ||
     die 'prior module resolution drifted before transaction retirement'
+  assert_rollback_boot_state ||
+    die 'restored boot state drifted before transaction retirement'
   rb_finalizing=true
   if sudo test -e "$state_file"; then
     test "$(sha "$state_file")" = "$rb_transaction_sha" ||

@@ -24,18 +24,13 @@ Staging must resolve `hyperpixel2r_kms` through the generated
 `modules.dep`, decode `.ko`, `.ko.xz`, `.ko.zst`, or `.ko.gz` as required, and
 compare the uncompressed bytes with the manifest module SHA-256.
 
-An exact installed DKMS registration may be reused only when:
-
-- its eight-file source shape equals the candidate source;
-- the resolved module is an owned kernel leaf;
-- its uncompressed SHA-256 equals the manifest module; and
-- a fresh `depmod` still resolves that exact content.
-
-When the source shape matches but the resolved bytes do not, staging captures
-the complete prior DKMS inventory and source, removes the prior registration,
-leaves the candidate source registered but not installed, runs `depmod`, and
-requires resolution to the manifest-bound `/extra` module before publishing
-`tryboot.txt` or transaction state.
+An installed DKMS registration is not candidate authority, even when its
+source and uncompressed module bytes equal the manifest. Staging may preserve
+an add-only exact source registration, but a fresh `depmod` must resolve the
+exact manifest-bound `/extra/hyperpixel2r_kms.ko` leaf. Resolution through
+`updates/dkms` causes staging to capture and remove the installed
+registration, leave the candidate source registered but not installed, and
+rerun `depmod` before publishing `tryboot.txt` or transaction state.
 
 ### Durable rollback protocol
 
@@ -65,13 +60,19 @@ is an atomic root-owned mode-0600 replacement followed by `sync`, before the
 next destructive operation begins.
 
 Each phase accepts only the exact before-state or exact after-state of its
-operation. A crash between an operation and its phase update is therefore
-distinguishable and replayable. The candidate module is moved atomically to
-the adjacent non-loadable hold before prior DKMS restoration. A failure enters
-durable compensation mode; compensation restores the candidate DKMS inventory,
-candidate source, held module, overlay, tryboot config, and `depmod` resolution
-before it clears the journal. A crash during compensation resumes
-compensation.
+operation. This includes checksum-bound candidate or prior `tryboot.txt` and
+overlay state, not only module and DKMS state. A crash between an operation
+and its phase update is therefore distinguishable and replayable.
+
+The manifest-exact `/extra` module is moved atomically to the adjacent
+non-loadable hold before prior DKMS restoration even when it existed before
+staging. After prior DKMS installation, rollback restores that shared leaf
+when `module_existed=true` or discards it when staging created it. A failure
+enters durable compensation mode; compensation restores the candidate DKMS
+inventory, candidate source, held module, overlay, tryboot config, and
+`depmod` resolution. Immediately before clearing the journal it recaptures
+the live DKMS inventory and requires its SHA-256 to equal the journal-bound
+candidate inventory. A crash during compensation resumes compensation.
 
 Successful rollback restores and verifies the complete prior DKMS inventory,
 restores the prior tryboot state, detaches only transaction-created module and
@@ -93,12 +94,17 @@ Executable fixtures must reproduce:
 
 - the exact live schema-3 state with identical source trees but mismatched
   resolved installed bytes;
-- exact resolved installed-byte reuse;
+- byte-identical installed bytes under `updates/dkms` being detached so the
+  manifest `/extra` leaf is authoritative;
 - prior installed restore with a manifest-exact `/extra` collision;
+- prior installed restore when that `/extra` leaf is shared
+  (`module_existed=true`);
 - interruption before and after every durable phase publication, module hold,
   DKMS restore, boot restoration, depmod verification, transaction removal,
   and compensation operation;
 - a simulated reboot at every durable phase, followed by successful resume;
+- candidate and restored tryboot or overlay drift at durable phases;
+- live candidate DKMS inventory drift at verified compensation cleanup;
 - malformed, symlinked, wrongly owned, or checksum-drifted journal, inventory,
   and hold files;
 - transaction schema 1, 2, and 3 compatibility; and

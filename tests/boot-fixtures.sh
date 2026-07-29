@@ -2066,22 +2066,22 @@ grep -Fxq 'hyperpixel2r_kms.ko: extra/hyperpixel2r_kms.ko' \
   "$root/lib/modules/$release/modules.dep" ||
   fail 'exact source with mismatched installed bytes did not resolve the manifest candidate'
 
-# Exact source plus exact resolved module bytes is the separate safe reuse
-# case.  It must preserve the existing installed registration and resolution.
+# Exact source plus exact module bytes is not sufficient when depmod still
+# resolves the DKMS updates leaf.  The staged transaction promises that the
+# manifest-bound /extra leaf is authoritative, so even byte-identical DKMS
+# installation state must be detached from the running-kernel resolution.
 new_target
 prepare_exact_candidate_dkms installed
 exact_source_installed_module="$root/lib/modules/$release/updates/dkms/hyperpixel2r_kms.ko"
 cp "$candidate_manifest_module" "$exact_source_installed_module"
 PATH="$bin:$PATH" HP2R_FIXTURE_ROOT="$root" HP2R_FIXTURE_RELEASE="$release" depmod -a "$release"
 run_stage >/dev/null
-assert_file "$exact_source_installed_module"
-test "$(sha256sum "$exact_source_installed_module" | awk '{ print $1 }')" = \
-  "$candidate_manifest_module_sha" ||
-  fail 'exact source and module reuse changed the installed module'
-assert_dkms_kernel_state "$release" installed
-grep -Fxq 'hyperpixel2r_kms.ko: updates/dkms/hyperpixel2r_kms.ko' \
+assert_absent "$exact_source_installed_module"
+test "$(cat "$root/var/lib/dkms/registered")" = added ||
+  fail 'exact-byte DKMS registration was not reduced to candidate source registration'
+grep -Fxq 'hyperpixel2r_kms.ko: extra/hyperpixel2r_kms.ko' \
   "$root/lib/modules/$release/modules.dep" ||
-  fail 'exact source and module reuse changed module resolution'
+  fail 'stage accepted exact bytes from the wrong module leaf'
 
 new_target
 prepare_prior_dkms successful-rollback
@@ -2204,6 +2204,45 @@ grep -Fxq 'hyperpixel2r_kms.ko: updates/dkms/hyperpixel2r_kms.ko' \
   "$root/lib/modules/$release/modules.dep" ||
   fail 'collision-safe rollback did not resolve the prior DKMS module'
 
+# The live RC17 transaction schema also permits a manifest-exact /extra module
+# that predated staging (`module_existed=true`) while the captured prior DKMS
+# inventory contains an installed running-kernel row.  The shared leaf must be
+# held during DKMS install to avoid the same real collision, then restored
+# byte-for-byte after the prior registration is back.
+new_target
+prepare_prior_dkms shared-module-installed-rollback installed
+shared_installed_module="$root/lib/modules/$release/updates/dkms/hyperpixel2r_kms.ko"
+shared_installed_sha="$(sha256sum "$shared_installed_module" | awk '{ print $1 }')"
+shared_extra_module="$root/lib/modules/$release/extra/hyperpixel2r_kms.ko"
+mkdir -p "$(dirname "$shared_extra_module")"
+cp "$candidate_manifest_module" "$shared_extra_module"
+chown root:root "$shared_extra_module"
+chmod 0644 "$shared_extra_module"
+shared_extra_sha="$(sha256sum "$shared_extra_module" | awk '{ print $1 }')"
+PATH="$bin:$PATH" HP2R_FIXTURE_ROOT="$root" HP2R_FIXTURE_RELEASE="$release" depmod -a "$release"
+run_stage >/dev/null
+state="$root/var/lib/hyperpixel2r-kms/tryboot-state"
+grep -Fxq 'schema_version=3' "$state" ||
+  fail 'shared installed rollback fixture is not a schema-3 transaction'
+grep -Fxq 'module_existed=true' "$state" ||
+  fail 'shared installed rollback fixture did not record the preexisting module'
+first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+assert_dkms_inventory "$first_artifact/dkms-prior-state" added \
+  "$release"$'\taarch64\tinstalled'
+assert_absent "$shared_installed_module"
+HP2R_FIXTURE_DKMS_REJECT_EXTRA_COLLISION=1 \
+  run_controller rollback-boot.sh >/dev/null
+assert_file "$shared_installed_module"
+test "$(sha256sum "$shared_installed_module" | awk '{ print $1 }')" = "$shared_installed_sha" ||
+  fail 'shared-leaf rollback changed the prior installed DKMS module'
+assert_file "$shared_extra_module"
+test "$(sha256sum "$shared_extra_module" | awk '{ print $1 }')" = "$shared_extra_sha" ||
+  fail 'shared-leaf rollback did not restore the preexisting /extra module'
+assert_absent "$shared_extra_module.hp2r-rollback-hold"
+grep -Fxq 'hyperpixel2r_kms.ko: updates/dkms/hyperpixel2r_kms.ko' \
+  "$root/lib/modules/$release/modules.dep" ||
+  fail 'shared-leaf rollback did not resolve the prior DKMS module'
+
 # Every durable rollback phase and every operation-before-phase window must
 # survive a process exit with only the fixed journal, fixed candidate
 # inventory, transaction bundle, and adjacent hold as authority.  Delete all
@@ -2251,6 +2290,44 @@ do
   grep -Fxq 'hyperpixel2r_kms.ko: updates/dkms/hyperpixel2r_kms.ko' \
     "$root/lib/modules/$release/modules.dep" ||
     fail "rollback replay after $rollback_boundary did not resolve prior DKMS"
+done
+
+# A durable journal binds boot state as well as transaction and module state.
+# Candidate-state drift must stop an early replay, and restored-state drift
+# must stop retirement after the boot-restored phase.
+for rollback_boot_drift in \
+  candidate-tryboot candidate-overlay restored-tryboot restored-overlay
+do
+  new_target
+  prepare_exact_candidate_dkms installed
+  PATH="$bin:$PATH" HP2R_FIXTURE_ROOT="$root" HP2R_FIXTURE_RELEASE="$release" depmod -a "$release"
+  run_stage >/dev/null
+  rollback_boundary=rollback-journal-published
+  case "$rollback_boot_drift" in restored-*) rollback_boundary=rollback-boot-restored ;; esac
+  if HP2R_FIXTURE_INTERRUPT_AFTER="$rollback_boundary" \
+    HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
+    run_controller rollback-boot.sh >/dev/null 2>&1; then
+    fail "boot-drift setup ignored interruption for $rollback_boot_drift"
+  fi
+  find "$root/var/lib/hyperpixel2r-kms" -mindepth 1 -maxdepth 1 \
+    -type d -name '.hp2r-transaction.*' -exec rm -rf -- {} +
+  case "$rollback_boot_drift" in
+    *-tryboot)
+      printf '[all]\n# drifted tryboot state\n' > "$root/boot/firmware/tryboot.txt"
+      chown root:root "$root/boot/firmware/tryboot.txt"
+      chmod 0644 "$root/boot/firmware/tryboot.txt"
+      ;;
+    *-overlay)
+      printf 'drifted overlay\n' > "$root/boot/firmware/overlays/$overlay_file"
+      chown root:root "$root/boot/firmware/overlays/$overlay_file"
+      chmod 0644 "$root/boot/firmware/overlays/$overlay_file"
+      ;;
+  esac
+  if run_controller rollback-boot.sh >/dev/null 2>&1; then
+    fail "rollback accepted durable boot-state drift: $rollback_boot_drift"
+  fi
+  assert_file "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+  assert_file "$root/var/lib/hyperpixel2r-kms/rollback-state"
 done
 
 # Compensation has its own durable replay contract.  Fail prior restoration
@@ -2305,6 +2382,33 @@ do
   assert_absent "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko"
   assert_absent "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko.hp2r-rollback-hold"
 done
+
+# A depmod-verified compensation journal may outlive its inventory auxiliary,
+# but it must never clear recovery authority unless the live DKMS state still
+# equals the checksum-bound candidate inventory.
+new_target
+prepare_exact_candidate_dkms installed
+PATH="$bin:$PATH" HP2R_FIXTURE_ROOT="$root" HP2R_FIXTURE_RELEASE="$release" depmod -a "$release"
+run_stage >/dev/null
+if HP2R_FIXTURE_FAIL_MV=dkms-new \
+  HP2R_FIXTURE_INTERRUPT_AFTER=rollback-compensate-depmod-verified \
+  HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
+  run_controller rollback-boot.sh >/dev/null 2>&1; then
+  fail 'compensation inventory-drift setup ignored interruption'
+fi
+grep -Fxq 'mode=compensate' "$root/var/lib/hyperpixel2r-kms/rollback-state" ||
+  fail 'compensation inventory-drift setup did not persist compensation mode'
+grep -Fxq 'phase=depmod-verified' "$root/var/lib/hyperpixel2r-kms/rollback-state" ||
+  fail 'compensation inventory-drift setup did not persist verified phase'
+printf 'added\n%s\taarch64\tbuilt\n' "$release" > "$root/var/lib/dkms/registered"
+find "$root/var/lib/hyperpixel2r-kms" -mindepth 1 -maxdepth 1 \
+  -type d -name '.hp2r-transaction.*' -exec rm -rf -- {} +
+if run_controller rollback-boot.sh >/dev/null 2>&1; then
+  fail 'compensation accepted live DKMS inventory drift'
+fi
+assert_file "$root/var/lib/hyperpixel2r-kms/rollback-state"
+grep -Fxq 'mode=compensate' "$root/var/lib/hyperpixel2r-kms/rollback-state" ||
+  fail 'compensation inventory drift cleared or replaced recovery authority'
 
 # Durable authority is strict.  Malformed, mode-drifted, checksum-drifted, or
 # symlinked journal state must block replay without mutating the live
