@@ -59,6 +59,23 @@ because replacing a fixed DKMS package version uses `dkms remove --all`;
 rollback rebuilds every captured row, not only the kernel that happened to be
 running when staging began. Older scalar rollback records remain supported.
 
+Rollback publishes a root-owned recovery journal before its first destructive
+step. It moves a transaction-created candidate module to the adjacent
+`hyperpixel2r_kms.ko.hp2r-rollback-hold` name before restoring an installed
+prior DKMS package. That filename is deliberately not a loadable module
+suffix, so `depmod` cannot select it. Each journal phase is synced before the
+next operation.
+
+An unexpected reboot during rollback is safe, but it leaves the rollback
+unfinished. Rerun `mise run rollback-boot` after SSH returns. The command
+validates the journal against the original transaction, accepts only the exact
+before- or after-state of the interrupted operation, and resumes. If an
+ordinary operation failed, the same journal records compensation; the next
+rollback invocation restores and verifies the candidate first, then retries
+the requested rollback. Do not stage, commit, uninstall, or run an accepted
+lifecycle action while this journal exists. Those commands refuse concurrent
+authority.
+
 The transaction records whether the module and overlay files already existed.
 Rollback removes only files created by staging; exact files shared with the
 prior normal boot stay in place. If there was no prior DKMS tree, it removes
