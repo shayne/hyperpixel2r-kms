@@ -9,6 +9,8 @@ import json
 import os
 import pathlib
 import re
+import resource
+import stat
 import subprocess
 import sys
 import tempfile
@@ -43,6 +45,30 @@ def _require_identity(tag: str, commit: str) -> None:
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _file_identity(path: pathlib.Path) -> dict[str, Any]:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ContractError(f"release asset is not an exclusive regular file: {path.name}")
+        digest = hashlib.sha256()
+        with os.fdopen(descriptor, "rb") as source:
+            descriptor = -1
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        return {
+            "path": path,
+            "size": metadata.st_size,
+            "digest": f"sha256:{digest.hexdigest()}",
+        }
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _asset_inventory(release: dict[str, Any]) -> list[dict[str, Any]]:
@@ -132,26 +158,38 @@ def _validate_published_release(
     return inventory
 
 
-def _local_assets(directory: pathlib.Path) -> dict[str, bytes]:
+def _local_assets(directory: pathlib.Path) -> dict[str, dict[str, Any]]:
     if not directory.is_dir() or directory.is_symlink():
         raise ContractError("release asset directory is missing or unsafe")
     entries = list(directory.iterdir())
     names = {entry.name for entry in entries}
     if names != set(REQUIRED_ASSETS):
         raise ContractError("local release asset set differs")
-    result: dict[str, bytes] = {}
+    result: dict[str, dict[str, Any]] = {}
     total = 0
     for entry in entries:
         if entry.is_symlink() or not entry.is_file():
             raise ContractError(f"local release asset is not a regular file: {entry.name}")
-        size = entry.stat().st_size
+        identity = _file_identity(entry)
+        size = identity["size"]
         if size <= 0 or size > MAX_ASSET_SIZE:
             raise ContractError(f"local release asset size is invalid: {entry.name}")
         total += size
         if total > MAX_TOTAL_SIZE:
             raise ContractError("local release assets exceed the total size limit")
-        result[entry.name] = entry.read_bytes()
+        result[entry.name] = identity
     return result
+
+
+def _validate_local_assets(
+    directory: pathlib.Path, inventory: list[dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    local = _local_assets(directory)
+    for item in inventory:
+        identity = local[item["name"]]
+        if identity["size"] != item["size"] or identity["digest"] != item["digest"]:
+            raise ContractError(f"local verified asset differs: {item['name']}")
+    return local
 
 
 def _record(
@@ -195,7 +233,7 @@ def create_stable_draft(
     backend: Any, tag: str, commit: str, assets_directory: pathlib.Path
 ) -> dict[str, Any]:
     _require_identity(tag, commit)
-    if backend.tag_commit(tag) is not None:
+    if backend.remote_tag(tag) is not None:
         raise ContractError("stable tag already exists")
     local = _local_assets(assets_directory)
     release_id: int | None = None
@@ -212,18 +250,19 @@ def create_stable_draft(
         ):
             raise ContractError("created release is not the requested stable draft")
         for name in sorted(local):
-            uploaded = backend.upload_asset(release_id, name, local[name])
+            identity = local[name]
+            uploaded = backend.upload_asset(release_id, name, identity["path"])
             if (
                 uploaded.get("name") != name
-                or uploaded.get("size") != len(local[name])
-                or uploaded.get("digest") != f"sha256:{_sha256(local[name])}"
+                or uploaded.get("size") != identity["size"]
+                or uploaded.get("digest") != identity["digest"]
             ):
                 raise ContractError(f"uploaded asset identity differs: {name}")
         release = backend.get_release(release_id)
         inventory, fingerprint = _validate_draft_release(
             release, tag, commit, release_id
         )
-        if backend.tag_commit(tag) is not None:
+        if backend.remote_tag(tag) is not None:
             raise ContractError("stable tag appeared while draft assets were uploaded")
         return _record(tag, commit, release_id, inventory, fingerprint)
     except Exception:
@@ -241,7 +280,7 @@ def verify_stable_draft(
     downloads: pathlib.Path,
 ) -> dict[str, Any]:
     _require_identity(tag, commit)
-    if backend.tag_commit(tag) is not None:
+    if backend.remote_tag(tag) is not None:
         raise ContractError("stable tag already exists")
     release = backend.get_release(release_id)
     inventory, actual = _validate_draft_release(
@@ -251,24 +290,28 @@ def verify_stable_draft(
         raise ContractError("stable verification download directory already exists")
     downloads.mkdir(mode=0o700, parents=True)
     try:
+        remaining = MAX_TOTAL_SIZE
         for item in inventory:
-            data = backend.download_asset(item["id"])
-            if len(data) != item["size"] or f"sha256:{_sha256(data)}" != item["digest"]:
-                raise ContractError(f"downloaded asset bytes differ: {item['name']}")
+            byte_limit = min(item["size"], MAX_ASSET_SIZE, remaining)
+            if byte_limit <= 0:
+                raise ContractError("stable release exhausted its aggregate download limit")
             path = downloads / item["name"]
-            with path.open("xb") as output:
-                output.write(data)
-        local = _local_assets(downloads)
-        for item in inventory:
-            data = local[item["name"]]
-            if len(data) != item["size"] or f"sha256:{_sha256(data)}" != item["digest"]:
-                raise ContractError(f"local verified asset differs: {item['name']}")
-    except Exception:
+            downloaded = backend.download_asset(item["id"], path, byte_limit)
+            if (
+                downloaded.get("size") != item["size"]
+                or downloaded.get("digest") != item["digest"]
+            ):
+                raise ContractError(f"downloaded asset bytes differ: {item['name']}")
+            remaining -= item["size"]
+        _validate_local_assets(downloads, inventory)
+    except Exception as error:
         for path in downloads.iterdir():
-            if path.is_file() and not path.is_symlink():
+            if path.is_file() or path.is_symlink():
                 path.unlink()
         downloads.rmdir()
-        raise
+        if isinstance(error, ContractError):
+            raise
+        raise ContractError("stable release asset download failed") from error
     return _record(tag, commit, release_id, inventory, actual)
 
 
@@ -280,58 +323,96 @@ def publish_verified_draft(
     commit = verification_record["commit"]
     release_id = verification_record["release_id"]
     fingerprint = verification_record["asset_fingerprint"]
-    if backend.tag_commit(tag) is not None:
+    if backend.remote_tag(tag) is not None:
         raise ContractError("stable tag already exists")
-    local = _local_assets(downloads)
     release = backend.get_release(release_id)
     inventory, actual = _validate_draft_release(
         release, tag, commit, release_id, fingerprint
     )
-    for item in inventory:
-        data = local[item["name"]]
-        if len(data) != item["size"] or f"sha256:{_sha256(data)}" != item["digest"]:
-            raise ContractError(f"accepted local asset differs: {item['name']}")
+    _validate_local_assets(downloads, inventory)
     if actual != fingerprint:
         raise ContractError("accepted stable draft fingerprint differs")
 
-    backend.create_annotated_tag(tag, commit)
-    if backend.tag_commit(tag) != commit:
-        raise ContractError("published annotated tag does not dereference to source commit")
+    tag_object = backend.create_local_annotated_tag(tag, commit)
+    if not isinstance(tag_object, str) or not re.fullmatch(r"[0-9a-f]{40}", tag_object):
+        raise ContractError("local annotated tag object identity is invalid")
+    push_error: Exception | None = None
     try:
-        published = backend.publish_release(release_id)
-    except Exception as publish_error:
-        try:
-            observed = backend.get_release(release_id)
-        except Exception as reread_error:
-            raise ContractError(
-                "release state is ambiguous after publication transport failure; "
-                "the exact created tag was left in place"
-            ) from reread_error
+        backend.push_annotated_tag(tag, tag_object)
+    except Exception as error:
+        push_error = error
+    try:
+        remote_after_push = backend.remote_tag(tag)
+    except Exception as remote_error:
+        raise ContractError(
+            "remote tag state is ambiguous after push; no compensation was attempted"
+        ) from remote_error
+    expected_tag = {"object": tag_object, "commit": commit}
+    if remote_after_push is None:
+        backend.discard_local_tag(tag, commit, tag_object)
+        raise ContractError(
+            "stable tag push did not publish a remote ref; the exact local tag "
+            "was removed for retry"
+        ) from push_error
+    if remote_after_push != expected_tag:
+        raise ContractError(
+            "remote stable tag differs after push; no destructive compensation "
+            "was attempted"
+        ) from push_error
+
+    publish_error: Exception | None = None
+    try:
+        backend.publish_release(release_id)
+    except Exception as error:
+        publish_error = error
+    try:
+        observed_release = backend.get_release(release_id)
+        observed_tag = backend.remote_tag(tag)
+    except Exception as reread_error:
+        raise ContractError(
+            "remote release or tag state is ambiguous after publication; "
+            "no destructive compensation was attempted"
+        ) from reread_error
+    if observed_tag == expected_tag:
         try:
             published_inventory = _validate_published_release(
-                observed, tag, commit, release_id, fingerprint
+                observed_release, tag, commit, release_id, fingerprint
+            )
+            return _record(
+                tag, commit, release_id, published_inventory, fingerprint
             )
         except ContractError:
-            try:
-                _validate_draft_release(
-                    observed, tag, commit, release_id, fingerprint
-                )
-            except ContractError as drift_error:
-                raise ContractError(
-                    "release state drifted after publication failure; "
-                    "the exact created tag was left in place"
-                ) from drift_error
-            backend.delete_annotated_tag(tag, commit)
-            if backend.tag_commit(tag) is not None:
-                raise ContractError("compensating stable tag deletion did not hold")
+            pass
+        try:
+            _validate_draft_release(
+                observed_release, tag, commit, release_id, fingerprint
+            )
+        except ContractError:
             raise ContractError(
-                "stable publication failed; the exact created tag was removed for retry"
+                "release state drifted after publication; the exact tag was left "
+                "in place and no destructive compensation was attempted"
             ) from publish_error
-    else:
-        published_inventory = _validate_published_release(
-            published, tag, commit, release_id, fingerprint
+        backend.delete_annotated_tag(tag, commit, tag_object)
+        try:
+            compensated_tag = backend.remote_tag(tag)
+            compensated_release = backend.get_release(release_id)
+        except Exception as compensation_error:
+            raise ContractError(
+                "publication compensation could not be proven"
+            ) from compensation_error
+        if compensated_tag is not None:
+            raise ContractError("compensating stable tag deletion did not hold")
+        _validate_draft_release(
+            compensated_release, tag, commit, release_id, fingerprint
         )
-    return _record(tag, commit, release_id, published_inventory, fingerprint)
+        raise ContractError(
+            "stable publication did not complete; the exact created tag was "
+            "removed for retry"
+        ) from publish_error
+    raise ContractError(
+        "remote stable tag drifted after publication; no destructive "
+        "compensation was attempted"
+    ) from publish_error
 
 
 class GhGitBackend:
@@ -354,39 +435,36 @@ class GhGitBackend:
             raise ContractError("GitHub API returned a non-object")
         return value
 
-    def tag_commit(self, tag: str) -> str | None:
-        local = subprocess.run(
-            [self.git, "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{}}"],
-            text=True,
-            stdout=subprocess.PIPE,
-            check=False,
-        )
-        if local.returncode == 0:
-            return local.stdout.strip()
+    def remote_tag(self, tag: str) -> dict[str, str] | None:
         remote = subprocess.run(
-            [self.git, "ls-remote", "--tags", "origin", f"refs/tags/{tag}"],
-            text=True,
-            stdout=subprocess.PIPE,
-            check=True,
-        )
-        if not remote.stdout.strip():
-            return None
-        subprocess.run(
             [
                 self.git,
-                "fetch",
-                "--no-tags",
+                "ls-remote",
+                "--tags",
                 "origin",
-                f"refs/tags/{tag}:refs/tags/{tag}",
+                f"refs/tags/{tag}",
+                f"refs/tags/{tag}^{{}}",
             ],
-            check=True,
-        )
-        return subprocess.run(
-            [self.git, "rev-parse", f"refs/tags/{tag}^{{}}"],
             text=True,
             stdout=subprocess.PIPE,
             check=True,
-        ).stdout.strip()
+        )
+        lines = [line.split() for line in remote.stdout.splitlines() if line.strip()]
+        if not lines:
+            return None
+        if any(len(line) != 2 for line in lines):
+            raise ContractError("remote stable tag query returned malformed rows")
+        values = {line[1]: line[0] for line in lines}
+        if len(values) != len(lines):
+            raise ContractError("remote stable tag query returned duplicate refs")
+        tag_ref = f"refs/tags/{tag}"
+        peeled_ref = f"{tag_ref}^{{}}"
+        if set(values) != {tag_ref, peeled_ref}:
+            raise ContractError("remote stable tag is not one exact annotated ref")
+        for value in values.values():
+            if re.fullmatch(r"[0-9a-f]{40}", value) is None:
+                raise ContractError("remote stable tag object identity is invalid")
+        return {"object": values[tag_ref], "commit": values[peeled_ref]}
 
     def create_release(self, tag: str, commit: str) -> dict[str, Any]:
         payload = json.dumps(
@@ -416,7 +494,9 @@ class GhGitBackend:
             check=True,
         )
 
-    def upload_asset(self, release_id: int, name: str, data: bytes) -> dict[str, Any]:
+    def upload_asset(
+        self, release_id: int, name: str, path: pathlib.Path
+    ) -> dict[str, Any]:
         endpoint = (
             f"repos/{REPOSITORY}/releases/{release_id}/assets"
             f"?name={urllib.parse.quote(name, safe='')}"
@@ -429,28 +509,48 @@ class GhGitBackend:
                 "Content-Type: application/octet-stream",
                 endpoint,
                 "--input",
-                "-",
+                str(path),
             ],
-            data,
         )
 
     def get_release(self, release_id: int) -> dict[str, Any]:
         return self._gh_json([f"repos/{REPOSITORY}/releases/{release_id}"])
 
-    def download_asset(self, asset_id: int) -> bytes:
-        return subprocess.run(
-            [
-                self.gh,
-                "api",
-                "-H",
-                "Accept: application/octet-stream",
-                f"repos/{REPOSITORY}/releases/assets/{asset_id}",
-            ],
-            stdout=subprocess.PIPE,
-            check=True,
-        ).stdout
+    def download_asset(
+        self, asset_id: int, destination: pathlib.Path, byte_limit: int
+    ) -> dict[str, Any]:
+        if byte_limit <= 0 or byte_limit > MAX_ASSET_SIZE:
+            raise ContractError("download byte ceiling is invalid")
+        descriptor = os.open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
 
-    def create_annotated_tag(self, tag: str, commit: str) -> None:
+        def apply_file_limit() -> None:
+            resource.setrlimit(resource.RLIMIT_FSIZE, (byte_limit, byte_limit))
+
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                descriptor = -1
+                subprocess.run(
+                    [
+                        self.gh,
+                        "api",
+                        "-H",
+                        "Accept: application/octet-stream",
+                        f"repos/{REPOSITORY}/releases/assets/{asset_id}",
+                    ],
+                    stdout=output,
+                    check=True,
+                    preexec_fn=apply_file_limit,
+                )
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        return _file_identity(destination)
+
+    def create_local_annotated_tag(self, tag: str, commit: str) -> str:
         subprocess.run(
             [
                 self.git,
@@ -463,12 +563,33 @@ class GhGitBackend:
             ],
             check=True,
         )
+        tag_object = subprocess.run(
+            [self.git, "rev-parse", f"refs/tags/{tag}"],
+            text=True,
+            stdout=subprocess.PIPE,
+            check=True,
+        ).stdout.strip()
+        if re.fullmatch(r"[0-9a-f]{40}", tag_object) is None:
+            raise ContractError("local annotated tag object identity is invalid")
+        return tag_object
+
+    def push_annotated_tag(self, tag: str, tag_object: str) -> None:
+        local_object = subprocess.run(
+            [self.git, "rev-parse", f"refs/tags/{tag}"],
+            text=True,
+            stdout=subprocess.PIPE,
+            check=True,
+        ).stdout.strip()
+        if local_object != tag_object:
+            raise ContractError("local annotated tag changed before push")
         subprocess.run(
             [self.git, "push", "origin", f"refs/tags/{tag}:refs/tags/{tag}"],
             check=True,
         )
 
-    def delete_annotated_tag(self, tag: str, commit: str) -> None:
+    def delete_annotated_tag(
+        self, tag: str, commit: str, tag_object: str
+    ) -> None:
         local_object = subprocess.run(
             [self.git, "rev-parse", f"refs/tags/{tag}"],
             text=True,
@@ -481,15 +602,10 @@ class GhGitBackend:
             stdout=subprocess.PIPE,
             check=True,
         ).stdout.strip()
-        if local_commit != commit:
+        if local_object != tag_object or local_commit != commit:
             raise ContractError("refusing to delete a different local stable tag")
-        remote = subprocess.run(
-            [self.git, "ls-remote", "--tags", "origin", f"refs/tags/{tag}"],
-            text=True,
-            stdout=subprocess.PIPE,
-            check=True,
-        ).stdout.strip().split()
-        if len(remote) != 2 or remote[0] != local_object:
+        remote = self.remote_tag(tag)
+        if remote != {"object": tag_object, "commit": commit}:
             raise ContractError("refusing to delete a different remote stable tag")
         subprocess.run(
             [
@@ -501,6 +617,25 @@ class GhGitBackend:
             ],
             check=True,
         )
+        subprocess.run([self.git, "tag", "--delete", tag], check=True)
+
+    def discard_local_tag(self, tag: str, commit: str, tag_object: str) -> None:
+        local_object = subprocess.run(
+            [self.git, "rev-parse", f"refs/tags/{tag}"],
+            text=True,
+            stdout=subprocess.PIPE,
+            check=True,
+        ).stdout.strip()
+        local_commit = subprocess.run(
+            [self.git, "rev-parse", f"refs/tags/{tag}^{{}}"],
+            text=True,
+            stdout=subprocess.PIPE,
+            check=True,
+        ).stdout.strip()
+        if local_object != tag_object or local_commit != commit:
+            raise ContractError("refusing to discard a different local stable tag")
+        if self.remote_tag(tag) is not None:
+            raise ContractError("refusing to discard local tag while remote exists")
         subprocess.run([self.git, "tag", "--delete", tag], check=True)
 
     def publish_release(self, release_id: int) -> dict[str, Any]:
@@ -523,11 +658,13 @@ def _write_record(path: pathlib.Path, record: dict[str, Any]) -> None:
     try:
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w") as output:
+            fd = -1
             json.dump(record, output, sort_keys=True, separators=(",", ":"))
             output.write("\n")
         os.replace(temporary, path)
     except Exception:
-        os.close(fd)
+        if fd >= 0:
+            os.close(fd)
         pathlib.Path(temporary).unlink(missing_ok=True)
         raise
 

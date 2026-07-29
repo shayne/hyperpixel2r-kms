@@ -208,6 +208,9 @@ if stable_promote.is_file():
         "--deny-self-hosted-runners",
         'git config user.name "github-actions[bot]"',
         'git config user.email "41898282+github-actions[bot]@users.noreply.github.com"',
+        'git ls-remote --tags origin',
+        '"refs/tags/$TAG^{}"',
+        'test "$tag_commit" = "$SOURCE_COMMIT"',
     ):
         if required not in workflow:
             failures.append(f"stable promotion workflow contract is missing: {required}")
@@ -222,6 +225,8 @@ if stable_promote.is_file():
     for value in forbidden:
         if value in workflow:
             failures.append(f"stable promotion must not build, attest, or replace assets: {value}")
+    if 'git rev-parse "$TAG' in workflow or "git fetch --tags" in workflow:
+        failures.append("stable promotion must verify tag state from the remote, not local refs")
 
 for relative in ("scripts/build-driver.sh", "scripts/package-release.sh"):
     text = (root / relative).read_text()

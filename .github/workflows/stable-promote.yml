@@ -54,8 +54,11 @@ jobs:
           ./scripts/validate-stable-release-tag.sh "$TAG" "$SOURCE_COMMIT"
           [[ "$RELEASE_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$ASSET_FINGERPRINT" =~ ^[0-9a-f]{64}$ ]]
-          git fetch --tags --force
-          if git rev-parse --verify --quiet "refs/tags/$TAG"; then
+          remote_tag_refs="$(
+            git ls-remote --tags origin \
+              "refs/tags/$TAG" "refs/tags/$TAG^{}"
+          )"
+          if test -n "$remote_tag_refs"; then
             echo "stable tag already exists: $TAG" >&2
             exit 1
           fi
@@ -160,7 +163,22 @@ jobs:
           RELEASE_ID: ${{ inputs.release_id }}
           ASSET_FINGERPRINT: ${{ inputs.asset_fingerprint }}
         run: |
-          test "$(git rev-parse "$TAG^{}")" = "$SOURCE_COMMIT"
+          remote_tag_refs="$(
+            git ls-remote --tags origin \
+              "refs/tags/$TAG" "refs/tags/$TAG^{}"
+          )"
+          test "$(printf '%s\n' "$remote_tag_refs" | sed '/^$/d' | wc -l | tr -d ' ')" = 2
+          tag_object="$(
+            printf '%s\n' "$remote_tag_refs" |
+              awk -v wanted="refs/tags/$TAG" '$2 == wanted { print $1 }'
+          )"
+          tag_commit="$(
+            printf '%s\n' "$remote_tag_refs" |
+              awk -v wanted="refs/tags/$TAG^{}" '$2 == wanted { print $1 }'
+          )"
+          [[ "$tag_object" =~ ^[0-9a-f]{40}$ ]]
+          test "$tag_object" != "$SOURCE_COMMIT"
+          test "$tag_commit" = "$SOURCE_COMMIT"
           gh api "repos/shayne/hyperpixel2r-kms/releases/$RELEASE_ID" |
             jq -e --arg tag "$TAG" --arg commit "$SOURCE_COMMIT" '
               .tag_name == $tag and
