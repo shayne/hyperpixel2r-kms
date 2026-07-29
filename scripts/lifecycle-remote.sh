@@ -41,9 +41,13 @@ state_keys_v1=(
   normal_config_sha256 candidate_config_sha256 tryboot_existed prior_tryboot_sha256
   replaced_overlay
 )
-state_keys=(
+state_keys_v2=(
   "${state_keys_v1[@]}"
   module_existed overlay_existed
+)
+state_keys=(
+  "${state_keys_v2[@]}"
+  prior_dkms_inventory_sha256
 )
 accepted_keys=(
   schema_version driver_version source_revision kernel_release manifest_sha256
@@ -497,17 +501,174 @@ assert_source_tree_shape() {
   done
 }
 
-dkms_prior_state() {
-  local artifact_dir="$1"
-  local marker="$artifact_dir/dkms-prior-state"
-  local value
+assert_dkms_inventory_file() {
+  local marker="$1"
+  local first source_state count row kernel architecture kernel_state previous=''
+  local line_count=0
 
   assert_owned_regular "$marker" 600 || return
-  value="$(sudo cat "$marker")"
-  case "$value" in
-    absent|unregistered|registered|added|built|installed) printf '%s\n' "$value" ;;
-    *) return 1 ;;
+  test "$(sudo stat -c '%s' "$marker")" -le 4096 || {
+    echo 'DKMS inventory exceeds its size limit' >&2
+    return 1
+  }
+  sudo awk 'length($0) > 160 { exit 1 }' "$marker" || {
+    echo 'DKMS inventory contains an overlong row' >&2
+    return 1
+  }
+  first="$(sudo sed -n '1p' "$marker")"
+  case "$first" in
+    absent|unregistered|registered|added|built|installed)
+      test "$(sudo awk 'END { print NR }' "$marker")" = 1
+      return
+      ;;
+    schema_version=2) ;;
+    *) echo 'unsupported DKMS inventory schema' >&2; return 1 ;;
   esac
+
+  source_state="$(sudo sed -n '2s/^source_state=//p' "$marker")"
+  count="$(sudo sed -n '3s/^kernel_count=//p' "$marker")"
+  case "$source_state" in absent|unregistered|added) ;; *) return 1;; esac
+  [[ "$count" =~ ^(0|[1-9]|1[0-6])$ ]] || return
+  test "$(sudo awk 'END { print NR }' "$marker")" = "$((count + 3))" || return
+  while IFS= read -r row; do
+    line_count=$((line_count + 1))
+    [[ "$row" =~ ^kernel=([A-Za-z0-9._+-]+)$'\t'(aarch64|arm64)$'\t'(built|installed)$ ]] ||
+      return 1
+    kernel="${BASH_REMATCH[1]}"
+    architecture="${BASH_REMATCH[2]}"
+    kernel_state="${BASH_REMATCH[3]}"
+    row="$kernel"$'\t'"$architecture"$'\t'"$kernel_state"
+    if test -n "$previous"; then
+      test "$previous" \< "$row" || {
+        echo 'DKMS inventory rows are duplicated or not canonical' >&2
+        return 1
+      }
+    fi
+    previous="$row"
+  done < <(sudo sed -n '4,$p' "$marker")
+  test "$line_count" = "$count" || return
+  case "$source_state:$count" in
+    absent:0|unregistered:0|added:*) ;;
+    *) echo 'DKMS inventory source state conflicts with kernel rows' >&2; return 1 ;;
+  esac
+}
+
+dkms_inventory_state() {
+  local marker="$1"
+  local first
+
+  assert_dkms_inventory_file "$marker" || return
+  first="$(sudo sed -n '1p' "$marker")"
+  if test "$first" = schema_version=2; then
+    sudo sed -n '2s/^source_state=//p' "$marker"
+  else
+    printf '%s\n' "$first"
+  fi
+}
+
+capture_dkms_inventory() {
+  local version="$1"
+  local output_file="$2"
+  local workspace="$3"
+  local status_file status size line source_state=unregistered
+  local -a pipeline_status=()
+  local kernel architecture kernel_state row previous=''
+  local -a rows=() sorted_rows=()
+
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return
+  assert_private_workspace "$workspace" || return
+  case "$output_file" in "$workspace"/*) ;; *) return 1;; esac
+  assert_owned_regular "$output_file" 600 || return
+  if dkms_available; then
+    status_file="$(private_file "$workspace" dkms-status)" || return
+    set +e
+    run_dkms status -m hyperpixel2r-kms -v "$version" 2>/dev/null |
+      sudo head -c 4097 |
+      sudo tee "$status_file" >/dev/null
+    pipeline_status=("${PIPESTATUS[@]}")
+    set -e
+    status="${pipeline_status[0]}"
+    test "${pipeline_status[1]}" = 0 && test "${pipeline_status[2]}" = 0 || {
+      sudo rm -f -- "$status_file" || true
+      echo 'failed to capture bounded DKMS status' >&2
+      return 1
+    }
+    size="$(sudo stat -c '%s' "$status_file")" || return
+    test "$size" -le 4096 || {
+      sudo rm -f -- "$status_file" || true
+      echo 'DKMS status exceeds its size limit' >&2
+      return 1
+    }
+    if test "$status" -ne 0; then
+      test "$size" = 0 || {
+        sudo rm -f -- "$status_file" || true
+        echo 'DKMS status failed with output' >&2
+        return 1
+      }
+    else
+      while IFS= read -r line; do
+        test -n "$line" || continue
+        if test "$line" = "hyperpixel2r-kms/$version: added"; then
+          source_state=added
+          continue
+        fi
+        if [[ "$line" =~ ^hyperpixel2r-kms/$version,\ ([A-Za-z0-9._+-]+),\ (aarch64|arm64):\ (built|installed)$ ]]; then
+          source_state=added
+          kernel="${BASH_REMATCH[1]}"
+          architecture="${BASH_REMATCH[2]}"
+          kernel_state="${BASH_REMATCH[3]}"
+          rows+=("$kernel"$'\t'"$architecture"$'\t'"$kernel_state")
+          test "${#rows[@]}" -le 16 || {
+            sudo rm -f -- "$status_file" || true
+            echo 'DKMS status contains too many kernel rows' >&2
+            return 1
+          }
+          continue
+        fi
+        sudo rm -f -- "$status_file" || true
+        printf 'unrecognized DKMS status line: %s\n' "$line" >&2
+        return 1
+      done < <(sudo cat "$status_file")
+    fi
+    sudo rm -f -- "$status_file" || return
+  fi
+  if test "${#rows[@]}" -gt 0; then
+    while IFS= read -r row; do sorted_rows+=("$row"); done < <(
+      printf '%s\n' "${rows[@]}" | LC_ALL=C sort
+    )
+    for row in "${sorted_rows[@]}"; do
+      test -z "$previous" || test "$previous" != "$row" || {
+        echo 'DKMS status contains a duplicate kernel row' >&2
+        return 1
+      }
+      previous="$row"
+    done
+  fi
+  {
+    printf 'schema_version=2\n'
+    printf 'source_state=%s\n' "$source_state"
+    printf 'kernel_count=%s\n' "${#sorted_rows[@]}"
+    for row in "${sorted_rows[@]}"; do printf 'kernel=%s\n' "$row"; done
+  } | sudo tee "$output_file" >/dev/null || return
+  assert_dkms_inventory_file "$output_file"
+}
+
+write_empty_dkms_inventory() {
+  local source_state="$1"
+  local output_file="$2"
+
+  case "$source_state" in absent|unregistered) ;; *) return 1;; esac
+  {
+    printf 'schema_version=2\n'
+    printf 'source_state=%s\n' "$source_state"
+    printf 'kernel_count=0\n'
+  } | sudo tee "$output_file" >/dev/null || return
+  assert_dkms_inventory_file "$output_file"
+}
+
+dkms_prior_state() {
+  local artifact_dir="$1"
+  dkms_inventory_state "$artifact_dir/dkms-prior-state"
 }
 
 assert_artifact_tree() {
@@ -581,7 +742,8 @@ assert_state_schema() {
   schema="$(sudo awk -F= '$1 == "schema_version" { print $2 }' "$state_file")"
   case "$schema" in
     1) expected_keys=("${state_keys_v1[@]}") ;;
-    2) expected_keys=("${state_keys[@]}") ;;
+    2) expected_keys=("${state_keys_v2[@]}") ;;
+    3) expected_keys=("${state_keys[@]}") ;;
     *) echo 'unsupported tryboot state schema version' >&2; return 1 ;;
   esac
   test "$(sudo awk 'END { print NR }' "$state_file")" = "${#expected_keys[@]}" || {
@@ -609,7 +771,7 @@ state_value() {
 }
 
 assert_transaction_state() {
-  local schema driver_version revision source_tree release module_file module_sha overlay_file overlay_sha applied_dtb_file applied_dtb_sha normal_sha candidate_sha prior_existed prior_sha replaced_overlay module_existed overlay_existed artifact_dir manifest overlay_name
+  local schema driver_version revision source_tree release module_file module_sha overlay_file overlay_sha applied_dtb_file applied_dtb_sha normal_sha candidate_sha prior_existed prior_sha replaced_overlay module_existed overlay_existed prior_dkms_inventory_sha artifact_dir manifest overlay_name
 
   assert_state_schema || return
   schema="$(state_value schema_version)"
@@ -628,7 +790,7 @@ assert_transaction_state() {
   prior_existed="$(state_value tryboot_existed)"
   prior_sha="$(state_value prior_tryboot_sha256)"
   replaced_overlay="$(state_value replaced_overlay)"
-  if test "$schema" = 2; then
+  if test "$schema" = 2 || test "$schema" = 3; then
     module_existed="$(state_value module_existed)"
     overlay_existed="$(state_value overlay_existed)"
   else
@@ -664,6 +826,17 @@ assert_transaction_state() {
   test "$(sha "$tryboot_config")" = "$candidate_sha" || { echo 'candidate tryboot config changed since stage' >&2; return 1; }
   artifact_dir="$artifact_root/$driver_version/$revision/$release"
   assert_artifact_tree "$artifact_dir" "$prior_existed" || return
+  if test "$schema" = 3; then
+    prior_dkms_inventory_sha="$(state_value prior_dkms_inventory_sha256)"
+    [[ "$prior_dkms_inventory_sha" =~ ^[0-9a-f]{64}$ ]] || {
+      echo 'invalid prior DKMS inventory checksum' >&2
+      return 1
+    }
+    test "$(sha "$artifact_dir/dkms-prior-state")" = "$prior_dkms_inventory_sha" || {
+      echo 'stored prior DKMS inventory checksum differs from transaction' >&2
+      return 1
+    }
+  fi
   manifest="$artifact_dir/manifest.txt"
   test "$(manifest_value "$manifest" schema_version)" = 1 || { echo 'artifact and transaction schema versions differ' >&2; return 1; }
   test "$(manifest_value "$manifest" driver_version)" = "$driver_version" || { echo 'artifact and transaction driver versions differ' >&2; return 1; }
@@ -753,62 +926,6 @@ assert_no_owned_generic_overlay() {
 validate_dkms_status() {
   local version="$1"
   validate_named_dkms_status hyperpixel2r-kms "$version"
-}
-
-validate_dkms_kernel_status() {
-  local version="$1"
-  local kernel_release="$2"
-  local output status line line_kernel line_state exact_state='' registered=false
-
-  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return
-  [[ "$kernel_release" =~ ^[A-Za-z0-9._+-]+$ ]] || return
-  if ! dkms_available; then
-    printf 'absent\n'
-    return
-  fi
-  set +e
-  output="$(run_dkms status -m hyperpixel2r-kms -v "$version" 2>/dev/null)"
-  status=$?
-  set -e
-  if test "$status" -ne 0; then
-    test -z "$output" || { echo 'DKMS status failed with output' >&2; return 1; }
-    printf 'unregistered\n'
-    return
-  fi
-  if test -z "$output"; then
-    printf 'unregistered\n'
-    return
-  fi
-  while IFS= read -r line; do
-    test -n "$line" || continue
-    if test "$line" = "hyperpixel2r-kms/$version: added"; then
-      registered=true
-      continue
-    fi
-    if [[ "$line" =~ ^hyperpixel2r-kms/$version,\ ([A-Za-z0-9._+-]+),\ (aarch64|arm64):\ (built|installed)$ ]]; then
-      registered=true
-      line_kernel="${BASH_REMATCH[1]}"
-      line_state="${BASH_REMATCH[3]}"
-      if test "$line_kernel" = "$kernel_release"; then
-        test -z "$exact_state" || test "$exact_state" = "$line_state" || {
-          echo 'conflicting exact-kernel DKMS status lines' >&2
-          return 1
-        }
-        exact_state="$line_state"
-      fi
-      continue
-    fi
-    printf 'unrecognized DKMS status line: %s\n' "$line" >&2
-    return 1
-  done <<<"$output"
-  if test -n "$exact_state"; then
-    printf '%s\n' "$exact_state"
-  elif "$registered"; then
-    printf 'added\n'
-  else
-    echo 'empty DKMS status is malformed' >&2
-    return 1
-  fi
 }
 
 validate_named_dkms_status() {
@@ -1218,16 +1335,19 @@ restore_dkms_source_state() {
   # The source backup and desired registration state were captured before the
   # candidate was published.  Refuse to remove a tree unless the caller has
   # already proven it is lifecycle-owned.
-  local desired_state="$1"
+  local inventory_file="$1"
   local source_backup="$2"
   local destination="$3"
   local desired_tree_present="$4"
-  local current_state
+  local version="$5"
+  local running_release="$6"
+  local desired_state first row kernel architecture kernel_state current_state
 
-  case "$desired_state" in
-    absent|unregistered|registered|added|built|installed) ;;
-    *) return 1 ;;
-  esac
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return
+  [[ "$running_release" =~ ^[A-Za-z0-9._+-]+$ ]] || return
+  assert_dkms_inventory_file "$inventory_file" || return
+  desired_state="$(dkms_inventory_state "$inventory_file")" || return
+  first="$(sudo sed -n '1p' "$inventory_file")"
   case "$desired_tree_present" in true|false) ;; *) return 1;; esac
   if sudo test -L "$destination"; then
     return 1
@@ -1236,12 +1356,12 @@ restore_dkms_source_state() {
     # executable is presently available.  Do not let an absent dkms command
     # short-circuit restoration of the captured candidate bytes.
     if dkms_available; then
-      current_state="$(validate_dkms_status "$driver_version")" || return
+      current_state="$(validate_dkms_status "$version")" || return
     else
       current_state=absent
     fi
     case "$current_state" in
-      registered) run_dkms remove -m hyperpixel2r-kms -v "$driver_version" --all || return ;;
+      registered) run_dkms remove -m hyperpixel2r-kms -v "$version" --all || return ;;
       absent|unregistered) ;;
       *) return 1 ;;
     esac
@@ -1251,21 +1371,44 @@ restore_dkms_source_state() {
     assert_source_tree_shape "$source_backup" || return
     materialize_source_tree "$source_backup" "$destination" || return
     if dkms_available; then
-      case "$desired_state" in
-        registered|added)
-          run_dkms add -m hyperpixel2r-kms -v "$driver_version" || return
-          ;;
-        built)
-          run_dkms add -m hyperpixel2r-kms -v "$driver_version" || return
-          run_dkms build -m hyperpixel2r-kms -v "$driver_version" -k "$release" || return
-          ;;
-        installed)
-          run_dkms add -m hyperpixel2r-kms -v "$driver_version" || return
-          run_dkms build -m hyperpixel2r-kms -v "$driver_version" -k "$release" || return
-          run_dkms install -m hyperpixel2r-kms -v "$driver_version" -k "$release" || return
-          ;;
-        absent|unregistered) ;;
-      esac
+      if test "$first" = schema_version=2; then
+        case "$desired_state" in
+          added)
+            run_dkms add -m hyperpixel2r-kms -v "$version" || return
+            while IFS= read -r row; do
+              [[ "$row" =~ ^kernel=([A-Za-z0-9._+-]+)$'\t'(aarch64|arm64)$'\t'(built|installed)$ ]] ||
+                return 1
+              kernel="${BASH_REMATCH[1]}"
+              architecture="${BASH_REMATCH[2]}"
+              kernel_state="${BASH_REMATCH[3]}"
+              run_dkms build -m hyperpixel2r-kms -v "$version" \
+                -k "$kernel" -a "$architecture" || return
+              if test "$kernel_state" = installed; then
+                run_dkms install -m hyperpixel2r-kms -v "$version" \
+                  -k "$kernel" -a "$architecture" || return
+              fi
+            done < <(sudo sed -n '4,$p' "$inventory_file")
+            ;;
+          absent|unregistered) ;;
+          *) return 1 ;;
+        esac
+      else
+        case "$desired_state" in
+          registered|added)
+            run_dkms add -m hyperpixel2r-kms -v "$version" || return
+            ;;
+          built)
+            run_dkms add -m hyperpixel2r-kms -v "$version" || return
+            run_dkms build -m hyperpixel2r-kms -v "$version" -k "$running_release" || return
+            ;;
+          installed)
+            run_dkms add -m hyperpixel2r-kms -v "$version" || return
+            run_dkms build -m hyperpixel2r-kms -v "$version" -k "$running_release" || return
+            run_dkms install -m hyperpixel2r-kms -v "$version" -k "$running_release" || return
+            ;;
+          absent|unregistered) ;;
+        esac
+      fi
     elif test "$desired_state" != absent && test "$desired_state" != unregistered; then
       return 1
     fi
@@ -1337,6 +1480,7 @@ stage() {
   dkms_replaced=false
   prior_dkms_state=absent
   prior_dkms_snapshot=''
+  prior_dkms_inventory_sha=''
   dkms_added=false
   published_tryboot=false
   published_state=false
@@ -1362,8 +1506,8 @@ stage() {
         case "$prior_dkms_state" in
           absent) ;;
           unregistered|registered|added|built|installed)
-            restore_dkms_source_state "$prior_dkms_state" "$prior_dkms_snapshot" \
-              "$dkms_dir" true || true
+            restore_dkms_source_state "$prior_state_snapshot" "$prior_dkms_snapshot" \
+              "$dkms_dir" true "$driver_version" "$release" || true
             ;;
         esac
       fi
@@ -1433,14 +1577,17 @@ stage() {
   fi
   test "$(sha "$normal_config")" = "$normal_sha" || die 'normal boot config changed while staging tryboot candidate'
 
+  prior_state_snapshot="$(private_file "$rollback_tmp" dkms-prior-state)" || die 'failed to create private DKMS state snapshot'
   if sudo test -L "$dkms_dir"; then
     die 'partial or unbound DKMS source tree'
   elif sudo test -e "$dkms_dir"; then
     assert_source_tree_shape "$dkms_dir" || die 'partial or unbound DKMS source tree'
-    prior_dkms_state="$(validate_dkms_kernel_status "$driver_version" "$release")" ||
-      die 'invalid DKMS status before source capture'
+    capture_dkms_inventory "$driver_version" "$prior_state_snapshot" "$rollback_tmp" ||
+      die 'invalid DKMS inventory before source capture'
+    prior_dkms_state="$(dkms_inventory_state "$prior_state_snapshot")" ||
+      die 'invalid DKMS source state before source capture'
     case "$prior_dkms_state" in
-      unregistered|registered|added|built|installed) ;;
+      unregistered|added) ;;
       *) die 'invalid DKMS source state before source capture' ;;
     esac
     prior_dkms_snapshot="$rollback_tmp/prior-dkms"
@@ -1451,9 +1598,10 @@ stage() {
       atomic_copy "$dkms_dir/$name" "$prior_dkms_snapshot/$name" 644 "$expected_sha" || die 'failed to capture prior DKMS source leaf'
     done
     assert_source_tree_shape "$prior_dkms_snapshot" "$dkms_dir" || die 'failed to capture prior DKMS source tree'
+  else
+    write_empty_dkms_inventory absent "$prior_state_snapshot" ||
+      die 'failed to capture absent prior DKMS state'
   fi
-  prior_state_snapshot="$(private_file "$rollback_tmp" dkms-prior-state)" || die 'failed to create private DKMS state snapshot'
-  printf '%s\n' "$prior_dkms_state" | sudo tee "$prior_state_snapshot" >/dev/null || die 'failed to write prior DKMS state snapshot'
   assert_owned_regular "$prior_state_snapshot" 600 || die 'prior DKMS state snapshot ownership drifted'
 
   if sudo test -e "$accepted_state" || sudo test -L "$accepted_state"; then
@@ -1510,6 +1658,7 @@ stage() {
     sudo rm -f -- "$incoming_source_snapshot" || die 'failed to remove incoming DKMS source snapshot'
   done
   expected_sha="$(sha "$prior_state_snapshot")" || die 'failed to hash prior DKMS state snapshot'
+  prior_dkms_inventory_sha="$expected_sha"
   atomic_copy "$prior_state_snapshot" "$artifact_stage_dir/dkms-prior-state" 600 "$expected_sha" || die 'failed to copy prior DKMS state'
   if test "$prior_dkms_state" != absent; then
     sudo install -d -m 0755 "$artifact_stage_dir/prior-dkms" || die 'failed to create prior DKMS artifact directory'
@@ -1582,7 +1731,7 @@ stage() {
   test "$(sha "$normal_config")" = "$normal_sha" || die 'normal boot config changed while staging tryboot candidate'
   state_tmp="$(private_file "$rollback_tmp" state)" || die 'failed to create private tryboot state'
   {
-    printf 'schema_version=2\n'
+    printf 'schema_version=3\n'
     printf 'driver_version=%s\n' "$driver_version"
     printf 'source_revision=%s\n' "$revision"
     printf 'source_tree=%s\n' "$source_tree"
@@ -1600,6 +1749,7 @@ stage() {
     printf 'replaced_overlay=%s\n' "${replacement:-none}"
     printf 'module_existed=%s\n' "$module_existed"
     printf 'overlay_existed=%s\n' "$overlay_existed"
+    printf 'prior_dkms_inventory_sha256=%s\n' "$prior_dkms_inventory_sha"
   } | sudo tee "$state_tmp" >/dev/null || die 'failed to write private tryboot state'
   assert_owned_regular "$state_tmp" 600 || die 'private tryboot state ownership drifted'
   state_snapshot="$(privileged_snapshot "$state_tmp" "$rollback_tmp" state)" || die 'failed to capture tryboot state'
@@ -1754,6 +1904,7 @@ rollback() {
   state_hold=''
   prior_dkms_state=''
   candidate_dkms_state=''
+  candidate_dkms_inventory=''
   candidate_dkms_tree_present=false
   candidate_dkms_backup=''
   dkms_restore_started=false
@@ -1770,7 +1921,9 @@ rollback() {
     if test "$status" -ne 0 && ! "$rollback_complete"; then
       if "$state_moved" && require_regular "$state_hold"; then sudo mv -f "$state_hold" "$state_file" || true; fi
       if "$dkms_restore_started"; then
-        restore_dkms_source_state "$candidate_dkms_state" "$candidate_dkms_backup" "$dkms_root/hyperpixel2r-kms-$driver_version" "$candidate_dkms_tree_present" || true
+        restore_dkms_source_state "$candidate_dkms_inventory" "$candidate_dkms_backup" \
+          "$dkms_root/hyperpixel2r-kms-$driver_version" "$candidate_dkms_tree_present" \
+          "$driver_version" "$release" || true
       fi
       if "$overlay_removed"; then atomic_copy "$artifact_dir/$overlay_file" "$overlay_path" 644 "$overlay_sha" true || true; fi
       if "$module_removed"; then atomic_copy "$artifact_dir/$module_file" "$module_path" 644 "$module_sha" || true; fi
@@ -1794,7 +1947,8 @@ rollback() {
   module_sha="$(state_value module_sha256)"
   overlay_file="$(state_value overlay_file)"
   overlay_sha="$(state_value overlay_sha256)"
-  if test "$(state_value schema_version)" = 2; then
+  if test "$(state_value schema_version)" = 2 ||
+    test "$(state_value schema_version)" = 3; then
     module_existed="$(state_value module_existed)"
     overlay_existed="$(state_value overlay_existed)"
   fi
@@ -1804,8 +1958,13 @@ rollback() {
   assert_source_tree_shape "$dkms_root/hyperpixel2r-kms-$driver_version" "$artifact_dir/dkms-source" ||
     die 'candidate DKMS source is not bound to the active transaction'
   candidate_dkms_tree_present=true
-  candidate_dkms_state="$(validate_dkms_status "$driver_version")" || die 'invalid candidate DKMS status'
-  case "$candidate_dkms_state" in absent|unregistered|registered) ;; *) die 'invalid candidate DKMS status';; esac
+  candidate_dkms_inventory="$(private_file "$workspace" candidate-dkms-state)" ||
+    die 'failed to allocate candidate DKMS inventory'
+  capture_dkms_inventory "$driver_version" "$candidate_dkms_inventory" "$workspace" ||
+    die 'invalid candidate DKMS inventory'
+  candidate_dkms_state="$(dkms_inventory_state "$candidate_dkms_inventory")" ||
+    die 'invalid candidate DKMS status'
+  case "$candidate_dkms_state" in absent|unregistered|added) ;; *) die 'invalid candidate DKMS status';; esac
   case "$prior_dkms_state" in
     absent) ;;
     unregistered|registered|added|built|installed)
@@ -1829,9 +1988,13 @@ rollback() {
   state_hold="$(sudo mktemp "$state_dir/.tryboot-state-hold.XXXXXX")" || die 'failed to create rollback state hold'
   dkms_restore_started=true
   if test "$prior_dkms_state" = absent; then
-    restore_dkms_source_state "$prior_dkms_state" "$artifact_dir/prior-dkms" "$dkms_root/hyperpixel2r-kms-$driver_version" false || die 'failed to restore absent prior DKMS state'
+    restore_dkms_source_state "$artifact_dir/dkms-prior-state" "$artifact_dir/prior-dkms" \
+      "$dkms_root/hyperpixel2r-kms-$driver_version" false "$driver_version" "$release" ||
+      die 'failed to restore absent prior DKMS state'
   else
-    restore_dkms_source_state "$prior_dkms_state" "$artifact_dir/prior-dkms" "$dkms_root/hyperpixel2r-kms-$driver_version" true || die 'failed to restore prior DKMS state'
+    restore_dkms_source_state "$artifact_dir/dkms-prior-state" "$artifact_dir/prior-dkms" \
+      "$dkms_root/hyperpixel2r-kms-$driver_version" true "$driver_version" "$release" ||
+      die 'failed to restore prior DKMS state'
   fi
   if test -n "$prior_tmp"; then sudo mv -f "$prior_tmp" "$tryboot_config" || die 'failed to restore prior tryboot config'; else sudo rm -f -- "$tryboot_config" || die 'failed to remove tryboot config'; fi
   tryboot_restored=true
@@ -2903,30 +3066,10 @@ uninstall_accepted() {
         die 'DKMS source is neither accepted nor proven prior'
       fi
     fi
-    if test "$(accepted_uninstall_value prior_dkms_status)" != absent &&
-      ! sudo test -e "$dkms_dir"; then
-      materialize_source_tree "$artifact/prior-dkms" "$dkms_dir" ||
-        die 'failed to restore prior DKMS source'
-      case "$(accepted_uninstall_value prior_dkms_status)" in
-        registered|added)
-          run_dkms add -m hyperpixel2r-kms -v "$version" ||
-            die 'failed to restore prior DKMS registration'
-          ;;
-        built)
-          run_dkms add -m hyperpixel2r-kms -v "$version" ||
-            die 'failed to restore prior DKMS registration'
-          run_dkms build -m hyperpixel2r-kms -v "$version" -k "$release" ||
-            die 'failed to rebuild prior DKMS module'
-          ;;
-        installed)
-          run_dkms add -m hyperpixel2r-kms -v "$version" ||
-            die 'failed to restore prior DKMS registration'
-          run_dkms build -m hyperpixel2r-kms -v "$version" -k "$release" ||
-            die 'failed to rebuild prior DKMS module'
-          run_dkms install -m hyperpixel2r-kms -v "$version" -k "$release" ||
-            die 'failed to reinstall prior DKMS module'
-          ;;
-      esac
+    if test "$(accepted_uninstall_value prior_dkms_status)" != absent; then
+      restore_dkms_source_state "$artifact/dkms-prior-state" "$artifact/prior-dkms" \
+        "$dkms_dir" true "$version" "$release" ||
+        die 'failed to restore complete prior DKMS inventory'
     fi
     fixture_interrupt_after uninstall-dkms-restored
     set_accepted_uninstall_phase boot_restored dkms_restored ||

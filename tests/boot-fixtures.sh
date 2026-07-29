@@ -343,10 +343,15 @@ if test "$module" = planeradar-hyperpixel2r; then
 fi
 if test "$version" != 0.1.0; then marker="$HP2R_FIXTURE_ROOT/var/lib/dkms/registered-$version"; fi
 kernel=''
+architecture=aarch64
 for ((index = 1; index <= $#; index++)); do
   if test "${!index}" = -k; then
     next=$((index + 1))
     kernel="${!next}"
+  fi
+  if test "${!index}" = -a; then
+    next=$((index + 1))
+    architecture="${!next}"
   fi
 done
 kernel="${kernel:-${HP2R_FIXTURE_RELEASE:-6.18.34+rpt-rpi-v8}}"
@@ -361,34 +366,57 @@ write_installed_module() {
       hyperpixel2r_kms_protocol.c hyperpixel2r_kms_protocol.h
   ) > "$installed_module"
 }
+set_kernel_state() {
+  local next_state="$1"
+  local temporary="${marker}.next"
+  {
+    printf 'added\n'
+    if test -f "$marker"; then
+      awk -F '\t' -v wanted_kernel="$kernel" -v wanted_arch="$architecture" '
+        NR == 1 { next }
+        !($1 == wanted_kernel && $2 == wanted_arch) { print }
+      ' "$marker"
+    fi
+    printf '%s\t%s\t%s\n' "$kernel" "$architecture" "$next_state"
+  } > "$temporary"
+  mv -f -- "$temporary" "$marker"
+}
 case "${1-}" in
   status)
     if test -n "${HP2R_FIXTURE_DKMS_STATUS+x}"; then printf '%s\n' "$HP2R_FIXTURE_DKMS_STATUS"; exit "${HP2R_FIXTURE_DKMS_EXIT:-0}"; fi
     if test -f "$marker"; then
-      dkms_state="$(cat "$marker")"
-      case "$dkms_state" in
-        added) printf '%s/%s: added\n' "$module" "$version" ;;
-        built|installed)
-          printf '%s/%s, %s, aarch64: %s\n' "$module" "$version" "$kernel" "$dkms_state"
-          ;;
-        *) exit 65 ;;
-      esac
+      test "$(sed -n '1p' "$marker")" = added || exit 65
+      if test "$(wc -l < "$marker" | tr -d ' ')" = 1; then
+        printf '%s/%s: added\n' "$module" "$version"
+      else
+        while IFS=$'\t' read -r recorded_kernel recorded_arch recorded_state extra; do
+          test -z "$extra" || exit 65
+          case "$recorded_state" in built|installed) ;; *) exit 65;; esac
+          printf '%s/%s, %s, %s: %s\n' \
+            "$module" "$version" "$recorded_kernel" "$recorded_arch" "$recorded_state"
+        done < <(sed -n '2,$p' "$marker")
+      fi
     fi
     ;;
   add) mkdir -p "$(dirname "$marker")"; printf 'added\n' > "$marker" ;;
   build)
     test -f "$marker"
-    printf 'built\n' > "$marker"
+    set_kernel_state built
     ;;
   install)
     test -f "$marker"
     write_installed_module
-    printf 'installed\n' > "$marker"
+    set_kernel_state installed
     ;;
   remove)
     test -z "${HP2R_FIXTURE_FAIL_DKMS_REMOVE:-}" || exit 74
+    if test -f "$marker"; then
+      while IFS=$'\t' read -r recorded_kernel recorded_arch recorded_state extra; do
+        test -z "$extra" || exit 65
+        rm -f -- "$HP2R_FIXTURE_ROOT/lib/modules/$recorded_kernel/updates/dkms/hyperpixel2r_kms.ko"
+      done < <(sed -n '2,$p' "$marker")
+    fi
     rm -f -- "$marker"
-    rm -f -- "$installed_module"
     ;;
   *) exit 64 ;;
 esac
@@ -752,17 +780,77 @@ prepare_prior_dkms() {
   chmod 0644 "$directory"/*
   case "$registration" in
     registered|added) printf 'added\n' > "$root/var/lib/dkms/registered" ;;
-    built) printf 'built\n' > "$root/var/lib/dkms/registered" ;;
+    built)
+      printf 'added\n' > "$root/var/lib/dkms/registered"
+      set_prior_dkms_kernel_state "$release" built
+      ;;
     installed)
       printf 'added\n' > "$root/var/lib/dkms/registered"
-      PATH="$bin:$PATH" HP2R_FIXTURE_ROOT="$root" HP2R_FIXTURE_RELEASE="$release" \
-        dkms build -m hyperpixel2r-kms -v 0.1.0 -k "$release"
-      PATH="$bin:$PATH" HP2R_FIXTURE_ROOT="$root" HP2R_FIXTURE_RELEASE="$release" \
-        dkms install -m hyperpixel2r-kms -v 0.1.0 -k "$release"
+      set_prior_dkms_kernel_state "$release" installed
       ;;
     unregistered) ;;
     *) fail "unsupported prior DKMS registration fixture: $registration" ;;
   esac
+}
+
+run_fixture_dkms() {
+  PATH="$bin:$PATH" \
+    HP2R_FIXTURE_ROOT="$root" \
+    HP2R_FIXTURE_RELEASE="$release" \
+    dkms "$@"
+}
+
+set_prior_dkms_kernel_state() {
+  local kernel="$1"
+  local state="$2"
+  local architecture="${3:-aarch64}"
+
+  case "$state" in
+    built)
+      run_fixture_dkms build -m hyperpixel2r-kms -v 0.1.0 \
+        -k "$kernel" -a "$architecture"
+      ;;
+    installed)
+      run_fixture_dkms build -m hyperpixel2r-kms -v 0.1.0 \
+        -k "$kernel" -a "$architecture"
+      run_fixture_dkms install -m hyperpixel2r-kms -v 0.1.0 \
+        -k "$kernel" -a "$architecture"
+      ;;
+    *) fail "unsupported per-kernel DKMS state fixture: $state" ;;
+  esac
+}
+
+assert_dkms_kernel_state() {
+  local kernel="$1"
+  local expected_state="$2"
+  local architecture="${3:-aarch64}"
+  local marker="$root/var/lib/dkms/registered"
+
+  assert_file "$marker"
+  test "$(awk -F '\t' -v wanted_kernel="$kernel" -v wanted_arch="$architecture" '
+    NR > 1 && $1 == wanted_kernel && $2 == wanted_arch { print $3 }
+  ' "$marker")" = "$expected_state" ||
+    fail "prior DKMS status was not restored: $kernel/$architecture $expected_state"
+}
+
+assert_dkms_inventory() {
+  local marker="$1"
+  local source_state="$2"
+  shift 2
+  local expected="$fixture/expected-dkms-inventory"
+  local row
+
+  {
+    printf 'schema_version=2\n'
+    printf 'source_state=%s\n' "$source_state"
+    printf 'kernel_count=%s\n' "$#"
+    for row in "$@"; do printf 'kernel=%s\n' "$row"; done
+  } > "$expected"
+  cmp -s "$expected" "$marker" || {
+    printf 'unexpected DKMS inventory in %s\n' "$marker" >&2
+    diff -u "$expected" "$marker" >&2 || true
+    return 1
+  }
 }
 
 assert_prior_dkms() {
@@ -778,10 +866,16 @@ assert_prior_dkms() {
       fail "prior DKMS file ownership or mode drifted: $name"
   done < "$expected_sums"
   case "$registration" in
-    registered|added|built|installed)
+    registered|added)
       assert_file "$root/var/lib/dkms/registered"
-      test "$(cat "$root/var/lib/dkms/registered")" = "${registration/registered/added}" ||
+      test "$(cat "$root/var/lib/dkms/registered")" = added ||
         fail "prior DKMS status was not restored: $registration"
+      ;;
+    built|installed) assert_dkms_kernel_state "$release" "$registration" ;;
+    inventory)
+      assert_file "$root/var/lib/dkms/registered"
+      test "$(sed -n '1p' "$root/var/lib/dkms/registered")" = added ||
+        fail 'prior DKMS inventory source state was not restored'
       ;;
     unregistered) assert_absent "$root/var/lib/dkms/registered" ;;
     *) fail "unsupported expected prior DKMS registration: $registration" ;;
@@ -1098,8 +1192,7 @@ assert_absent "$root/boot/firmware/overlays/$retained_overlay"
 assert_absent "$accepted_receipt"
 assert_file "$root/var/lib/hyperpixel2r-kms/accepted-uninstall"
 assert_file "$root/lib/modules/$release/updates/dkms/hyperpixel2r_kms.ko"
-test "$(cat "$root/var/lib/dkms/registered")" = installed ||
-  fail 'accepted uninstall did not restore the exact-kernel installed DKMS state'
+assert_dkms_kernel_state "$release" installed
 grep -Fxq 'hyperpixel2r_kms.ko: updates/dkms/hyperpixel2r_kms.ko' \
   "$root/lib/modules/$release/modules.dep" ||
   fail 'accepted uninstall did not restore prior DKMS module resolution'
@@ -1144,9 +1237,10 @@ run_stage >/dev/null
 state="$root/var/lib/hyperpixel2r-kms/tryboot-state"
 assert_file "$state"
 test "$(stat -c '%U:%G:%a' "$state")" = root:root:600 || fail 'state ownership or mode is not exact'
-test "$(awk 'END {print NR}' "$state")" = 18 || fail 'state schema cardinality changed'
-grep -Fxq 'schema_version=2' "$state"
+test "$(awk 'END {print NR}' "$state")" = 19 || fail 'state schema cardinality changed'
+grep -Fxq 'schema_version=3' "$state"
 grep -Eq '^candidate_config_sha256=[0-9a-f]{64}$' "$state"
+grep -Eq '^prior_dkms_inventory_sha256=[0-9a-f]{64}$' "$state"
 grep -Fxq 'prior_tryboot_sha256=none' "$state"
 grep -Fxq 'module_existed=false' "$state"
 grep -Fxq 'overlay_existed=false' "$state"
@@ -1375,6 +1469,22 @@ if run_stage >/dev/null 2>&1; then fail 'mixed DKMS status was accepted'; fi
 unset HP2R_FIXTURE_DKMS_STATUS
 assert_clean_failed_stage
 
+# Inventory capture is deliberately bounded.  More than sixteen otherwise
+# valid per-kernel rows must fail before `dkms remove --all` can destroy the
+# real registration.
+new_target
+prepare_prior_dkms oversized-kernel-inventory
+prior_dkms_sums="$fixture/prior-dkms-oversized-inventory.sums"
+(cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
+HP2R_FIXTURE_DKMS_STATUS=''
+for ((index = 1; index <= 17; index++)); do
+  HP2R_FIXTURE_DKMS_STATUS+="hyperpixel2r-kms/0.1.0, 6.18.$index+rpt-rpi-v8, aarch64: built"$'\n'
+done
+export HP2R_FIXTURE_DKMS_STATUS
+if run_stage >/dev/null 2>&1; then fail 'oversized DKMS kernel inventory was accepted'; fi
+unset HP2R_FIXTURE_DKMS_STATUS
+assert_prior_dkms "$prior_dkms_sums" added
+
 # A normal config writer racing the transaction is detected at the final
 # publication boundary and leaves no candidate behind.
 new_target
@@ -1552,6 +1662,7 @@ state_mutations=(
   'replaced_overlay:unsafe/value'
   'module_existed:maybe'
   'overlay_existed:maybe'
+  'prior_dkms_inventory_sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 )
 for mutation in "${state_mutations[@]}"; do
   assert_rollback_rejects_state_mutation "${mutation%%:*}" "${mutation#*:}"
@@ -1716,12 +1827,26 @@ prior_dkms_sums="$fixture/prior-dkms-successful.sums"
 (cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
 run_stage >/dev/null
 first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
-test "$(cat "$first_artifact/dkms-prior-state")" = added || fail 'artifact did not record prior DKMS added state'
+assert_dkms_inventory "$first_artifact/dkms-prior-state" added
 assert_file "$first_artifact/prior-dkms/hyperpixel2r_kms_main.c"
 run_controller rollback-boot.sh >/dev/null
 assert_prior_dkms "$prior_dkms_sums"
 assert_absent "$root/boot/firmware/tryboot.txt"
 assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+
+# The inventory is rollback authority, so a different but still structurally
+# valid source state must be rejected by the transaction checksum binding.
+new_target
+prepare_prior_dkms inventory-checksum-binding
+run_stage >/dev/null
+first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+sed -i 's/^source_state=added$/source_state=unregistered/' \
+  "$first_artifact/dkms-prior-state"
+if run_controller rollback-boot.sh >/dev/null 2>&1; then
+  fail 'rollback accepted a checksum-drifted valid DKMS inventory'
+fi
+assert_file "$root/boot/firmware/tryboot.txt"
+assert_file "$root/var/lib/hyperpixel2r-kms/tryboot-state"
 
 # Transactions staged by the public version-1 controller used the collapsed
 # `registered` marker and did not record leaf ownership.  They remain valid and
@@ -1735,9 +1860,10 @@ first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
 printf 'registered\n' > "$first_artifact/dkms-prior-state"
 state="$root/var/lib/hyperpixel2r-kms/tryboot-state"
 sed -i \
-  -e 's/^schema_version=2$/schema_version=1/' \
+  -e 's/^schema_version=3$/schema_version=1/' \
   -e '/^module_existed=/d' \
   -e '/^overlay_existed=/d' \
+  -e '/^prior_dkms_inventory_sha256=/d' \
   "$state"
 run_controller rollback-boot.sh >/dev/null
 assert_prior_dkms "$prior_dkms_sums" added
@@ -1759,8 +1885,8 @@ grep -Fxq 'hyperpixel2r_kms.ko: updates/dkms/hyperpixel2r_kms.ko' \
   fail 'fixture did not begin with the prior DKMS module resolved'
 run_stage >/dev/null
 first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
-test "$(cat "$first_artifact/dkms-prior-state")" = installed ||
-  fail 'artifact did not record the prior exact-kernel installed state'
+assert_dkms_inventory "$first_artifact/dkms-prior-state" added \
+  "$release"$'\taarch64\tinstalled'
 assert_absent "$prior_installed_module"
 grep -Fxq 'hyperpixel2r_kms.ko: extra/hyperpixel2r_kms.ko' \
   "$root/lib/modules/$release/modules.dep" ||
@@ -1774,6 +1900,102 @@ assert_absent "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko"
 grep -Fxq 'hyperpixel2r_kms.ko: updates/dkms/hyperpixel2r_kms.ko' \
   "$root/lib/modules/$release/modules.dep" ||
   fail 'rollback did not restore prior DKMS module resolution'
+
+# DKMS registration is version-wide.  Removing it with `--all` destroys every
+# built and installed kernel row, so rollback authority must preserve the
+# complete bounded inventory rather than only the currently running kernel.
+future_release='6.18.35+rpt-rpi-v8'
+
+new_target
+prepare_prior_dkms direct-built-rollback built
+prior_dkms_sums="$fixture/prior-dkms-direct-built.sums"
+(cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
+run_stage >/dev/null
+first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+assert_dkms_inventory "$first_artifact/dkms-prior-state" added \
+  "$release"$'\taarch64\tbuilt'
+run_controller rollback-boot.sh >/dev/null
+assert_prior_dkms "$prior_dkms_sums" built
+
+new_target
+prepare_prior_dkms running-and-future-installed installed
+set_prior_dkms_kernel_state "$future_release" installed
+prior_dkms_sums="$fixture/prior-dkms-two-installed.sums"
+(cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
+running_installed="$root/lib/modules/$release/updates/dkms/hyperpixel2r_kms.ko"
+future_installed="$root/lib/modules/$future_release/updates/dkms/hyperpixel2r_kms.ko"
+running_installed_sha="$(sha256sum "$running_installed" | awk '{ print $1 }')"
+future_installed_sha="$(sha256sum "$future_installed" | awk '{ print $1 }')"
+run_stage >/dev/null
+first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+assert_dkms_inventory "$first_artifact/dkms-prior-state" added \
+  "$release"$'\taarch64\tinstalled' \
+  "$future_release"$'\taarch64\tinstalled'
+assert_absent "$running_installed"
+assert_absent "$future_installed"
+run_controller rollback-boot.sh >/dev/null
+assert_prior_dkms "$prior_dkms_sums" installed
+assert_dkms_kernel_state "$future_release" installed
+test "$(sha256sum "$running_installed" | awk '{ print $1 }')" = "$running_installed_sha" ||
+  fail 'rollback changed the running-kernel DKMS module'
+test "$(sha256sum "$future_installed" | awk '{ print $1 }')" = "$future_installed_sha" ||
+  fail 'rollback changed the future-kernel DKMS module'
+
+new_target
+prepare_prior_dkms mixed-built-installed built
+set_prior_dkms_kernel_state "$future_release" installed
+prior_dkms_sums="$fixture/prior-dkms-mixed.sums"
+(cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
+future_installed="$root/lib/modules/$future_release/updates/dkms/hyperpixel2r_kms.ko"
+future_installed_sha="$(sha256sum "$future_installed" | awk '{ print $1 }')"
+run_stage >/dev/null
+first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+assert_dkms_inventory "$first_artifact/dkms-prior-state" added \
+  "$release"$'\taarch64\tbuilt' \
+  "$future_release"$'\taarch64\tinstalled'
+run_controller rollback-boot.sh >/dev/null
+assert_prior_dkms "$prior_dkms_sums" built
+assert_dkms_kernel_state "$future_release" installed
+test "$(sha256sum "$future_installed" | awk '{ print $1 }')" = "$future_installed_sha" ||
+  fail 'mixed-state rollback changed the future-kernel DKMS module'
+
+new_target
+prepare_prior_dkms future-only-installed
+set_prior_dkms_kernel_state "$future_release" installed
+prior_dkms_sums="$fixture/prior-dkms-future-only.sums"
+(cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
+future_installed="$root/lib/modules/$future_release/updates/dkms/hyperpixel2r_kms.ko"
+future_installed_sha="$(sha256sum "$future_installed" | awk '{ print $1 }')"
+run_stage >/dev/null
+first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+assert_dkms_inventory "$first_artifact/dkms-prior-state" added \
+  "$future_release"$'\taarch64\tinstalled'
+run_controller rollback-boot.sh >/dev/null
+assert_prior_dkms "$prior_dkms_sums" inventory
+assert_dkms_kernel_state "$future_release" installed
+test "$(sha256sum "$future_installed" | awk '{ print $1 }')" = "$future_installed_sha" ||
+  fail 'future-only rollback changed the installed DKMS module'
+
+# A stage failure after `dkms remove --all` must restore the same complete
+# inventory before it removes the private rollback authority.
+new_target
+prepare_prior_dkms multi-kernel-stage-cleanup installed
+set_prior_dkms_kernel_state "$future_release" installed
+prior_dkms_sums="$fixture/prior-dkms-multi-stage-cleanup.sums"
+(cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
+running_installed="$root/lib/modules/$release/updates/dkms/hyperpixel2r_kms.ko"
+future_installed="$root/lib/modules/$future_release/updates/dkms/hyperpixel2r_kms.ko"
+running_installed_sha="$(sha256sum "$running_installed" | awk '{ print $1 }')"
+future_installed_sha="$(sha256sum "$future_installed" | awk '{ print $1 }')"
+export HP2R_FIXTURE_FAIL_MV=stage-state
+if run_stage >/dev/null 2>&1; then fail 'multi-kernel stage cleanup accepted injected state failure'; fi
+unset HP2R_FIXTURE_FAIL_MV
+assert_prior_dkms "$prior_dkms_sums" installed
+assert_dkms_kernel_state "$future_release" installed
+test "$(sha256sum "$running_installed" | awk '{ print $1 }')" = "$running_installed_sha" ||
+  fail 'stage cleanup changed the running-kernel DKMS module'
+test "$(sha256sum "$future_installed" | awk '{ print $1 }')" = "$future_installed_sha" ||
+  fail 'stage cleanup changed the future-kernel DKMS module'
 
 # Staging can reuse an exact module or overlay already owned by the prior
 # normal boot.  Rollback must retain those shared bytes; deleting them leaves
@@ -1807,7 +2029,7 @@ prior_dkms_sums="$fixture/prior-dkms-unregistered.sums"
 (cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
 run_stage >/dev/null
 first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
-test "$(cat "$first_artifact/dkms-prior-state")" = unregistered || fail 'artifact did not record unregistered prior DKMS state'
+assert_dkms_inventory "$first_artifact/dkms-prior-state" unregistered
 run_controller rollback-boot.sh >/dev/null
 assert_prior_dkms "$prior_dkms_sums" unregistered
 
@@ -1816,6 +2038,9 @@ assert_prior_dkms "$prior_dkms_sums" unregistered
 new_target
 prepare_prior_dkms rollback-compensation
 run_stage >/dev/null
+set_prior_dkms_kernel_state "$future_release" installed
+candidate_future_module="$root/lib/modules/$future_release/updates/dkms/hyperpixel2r_kms.ko"
+candidate_future_sha="$(sha256sum "$candidate_future_module" | awk '{ print $1 }')"
 candidate_dkms_sums="$fixture/candidate-dkms-compensation.sums"
 (cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$candidate_dkms_sums"
 export HP2R_FIXTURE_FAIL_MV=state
@@ -1826,6 +2051,9 @@ while IFS=' ' read -r expected name; do
     fail "rollback compensation did not restore candidate DKMS bytes: $name"
 done < "$candidate_dkms_sums"
 assert_file "$root/var/lib/dkms/registered"
+assert_dkms_kernel_state "$future_release" installed
+test "$(sha256sum "$candidate_future_module" | awk '{ print $1 }')" = "$candidate_future_sha" ||
+  fail 'rollback compensation changed the candidate future-kernel module'
 assert_file "$root/boot/firmware/tryboot.txt"
 assert_file "$root/var/lib/hyperpixel2r-kms/tryboot-state"
 run_controller rollback-boot.sh >/dev/null
