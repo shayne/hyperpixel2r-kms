@@ -1455,6 +1455,90 @@ replace_manifest_value() {
   mv -f -- "$temporary" "$file"
 }
 
+prepare_shared_module_inactive_retirement() {
+  local config_candidate="$fixture/shared-retirement-config"
+
+  new_target
+  run_stage >/dev/null
+  install_live_hardware
+  run_controller commit-boot.sh >/dev/null
+
+  inactive_retirement_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+  inactive_retirement_overlay="$overlay_file"
+  inactive_retirement_overlay_path="$root/boot/firmware/overlays/$inactive_retirement_overlay"
+  active_retirement_revision='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  active_retirement_overlay='hyperpixel2r-kms-aaaaaaaaaaaa.dtbo'
+  active_retirement_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$active_retirement_revision/$release"
+  active_retirement_overlay_path="$root/boot/firmware/overlays/$active_retirement_overlay"
+  active_retirement_module_path="$root/lib/modules/$release/extra/hyperpixel2r_kms.ko"
+
+  mkdir -p "$(dirname "$active_retirement_artifact")"
+  cp -a "$inactive_retirement_artifact" "$active_retirement_artifact"
+  mv "$active_retirement_artifact/$inactive_retirement_overlay" \
+    "$active_retirement_artifact/$active_retirement_overlay"
+  replace_manifest_value "$active_retirement_artifact/manifest.txt" \
+    source_revision "$active_retirement_revision"
+  replace_manifest_value "$active_retirement_artifact/manifest.txt" \
+    overlay_file "$active_retirement_overlay"
+  chown root:root "$active_retirement_artifact/manifest.txt"
+  chmod 0644 "$active_retirement_artifact/manifest.txt"
+
+  cp -a "$inactive_retirement_overlay_path" "$active_retirement_overlay_path"
+  awk -v old="dtoverlay=$inactive_retirement_overlay" \
+    -v new="dtoverlay=$active_retirement_overlay" '
+      {
+        line=$0
+        trim=line
+        sub(/^[[:space:]]+/, "", trim)
+        sub(/[[:space:]]+$/, "", trim)
+        if (trim == old) { print new; replaced++; next }
+        print line
+      }
+      END { exit replaced != 1 }
+    ' "$root/boot/firmware/config.txt" > "$config_candidate"
+  mv -f -- "$config_candidate" "$root/boot/firmware/config.txt"
+  chown root:root "$root/boot/firmware/config.txt"
+  chmod 0644 "$root/boot/firmware/config.txt"
+  rm -- "$inactive_retirement_overlay_path"
+
+  inactive_retirement_module_sha="$(sha256sum "$active_retirement_module_path" | awk '{ print $1 }')"
+  active_retirement_overlay_sha="$(sha256sum "$active_retirement_overlay_path" | awk '{ print $1 }')"
+  active_retirement_config_sha="$(sha256sum "$root/boot/firmware/config.txt" | awk '{ print $1 }')"
+  active_retirement_artifact_before="$fixture/shared-retirement-active-artifact"
+  inactive_retirement_artifact_before="$fixture/shared-retirement-inactive-artifact"
+  rm -rf -- "$active_retirement_artifact_before" "$inactive_retirement_artifact_before"
+  cp -a "$active_retirement_artifact" "$active_retirement_artifact_before"
+  cp -a "$inactive_retirement_artifact" "$inactive_retirement_artifact_before"
+}
+
+assert_shared_module_active_target_unchanged() {
+  assert_file "$active_retirement_module_path"
+  assert_file "$active_retirement_overlay_path"
+  test "$(sha256sum "$active_retirement_module_path" | awk '{ print $1 }')" = \
+    "$inactive_retirement_module_sha" ||
+    fail 'inactive retirement changed the shared active module'
+  test "$(sha256sum "$active_retirement_overlay_path" | awk '{ print $1 }')" = \
+    "$active_retirement_overlay_sha" ||
+    fail 'inactive retirement changed the active overlay'
+  test "$(sha256sum "$root/boot/firmware/config.txt" | awk '{ print $1 }')" = \
+    "$active_retirement_config_sha" ||
+    fail 'inactive retirement changed the active normal config'
+  diff -ru "$active_retirement_artifact_before" "$active_retirement_artifact" >/dev/null ||
+    fail 'inactive retirement changed the active retained artifact'
+}
+
+assert_shared_module_retirement_rejected() {
+  local label="$1"
+
+  if run_accepted_remote retire-inactive 0.1.0 "$source_revision" "$release" \
+    >"$fixture/shared-retirement-$label.out" 2>&1; then
+    fail "inactive retirement accepted unproven shared module ownership: $label"
+  fi
+  diff -ru "$inactive_retirement_artifact_before" "$inactive_retirement_artifact" >/dev/null ||
+    fail "rejected inactive retirement changed its retained artifact: $label"
+  assert_shared_module_active_target_unchanged
+}
+
 assert_rollback_rejects_state_mutation() {
   local key="$1"
   local value="$2"
@@ -2215,6 +2299,44 @@ if HP2R_FIXTURE_INTERRUPT_AFTER=uninstall-journal-cleared \
 fi
 run_accepted_remote finalize-uninstall-accepted >/dev/null
 assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-uninstall"
+
+# An inactive artifact may share the generic installed module path and exact
+# module bytes with a distinct active artifact.  Retirement is safe only when
+# the normal config, active overlay, retained active bundle, and installed
+# module prove that distinct ownership without ambiguity.
+prepare_shared_module_inactive_retirement
+run_accepted_remote retire-inactive 0.1.0 "$source_revision" "$release" >/dev/null
+assert_absent "$inactive_retirement_artifact"
+assert_shared_module_active_target_unchanged
+
+prepare_shared_module_inactive_retirement
+rm -rf -- "$active_retirement_artifact"
+if run_accepted_remote retire-inactive 0.1.0 "$source_revision" "$release" \
+  >"$fixture/shared-retirement-missing-artifact.out" 2>&1; then
+  fail 'inactive retirement accepted a shared module without its active retained artifact'
+fi
+diff -ru "$inactive_retirement_artifact_before" "$inactive_retirement_artifact" >/dev/null ||
+  fail 'rejected inactive retirement changed its artifact without active authority'
+assert_file "$active_retirement_module_path"
+assert_file "$active_retirement_overlay_path"
+
+prepare_shared_module_inactive_retirement
+printf 'different active module\n' >> "$active_retirement_artifact/hyperpixel2r_kms.ko"
+active_retirement_drift_sha="$(
+  sha256sum "$active_retirement_artifact/hyperpixel2r_kms.ko" | awk '{ print $1 }'
+)"
+replace_manifest_value "$active_retirement_artifact/manifest.txt" \
+  module_sha256 "$active_retirement_drift_sha"
+chown root:root "$active_retirement_artifact/manifest.txt"
+chmod 0644 "$active_retirement_artifact/manifest.txt"
+rm -rf -- "$active_retirement_artifact_before"
+cp -a "$active_retirement_artifact" "$active_retirement_artifact_before"
+assert_shared_module_retirement_rejected module-mismatch
+
+prepare_shared_module_inactive_retirement
+printf 'dtoverlay=%s\n' "$active_retirement_overlay" >> "$root/boot/firmware/config.txt"
+active_retirement_config_sha="$(sha256sum "$root/boot/firmware/config.txt" | awk '{ print $1 }')"
+assert_shared_module_retirement_rejected duplicate-active-declaration
 
 # Accepted uninstall must retain the complete per-kernel inventory authority,
 # including replay after the restore happened but its phase write did not.

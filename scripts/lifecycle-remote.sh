@@ -946,6 +946,112 @@ assert_no_owned_generic_overlay() {
   }
 }
 
+assert_distinct_active_artifact_owns_installed_module() {
+  local version="$1"
+  local inactive_revision="$2"
+  local release="$3"
+  local module_file="$4"
+  local inactive_overlay_file="$5"
+  local module_path="${root}/lib/modules/$release/extra/$module_file"
+  local version_dir="$artifact_root/$version"
+  local active_overlay_file active_overlay_path active_prefix entries revision_dir revision
+  local active_artifact manifest prior
+  local matches=0
+  local proof_failed=false
+
+  assert_owned_regular "$module_path" 644 || return
+  assert_owned_regular "$normal_config" boot || return
+  active_overlay_file="$(
+    sudo awk '
+      {
+        line=$0
+        sub(/^[[:space:]]+/, "", line)
+        sub(/[[:space:]]+$/, "", line)
+        if (line !~ /^dtoverlay=/ || line !~ /hyperpixel2r/) next
+        raw=substr(line, 11)
+        split(raw, pieces, ",")
+        name=pieces[1]
+        if (raw != name || name !~ /^hyperpixel2r-kms-[0-9a-f]{12}\.dtbo$/) {
+          bad=1
+          next
+        }
+        selected=name
+        count++
+      }
+      END {
+        if (bad || count != 1) exit 1
+        print selected
+      }
+    ' "$normal_config"
+  )" || {
+    echo 'normal config does not prove one exact active overlay' >&2
+    return 1
+  }
+  test "$active_overlay_file" != "$inactive_overlay_file" || {
+    echo 'inactive overlay remains the active declaration' >&2
+    return 1
+  }
+  active_overlay_path="${root}/boot/firmware/overlays/$active_overlay_file"
+  assert_owned_regular "$active_overlay_path" boot || return
+  active_prefix="${active_overlay_file#hyperpixel2r-kms-}"
+  active_prefix="${active_prefix%.dtbo}"
+  [[ "$active_prefix" =~ ^[0-9a-f]{12}$ ]] || return
+  assert_owned_dir "$version_dir" || return
+
+  entries="$(mktemp "${TMPDIR:-/tmp}/hp2r-active-artifacts.XXXXXX")" || return
+  if ! sudo find -P "$version_dir" -mindepth 1 -maxdepth 1 \
+    -name "${active_prefix}*" -print0 > "$entries"; then
+    rm -f -- "$entries"
+    return 1
+  fi
+  while IFS= read -r -d '' revision_dir; do
+    if ! assert_owned_dir "$revision_dir"; then
+      proof_failed=true
+      break
+    fi
+    revision="$(basename "$revision_dir")"
+    if ! [[ "$revision" =~ ^[0-9a-f]{40}$ ]]; then
+      proof_failed=true
+      break
+    fi
+    active_artifact="$revision_dir/$release"
+    if ! sudo test -e "$active_artifact" && ! sudo test -L "$active_artifact"; then
+      continue
+    fi
+    if sudo test -L "$active_artifact/prior-tryboot.txt"; then
+      proof_failed=true
+      break
+    elif sudo test -e "$active_artifact/prior-tryboot.txt"; then
+      prior=true
+    else
+      prior=false
+    fi
+    if ! assert_artifact_tree "$active_artifact" "$prior"; then
+      proof_failed=true
+      break
+    fi
+    manifest="$active_artifact/manifest.txt"
+    if ! test "$revision" != "$inactive_revision" ||
+      ! test "$(manifest_value "$manifest" driver_version)" = "$version" ||
+      ! test "$(manifest_value "$manifest" source_revision)" = "$revision" ||
+      ! test "$(manifest_value "$manifest" kernel_release)" = "$release" ||
+      ! test "$(manifest_value "$manifest" module_file)" = "$module_file" ||
+      ! test "$(manifest_value "$manifest" overlay_file)" = "$active_overlay_file" ||
+      ! test "$(sha "$module_path")" = "$(manifest_value "$manifest" module_sha256)" ||
+      ! test "$(sha "$active_overlay_path")" = "$(manifest_value "$manifest" overlay_sha256)"; then
+      proof_failed=true
+      break
+    fi
+    matches=$((matches + 1))
+  done < "$entries"
+  rm -f -- "$entries"
+  test "$proof_failed" = false || return
+  test "$matches" = 1 || {
+    echo 'active installed module ownership is absent or ambiguous' >&2
+    return 1
+  }
+}
+
 validate_dkms_status() {
   local version="$1"
   validate_named_dkms_status hyperpixel2r-kms "$version"
@@ -4391,8 +4497,11 @@ retire_inactive_accepted() {
   overlay_file="$(manifest_value "$manifest" overlay_file)"
   module_path="${root}/lib/modules/$release/extra/$module_file"
   overlay_path="${root}/boot/firmware/overlays/$overlay_file"
-  test ! -L "$module_path" && test ! -e "$module_path" ||
-    die 'inactive module is still installed'
+  if sudo test -L "$module_path" || sudo test -e "$module_path"; then
+    assert_distinct_active_artifact_owns_installed_module \
+      "$version" "$revision" "$release" "$module_file" "$overlay_file" ||
+      die 'installed module is not proven to belong to a distinct active artifact'
+  fi
   test ! -L "$overlay_path" && test ! -e "$overlay_path" ||
     die 'inactive overlay is still installed'
   require_regular "$normal_config" || die 'normal config is unsafe'
