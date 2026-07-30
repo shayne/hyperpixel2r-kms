@@ -3031,6 +3031,229 @@ record_accepted() {
   printf 'accepted %s\n' "$revision"
 }
 
+assert_recovery_authority_absent() {
+  local path
+  local -a authority=(
+    "$state_file"
+    "$rollback_state"
+    "$rollback_candidate_inventory"
+    "$rollback_candidate_tryboot"
+    "$accepted_state"
+    "$accepted_stock_config"
+    "$accepted_transition"
+    "$accepted_transition_prior_config"
+    "$accepted_uninstall"
+    "$accepted_uninstall_stock"
+  )
+
+  assert_owned_dir "$(dirname "$state_dir")" || return
+  assert_owned_dir "$state_dir" || return
+  for path in "${authority[@]}"; do
+    if sudo test -L "$path" || sudo test -e "$path"; then
+      printf 'recovery is blocked by lifecycle authority: %s\n' "$path" >&2
+      return 1
+    fi
+  done
+}
+
+validate_recovery_tuple() {
+  local version="$1"
+  local revision="$2"
+  local release="$3"
+  local artifact manifest module_file module_sha overlay_file overlay_sha module_path overlay_path
+  local prior=false
+
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return
+  [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || return
+  [[ "$release" =~ ^[A-Za-z0-9._+-]+$ ]] || return
+  artifact="$artifact_root/$version/$revision/$release"
+  if sudo test -L "$artifact/prior-tryboot.txt"; then return 1
+  elif sudo test -e "$artifact/prior-tryboot.txt"; then prior=true
+  fi
+  assert_artifact_tree "$artifact" "$prior" || return
+  manifest="$artifact/manifest.txt"
+  test "$(manifest_value "$manifest" driver_version)" = "$version" || return
+  test "$(manifest_value "$manifest" source_revision)" = "$revision" || return
+  test "$(manifest_value "$manifest" kernel_release)" = "$release" || return
+  module_file="$(manifest_value "$manifest" module_file)"
+  module_sha="$(manifest_value "$manifest" module_sha256)"
+  overlay_file="$(manifest_value "$manifest" overlay_file)"
+  overlay_sha="$(manifest_value "$manifest" overlay_sha256)"
+  test "$module_file" = hyperpixel2r_kms.ko || return
+  test "$overlay_file" = "hyperpixel2r-kms-${revision:0:12}.dtbo" || return
+  [[ "$module_sha" =~ ^[0-9a-f]{64}$ ]] || return
+  [[ "$overlay_sha" =~ ^[0-9a-f]{64}$ ]] || return
+  module_path="${root}/lib/modules/$release/extra/$module_file"
+  overlay_path="${root}/boot/firmware/overlays/$overlay_file"
+  assert_owned_regular "$module_path" 644 || return
+  assert_owned_regular "$overlay_path" boot || return
+  test "$(sha "$module_path")" = "$module_sha" || return
+  test "$(sha "$overlay_path")" = "$overlay_sha" || return
+  assert_owned_regular "$normal_config" boot || return
+
+  recovery_overlay_file="$overlay_file"
+}
+
+assert_recovery_normal_declaration() {
+  local overlay_file="$1"
+
+  require_regular "$normal_config" || return
+  sudo awk -v wanted="dtoverlay=$overlay_file" '
+    {
+      line=$0
+      sub(/^[[:space:]]+/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      if (line == wanted) { selected++; next }
+      if (line ~ /^dtoverlay=/ && line ~ /hyperpixel2r/) foreign++
+    }
+    END { exit selected != 1 || foreign != 0 }
+  ' "$normal_config"
+}
+
+find_recovery_workspace() {
+  local entry workspace='' entries
+  local count=0
+
+  recovery_workspace=''
+  entries="$(mktemp "${TMPDIR:-/tmp}/hp2r-recovery-entries.XXXXXX")" || return
+  if ! sudo find -P "$state_dir" -mindepth 1 -maxdepth 1 \
+    -name '.hp2r-transaction.*' -print0 > "$entries"; then
+    rm -f -- "$entries"
+    return 1
+  fi
+  while IFS= read -r -d '' entry; do
+    transaction_workspace_path "$entry" || {
+      printf 'unsafe recovery workspace name: %s\n' "$entry" >&2
+      rm -f -- "$entries"
+      return 1
+    }
+    sudo test ! -L "$entry" && sudo test -d "$entry" || {
+      printf 'unsafe recovery workspace: %s\n' "$entry" >&2
+      rm -f -- "$entries"
+      return 1
+    }
+    count=$((count + 1))
+    test "$count" = 1 || {
+      echo 'more than one private transaction workspace exists' >&2
+      rm -f -- "$entries"
+      return 1
+    }
+    workspace="$entry"
+  done < "$entries"
+  rm -f -- "$entries" || return
+  test "$count" = 0 || assert_private_workspace "$workspace" || return
+  recovery_workspace="$workspace"
+}
+
+validate_recovery_workspace() {
+  local workspace="$1"
+  local entry relative normal='' stock='' entries
+  local normal_count=0
+  local stock_count=0
+
+  assert_private_workspace "$workspace" || return
+  entries="$(mktemp "${TMPDIR:-/tmp}/hp2r-recovery-leaves.XXXXXX")" || return
+  if ! sudo find -P "$workspace" -mindepth 1 -maxdepth 1 -print0 > "$entries"; then
+    rm -f -- "$entries"
+    return 1
+  fi
+  while IFS= read -r -d '' entry; do
+    relative="${entry#"$workspace"/}"
+    case "$relative" in
+      accepted-stock)
+        sudo test ! -L "$entry" && sudo test -f "$entry" || { rm -f -- "$entries"; return 1; }
+        assert_owned_regular "$entry" 600 || { rm -f -- "$entries"; return 1; }
+        stock_count=$((stock_count + 1))
+        stock="$entry"
+        ;;
+      .hp2r-accepted-normal.*)
+        [[ "${relative#.hp2r-accepted-normal.}" =~ ^[A-Za-z0-9]+$ ]] || { rm -f -- "$entries"; return 1; }
+        sudo test ! -L "$entry" && sudo test -f "$entry" || { rm -f -- "$entries"; return 1; }
+        assert_owned_regular "$entry" 600 || { rm -f -- "$entries"; return 1; }
+        normal_count=$((normal_count + 1))
+        normal="$entry"
+        ;;
+      *)
+        printf 'unexpected recovery workspace leaf: %s\n' "$entry" >&2
+        rm -f -- "$entries"
+        return 1
+        ;;
+    esac
+  done < "$entries"
+  rm -f -- "$entries" || return
+  test "$normal_count" = 1 && test "$stock_count" = 1 || return
+  recovery_normal_snapshot="$normal"
+  recovery_stock_snapshot="$stock"
+}
+
+recover_accepted_record() {
+  local version="$1"
+  local revision="$2"
+  local release="$3"
+  local verifier verifier_stock normal_sha stock_sha
+  local orphan_workspace orphan_normal_snapshot orphan_stock_snapshot
+
+  assert_recovery_authority_absent || die 'recovery requires no lifecycle authority'
+  validate_recovery_tuple "$version" "$revision" "$release" ||
+    die 'recovery tuple is not installed and exact'
+  assert_recovery_normal_declaration "$recovery_overlay_file" ||
+    die 'recovery normal boot config does not have one exact owned declaration'
+  find_recovery_workspace || die 'recovery workspace set is unsafe'
+  if test -z "$recovery_workspace"; then
+    assert_recovery_authority_absent || die 'lifecycle authority appeared during recovery'
+    printf 'no accepted record workspace to recover\n'
+    return
+  fi
+  orphan_workspace="$recovery_workspace"
+  validate_recovery_workspace "$recovery_workspace" || die 'recovery workspace leaves are unsafe'
+  orphan_normal_snapshot="$recovery_normal_snapshot"
+  orphan_stock_snapshot="$recovery_stock_snapshot"
+  sudo cmp -s -- "$recovery_normal_snapshot" "$normal_config" ||
+    die 'recovery normal snapshot differs from current normal config'
+
+  verifier="$(new_transaction_workspace)" || die 'failed to create recovery verifier workspace'
+  accepted_workspace="$verifier"
+  verifier_stock="$(private_file "$verifier" accepted-stock)" ||
+    die 'failed to allocate recovery verifier stock config'
+  write_surgical_stock_config "$normal_config" "$recovery_overlay_file" "$verifier_stock" "$verifier" ||
+    die 'recovery normal boot config does not derive an exact stock config'
+  sudo cmp -s -- "$verifier_stock" "$recovery_stock_snapshot" ||
+    die 'recovery stock snapshot differs from derived stock config'
+  normal_sha="$(sha "$recovery_normal_snapshot")" || die 'failed to hash recovery normal snapshot'
+  stock_sha="$(sha "$recovery_stock_snapshot")" || die 'failed to hash recovery stock snapshot'
+  remove_transaction_workspace "$verifier" || die 'failed to remove recovery verifier workspace'
+  accepted_workspace=''
+
+  assert_recovery_authority_absent || die 'lifecycle authority appeared during recovery'
+  validate_recovery_tuple "$version" "$revision" "$release" ||
+    die 'recovery tuple changed before workspace removal'
+  assert_recovery_normal_declaration "$recovery_overlay_file" ||
+    die 'recovery normal boot config changed before workspace removal'
+  find_recovery_workspace || die 'recovery workspace set changed before removal'
+  test "$recovery_workspace" = "$orphan_workspace" ||
+    die 'recovery workspace identity changed before removal'
+  validate_recovery_workspace "$recovery_workspace" || die 'recovery workspace leaves changed before removal'
+  test "$recovery_normal_snapshot" = "$orphan_normal_snapshot" ||
+    die 'recovery normal snapshot identity changed before removal'
+  test "$recovery_stock_snapshot" = "$orphan_stock_snapshot" ||
+    die 'recovery stock snapshot identity changed before removal'
+  test "$(sha "$recovery_normal_snapshot")" = "$normal_sha" ||
+    die 'recovery normal snapshot changed before removal'
+  test "$(sha "$recovery_stock_snapshot")" = "$stock_sha" ||
+    die 'recovery stock snapshot changed before removal'
+  sudo cmp -s -- "$recovery_normal_snapshot" "$normal_config" ||
+    die 'recovery normal snapshot changed before removal'
+  fixture_interrupt_after recover-record-before-removal
+  remove_transaction_workspace "$recovery_workspace" || die 'failed to remove validated recovery workspace'
+  recovery_workspace=''
+  fixture_interrupt_after recover-record-after-removal
+  sudo sync
+  find_recovery_workspace || die 'recovery workspace set is unsafe after removal'
+  test -z "$recovery_workspace" || die 'recovery workspace remains after removal'
+  assert_recovery_authority_absent || die 'lifecycle authority appeared during recovery'
+  printf 'recovered accepted record workspace\n'
+}
+
 accepted_transition_value() {
   local key="$1"
 
@@ -4336,6 +4559,7 @@ case "${1-}" in
   commit) commit ;;
   rollback) rollback ;;
   record-accepted) shift; record_accepted "$@" ;;
+  recover-accepted-record) shift; recover_accepted_record "$@" ;;
   prepare-new-accepted) shift; prepare_new_accepted "$@" ;;
   mark-committed-accepted) mark_committed_accepted ;;
   stage-retained) shift; stage_retained "$@" ;;
@@ -4348,5 +4572,5 @@ case "${1-}" in
   retire-inactive) shift; retire_inactive_accepted "$@" ;;
   uninstall) uninstall ;;
   cleanup-legacy-planeradar) shift; cleanup_legacy_planeradar "$@" ;;
-  *) die 'usage: lifecycle-remote.sh {stage|identity|commit|rollback|record-accepted|prepare-new-accepted|mark-committed-accepted|stage-retained|commit-retained|recover-accepted|mark-verified-accepted|finalize-accepted|uninstall-accepted|finalize-uninstall-accepted|retire-inactive|uninstall|cleanup-legacy-planeradar}' ;;
+  *) die 'usage: lifecycle-remote.sh {stage|identity|commit|rollback|record-accepted|recover-accepted-record|prepare-new-accepted|mark-committed-accepted|stage-retained|commit-retained|recover-accepted|mark-verified-accepted|finalize-accepted|uninstall-accepted|finalize-uninstall-accepted|retire-inactive|uninstall|cleanup-legacy-planeradar}' ;;
 esac

@@ -113,6 +113,31 @@ tree, and DKMS status line; removes only checksum-proven module and overlay
 leaves; and runs `depmod` for every recorded kernel release. It does not tidy
 unknown files for you. Unknown files are just state with better marketing.
 
+## Recovering a legacy accepted-record workspace
+
+`recover-record` is an explicit, one-time recovery command for the legacy
+recorder workspace created by older tooling after it failed before publishing
+an accepted receipt. Do not remove that workspace by hand. With the exact
+installed tuple, run:
+
+```sh
+HP2R_TARGET=pi@YOUR_PI_HOST scripts/accepted-lifecycle.sh \
+  --action recover-record \
+  --driver-version VERSION \
+  --source-revision REVISION \
+  --kernel-release RELEASE
+```
+
+It refuses unless there is no tryboot, rollback, accepted receipt, transition,
+or uninstall authority; the requested artifact, manifest, installed module,
+installed overlay, and normal configuration exactly match; and there is zero
+or one safe root-owned recorder workspace. If one workspace exists, it must
+contain only a matching normal-config snapshot and a freshly re-derived stock
+snapshot before the command removes that exact directory. It never publishes
+an accepted receipt. A verified zero-workspace invocation is an idempotent
+no-op. Run no other lifecycle command concurrently with recovery; serialize
+the operator action so the pre-removal validation remains authoritative.
+
 The application adapter also exposes a one-time product migration through the
 same typed `Uninstall` action. That mode accepts only the shipped immutable
 legacy manifest and an exact expected generic overlay. It refuses active

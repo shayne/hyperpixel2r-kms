@@ -125,6 +125,27 @@ new_target() {
   chown root:root "$bin/sudo"
   chmod 4755 "$bin/sudo"
 
+  install -m 0755 /dev/stdin "$bin/find" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+if test -n "${HP2R_INSTALL_ROOT:-}" && test "${HP2R_FIXTURE_FAIL_RECOVERY_FIND:-}" = state; then
+  for argument in "$@"; do
+    if test "$argument" = "$HP2R_FIXTURE_ROOT/var/lib/hyperpixel2r-kms"; then
+      exit 79
+    fi
+  done
+fi
+if test -n "${HP2R_INSTALL_ROOT:-}" && test "${HP2R_FIXTURE_FAIL_RECOVERY_FIND:-}" = leaves; then
+  for argument in "$@"; do
+    if test "$argument" = "$HP2R_FIXTURE_ROOT/var/lib/hyperpixel2r-kms/.hp2r-transaction.WorkspaceFixture"; then
+      /usr/bin/find "$@"
+      exit 79
+    fi
+  done
+fi
+exec /usr/bin/find "$@"
+SCRIPT
+
   install -m 0755 /dev/stdin "$bin/fixture-record-fault" <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -716,6 +737,38 @@ if test -n "${HP2R_INSTALL_ROOT:-}" && test "${HP2R_FIXTURE_FAIL_RM:-}" = worksp
         ;;
       esac
     fi
+  done
+fi
+if test -n "${HP2R_INSTALL_ROOT:-}" && test "${HP2R_FIXTURE_RECOVERY_SWAP_WORKSPACE:-}" = 1; then
+  marker="$HP2R_FIXTURE_ROOT/tmp/recovery-workspace-swapped"
+  for argument in "$@"; do
+    case "$argument" in
+      "$HP2R_FIXTURE_ROOT"/var/lib/hyperpixel2r-kms/.hp2r-transaction.*)
+        if test "$argument" != "$HP2R_FIXTURE_ROOT/var/lib/hyperpixel2r-kms/.hp2r-transaction.WorkspaceFixture" && \
+          test ! -e "$marker"; then
+          /usr/bin/mv \
+            "$HP2R_FIXTURE_ROOT/var/lib/hyperpixel2r-kms/.hp2r-transaction.WorkspaceFixture" \
+            "$HP2R_FIXTURE_ROOT/var/lib/hyperpixel2r-kms/.hp2r-transaction.ReplacementFixture"
+          : > "$marker"
+        fi
+        ;;
+    esac
+  done
+fi
+if test -n "${HP2R_INSTALL_ROOT:-}" && test "${HP2R_FIXTURE_RECOVERY_SWAP_NORMAL_LEAF:-}" = 1; then
+  marker="$HP2R_FIXTURE_ROOT/tmp/recovery-normal-leaf-swapped"
+  for argument in "$@"; do
+    case "$argument" in
+      "$HP2R_FIXTURE_ROOT"/var/lib/hyperpixel2r-kms/.hp2r-transaction.*)
+        if test "$argument" != "$HP2R_FIXTURE_ROOT/var/lib/hyperpixel2r-kms/.hp2r-transaction.WorkspaceFixture" && \
+          test ! -e "$marker"; then
+          /usr/bin/mv \
+            "$HP2R_FIXTURE_ROOT/var/lib/hyperpixel2r-kms/.hp2r-transaction.WorkspaceFixture/.hp2r-accepted-normal.SnapshotFixture" \
+            "$HP2R_FIXTURE_ROOT/var/lib/hyperpixel2r-kms/.hp2r-transaction.WorkspaceFixture/.hp2r-accepted-normal.ReplacementSnapshot"
+          : > "$marker"
+        fi
+        ;;
+    esac
   done
 fi
 exec /usr/bin/rm "$@"
@@ -1643,11 +1696,11 @@ grep -Fxq "stock_config_sha256=$legacy_stock_sha" "$accepted_receipt" ||
   fail 'accepted record did not bind the derived legacy stock config'
 
 # The public controller must accept exactly the recovery identity and forward
-# it untouched.  The target implementation is intentionally absent in this
-# RED task, so controller forwarding itself still returns nonzero here.
+# it untouched. The empty target then rejects the forwarded action because no
+# exact installed tuple or recovery workspace exists there.
 new_target
 if run_accepted_controller >"$fixture/recover-record-controller.out" 2>&1; then
-  fail 'recover-record controller unexpectedly completed without a remote recovery implementation'
+  fail 'recover-record controller unexpectedly accepted an empty target'
 fi
 controller_command="$fixture/recover-record-controller-command"
 printf '%s\n' recover-accepted-record 0.1.0 "$source_revision" "$release" > "$controller_command"
@@ -1659,18 +1712,42 @@ cmp -s "$controller_command" "$root/tmp/accepted-controller-remote-command" ||
 # recorder snapshots.  A valid recovery must remove only that workspace, sync,
 # and never publish an accepted receipt.
 prepare_recoverable_record_orphan
+recovery_find_before="$fixture/recover-record-find-before.tar"
+recovery_find_after="$fixture/recover-record-find-after.tar"
+capture_recovery_target "$recovery_find_before"
+if HP2R_FIXTURE_FAIL_RECOVERY_FIND=state \
+  run_accepted_remote recover-accepted-record 0.1.0 "$source_revision" "$release" \
+    >"$fixture/recover-record-find.out" 2>&1; then
+  fail 'recover-record accepted an unreadable workspace enumeration'
+fi
+assert_exact_recoverable_record_orphan
+capture_recovery_target "$recovery_find_after"
+cmp -s "$recovery_find_before" "$recovery_find_after" ||
+  fail 'recover-record mutated state after workspace enumeration failure'
+
+prepare_recoverable_record_orphan
+recovery_leaves_before="$fixture/recover-record-leaves-before.tar"
+recovery_leaves_after="$fixture/recover-record-leaves-after.tar"
+capture_recovery_target "$recovery_leaves_before"
+if HP2R_FIXTURE_FAIL_RECOVERY_FIND=leaves \
+  run_accepted_remote recover-accepted-record 0.1.0 "$source_revision" "$release" \
+    >"$fixture/recover-record-leaves.out" 2>&1; then
+  fail 'recover-record accepted an unreadable workspace leaf enumeration'
+fi
+assert_exact_recoverable_record_orphan
+capture_recovery_target "$recovery_leaves_after"
+cmp -s "$recovery_leaves_before" "$recovery_leaves_after" ||
+  fail 'recover-record mutated state after workspace leaf enumeration failure'
+
+prepare_recoverable_record_orphan
 recover_success_before="$fixture/recover-record-success-preserved-before.tar"
 recover_success_after="$fixture/recover-record-success-preserved-after.tar"
 capture_recovery_preserved_target "$recover_success_before"
 if ! HP2R_FIXTURE_RECOVER_SYNC=1 \
   run_accepted_remote recover-accepted-record 0.1.0 "$source_revision" "$release" \
     >"$fixture/recover-record-exact.out" 2>&1; then
-  grep -Fq 'usage: lifecycle-remote.sh' "$fixture/recover-record-exact.out" || {
-    cat "$fixture/recover-record-exact.out" >&2
-    fail 'recover-record exact fixture failed before the missing remote action'
-  }
   cat "$fixture/recover-record-exact.out" >&2
-  fail 'recover-record remote action is intentionally unimplemented'
+  fail 'recover-record did not recover exact workspace'
 fi
 assert_absent "$recover_workspace"
 assert_no_private_workspaces
@@ -1744,12 +1821,57 @@ for recover_boundary in recover-record-before-removal recover-record-after-remov
   fi
 done
 
+# Replacing the exact orphan while the verifier workspace is being removed is
+# a concurrent authority change, not an invitation to delete the replacement.
+prepare_recoverable_record_orphan
+recovery_replacement="$root/var/lib/hyperpixel2r-kms/.hp2r-transaction.ReplacementFixture"
+if HP2R_FIXTURE_RECOVERY_SWAP_WORKSPACE=1 \
+  run_accepted_remote recover-accepted-record 0.1.0 "$source_revision" "$release" \
+    >"$fixture/recover-record-workspace-swap.out" 2>&1; then
+  fail 'recover-record accepted a replacement workspace after validation'
+fi
+assert_file "$root/tmp/recovery-workspace-swapped"
+assert_absent "$root/var/lib/hyperpixel2r-kms/.hp2r-transaction.WorkspaceFixture"
+test "$(stat -c '%U:%G:%a' "$recovery_replacement")" = root:root:700 ||
+  fail 'recovery workspace replacement metadata changed'
+cmp -s "$recovery_replacement/.hp2r-accepted-normal.SnapshotFixture" \
+  "$root/boot/firmware/config.txt" ||
+  fail 'recovery workspace replacement normal snapshot changed'
+cmp -s "$recovery_replacement/accepted-stock" "$recover_derived_stock" ||
+  fail 'recovery workspace replacement stock snapshot changed'
+test "$(find "$root/var/lib/hyperpixel2r-kms" -mindepth 1 -maxdepth 1 \
+  -name '.hp2r-transaction.*' -print | wc -l | tr -d ' ')" = 1 ||
+  fail 'recovery workspace replacement did not remain the sole workspace'
+assert_recovery_no_receipt
+
+# The accepted-normal snapshot has its own mktemp suffix. A same-byte rename
+# after verifier cleanup must fail identity revalidation before orphan removal.
+prepare_recoverable_record_orphan
+recovery_normal_replacement="$recover_workspace/.hp2r-accepted-normal.ReplacementSnapshot"
+if HP2R_FIXTURE_RECOVERY_SWAP_NORMAL_LEAF=1 \
+  run_accepted_remote recover-accepted-record 0.1.0 "$source_revision" "$release" \
+    >"$fixture/recover-record-normal-leaf-swap.out" 2>&1; then
+  fail 'recover-record accepted a replacement normal snapshot after validation'
+fi
+assert_file "$root/tmp/recovery-normal-leaf-swapped"
+assert_absent "$recover_workspace/.hp2r-accepted-normal.SnapshotFixture"
+assert_file "$recovery_normal_replacement"
+test "$(stat -c '%U:%G:%a' "$recovery_normal_replacement")" = root:root:600 ||
+  fail 'recovery normal snapshot replacement metadata changed'
+cmp -s "$recovery_normal_replacement" "$root/boot/firmware/config.txt" ||
+  fail 'recovery normal snapshot replacement bytes changed'
+cmp -s "$recover_workspace/accepted-stock" "$recover_derived_stock" ||
+  fail 'recovery normal snapshot replacement changed stock'
+test "$(stat -c '%U:%G:%a' "$recover_workspace")" = root:root:700 ||
+  fail 'recovery normal snapshot replacement changed workspace metadata'
+assert_recovery_no_receipt
+
 # Any existing lifecycle authority makes the orphan ambiguous.  Every reject
 # preserves the complete state-directory archive byte-for-byte, including the
 # orphan leaves, and cannot publish an accepted receipt.
 for recovery_authority in \
   tryboot-state rollback-state rollback-candidate-dkms-state \
-  rollback-candidate-tryboot accepted-state accepted-stock-config.txt \
+  rollback-candidate-tryboot.txt accepted-state accepted-stock-config.txt \
   accepted-transition accepted-transition-prior-config.txt accepted-uninstall \
   accepted-uninstall-stock.txt
 do
