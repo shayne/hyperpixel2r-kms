@@ -8,7 +8,8 @@ usage() {
 Usage: validate-release-tag.sh TAG SOURCE-REVISION
 
 Require a numbered release-candidate tag whose base semantic version exactly
-matches HP2R_DRIVER_VERSION in the selected durable source commit.
+matches HP2R_DRIVER_VERSION and whose full tag exactly matches the canonical
+release marker in the selected durable source commit.
 USAGE
 }
 
@@ -26,6 +27,19 @@ fi
 tag_version="${BASH_REMATCH[1]}"
 
 source_revision="$(git -C "$repo_root" rev-parse --verify "$source_ref^{commit}")"
+canonical_marker_object="$(
+  git -C "$repo_root" rev-parse --verify \
+    "$source_revision:release/current-release.txt"
+)"
+expected_marker_object="$(
+  printf '%s\n' "$tag" |
+    git -C "$repo_root" hash-object --stdin
+)"
+if test "$canonical_marker_object" != "$expected_marker_object"; then
+  printf 'release tag %s does not match the canonical source release marker\n' \
+    "$tag" >&2
+  exit 1
+fi
 driver_version="$({
   git -C "$repo_root" show "$source_revision:scripts/common.sh" |
     sed -nE 's/^HP2R_DRIVER_VERSION="([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p'

@@ -49,9 +49,12 @@ release_marker = root / "release" / "current-release.txt"
 if not release_marker.is_file():
     failures.append("missing canonical release/current-release.txt marker")
 else:
-    current = release_marker.read_text().strip()
-    if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*", current):
-        failures.append("canonical release marker must be a numbered release-candidate tag")
+    marker_bytes = release_marker.read_bytes()
+    if not re.fullmatch(rb"v[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*\n", marker_bytes):
+        failures.append("canonical release marker must be exactly one newline-terminated candidate tag")
+        current = ""
+    else:
+        current = marker_bytes[:-1].decode()
     readme = (root / "README.md").read_text()
     tags = set(re.findall(r"v[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*", readme))
     if tags != {current}:
@@ -559,11 +562,60 @@ if "DO NOT MATCH THE HASHES" not in (result.stdout + result.stderr):
     raise SystemExit("tampered validator lock did not fail in pip hash-checking mode")
 PY
 
-"$fixture/scripts/validate-release-tag.sh" "v0.1.0-rc.3" "$source_revision"
-if "$fixture/scripts/validate-release-tag.sh" "v0.1.1-rc.3" "$source_revision"; then
+"$fixture/scripts/validate-release-tag.sh" "v0.1.0-rc.19" "$source_revision"
+if "$fixture/scripts/validate-release-tag.sh" "v0.1.0-rc.18" "$source_revision"; then
+  printf 'release tag validator accepted a tag that mismatches the canonical source release\n' >&2
+  exit 1
+fi
+if "$fixture/scripts/validate-release-tag.sh" "v0.1.1-rc.19" "$source_revision"; then
   printf 'release tag validator accepted a tag whose base version mismatches the driver\n' >&2
   exit 1
 fi
+
+git -C "$fixture" switch -q -c release-marker-contract "$source_revision"
+printf 'v0.1.0-rc.19\n\n' > "$fixture/release/current-release.txt"
+git -C "$fixture" add release/current-release.txt
+git -C "$fixture" commit -q --no-gpg-sign -m 'malformed release marker fixture'
+malformed_marker_revision="$(git -C "$fixture" rev-parse HEAD)"
+if "$fixture/scripts/validate-release-tag.sh" "v0.1.0-rc.19" "$malformed_marker_revision"; then
+  printf 'release tag validator accepted a marker with a trailing blank line\n' >&2
+  exit 1
+fi
+
+printf 'v0.1.0-rc.19' > "$fixture/release/current-release.txt"
+git -C "$fixture" add release/current-release.txt
+git -C "$fixture" commit -q --no-gpg-sign -m 'unterminated release marker fixture'
+unterminated_marker_revision="$(git -C "$fixture" rev-parse HEAD)"
+if "$fixture/scripts/validate-release-tag.sh" "v0.1.0-rc.19" "$unterminated_marker_revision"; then
+  printf 'release tag validator accepted a marker without its final newline\n' >&2
+  exit 1
+fi
+
+git -C "$fixture" rm -q release/current-release.txt
+git -C "$fixture" commit -q --no-gpg-sign -m 'missing release marker fixture'
+missing_marker_revision="$(git -C "$fixture" rev-parse HEAD)"
+if "$fixture/scripts/validate-release-tag.sh" "v0.1.0-rc.19" "$missing_marker_revision"; then
+  printf 'release tag validator accepted a source without its canonical marker\n' >&2
+  exit 1
+fi
+
+printf 'v0.1.1-rc.19\n' > "$fixture/release/current-release.txt"
+git -C "$fixture" add release/current-release.txt
+git -C "$fixture" commit -q --no-gpg-sign -m 'driver version mismatch fixture'
+driver_mismatch_revision="$(git -C "$fixture" rev-parse HEAD)"
+if "$fixture/scripts/validate-release-tag.sh" "v0.1.1-rc.19" "$driver_mismatch_revision"; then
+  printf 'release tag validator accepted a marker whose base version mismatches the driver\n' >&2
+  exit 1
+fi
+
+printf 'v0.1.0-rc.18\n' > "$fixture/release/current-release.txt"
+git -C "$fixture" add release/current-release.txt
+git -C "$fixture" commit -q --no-gpg-sign -m 'distinct selected release marker fixture'
+rc18_source_revision="$(git -C "$fixture" rev-parse HEAD)"
+"$fixture/scripts/validate-release-tag.sh" "v0.1.0-rc.19" "$source_revision"
+"$fixture/scripts/validate-release-tag.sh" "v0.1.0-rc.18" "$rc18_source_revision"
+git -C "$fixture" switch -q --detach "$source_revision"
+
 "$fixture/scripts/validate-stable-release-tag.sh" "v0.1.0" "$source_revision"
 if "$fixture/scripts/validate-stable-release-tag.sh" "v0.1.0-rc.3" "$source_revision"; then
   printf 'stable tag validator accepted a release-candidate tag\n' >&2
@@ -596,9 +648,9 @@ binding_output="$temporary_dir/source-ref-binding"
   --output "$binding_output"
 jq -e --arg commit "$checked_out_source" '.source.commit == $commit' \
   "$binding_output/driver-manifest.json" >/dev/null
-"$fixture/scripts/validate-release-tag.sh" "v0.1.0-rc.4" "$checked_out_source"
-git -C "$fixture" tag --annotate v0.1.0-rc.4 "$checked_out_source" --message 'source-ref binding fixture'
-test "$(git -C "$fixture" rev-parse 'v0.1.0-rc.4^{}')" = "$checked_out_source"
+"$fixture/scripts/validate-release-tag.sh" "v0.1.0-rc.19" "$checked_out_source"
+git -C "$fixture" tag --annotate v0.1.0-rc.19 "$checked_out_source" --message 'source-ref binding fixture'
+test "$(git -C "$fixture" rev-parse 'v0.1.0-rc.19^{}')" = "$checked_out_source"
 
 archive_tar="$temporary_dir/source.tar"
 zstd -q -d -c "$first_output/hyperpixel2r-kms-source.tar.zst" > "$archive_tar"
