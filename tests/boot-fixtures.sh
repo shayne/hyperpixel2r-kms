@@ -44,6 +44,68 @@ assert_no_private_workspaces() {
   test -z "$workspace" || fail "private transaction workspace survived: $workspace"
 }
 
+prepare_record_failure_target() {
+  local artifact
+
+  new_target
+  run_stage >/dev/null
+  install_live_hardware
+  run_controller commit-boot.sh >/dev/null
+  artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+  record_normal_before="$fixture/record-normal-before"
+  record_artifact_before="$fixture/record-artifact-before"
+  record_module_before="$(sha256sum "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko" | awk '{ print $1 }')"
+  record_overlay_before="$(sha256sum "$root/boot/firmware/overlays/$overlay_file" | awk '{ print $1 }')"
+  cp "$root/boot/firmware/config.txt" "$record_normal_before"
+  rm -rf -- "$record_artifact_before"
+  cp -a "$artifact" "$record_artifact_before"
+}
+
+assert_record_target_unchanged() {
+  local artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+
+  cmp -s "$record_normal_before" "$root/boot/firmware/config.txt" ||
+    fail 'accepted record failure changed the normal config'
+  diff -ru "$record_artifact_before" "$artifact" >/dev/null ||
+    fail 'accepted record failure changed the retained artifact tree'
+  test "$(sha256sum "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko" | awk '{ print $1 }')" = "$record_module_before" ||
+    fail 'accepted record failure changed the installed module'
+  test "$(sha256sum "$root/boot/firmware/overlays/$overlay_file" | awk '{ print $1 }')" = "$record_overlay_before" ||
+    fail 'accepted record failure changed the installed overlay'
+}
+
+assert_record_prepublication_failure() {
+  assert_no_private_workspaces
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-state"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-stock-config.txt"
+  assert_record_target_unchanged
+}
+
+assert_no_foreign_hyperpixel_overlay() {
+  local config="$1"
+  local owned="$2"
+
+  awk -v owned="dtoverlay=$owned" '
+    {
+      line=$0
+      sub(/^[[:space:]]+/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      if (line ~ /^dtoverlay=/ && line ~ /hyperpixel2r/ && line != owned) exit 1
+    }
+  ' "$config" || fail "foreign HyperPixel overlay survived in $config"
+}
+
+assert_exact_line_count() {
+  local file="$1"
+  local line="$2"
+  local expected="$3"
+  local actual
+
+  actual="$(grep -Fxc "$line" "$file" || true)"
+  test "$actual" = "$expected" ||
+    fail "unexpected count for $line in $file: $actual"
+}
+
 assert_incoming_stage_cleaned() {
   assert_absent "$root/tmp/hp2r-tryboot-stage.fixture"
 }
@@ -63,11 +125,69 @@ new_target() {
   chown root:root "$bin/sudo"
   chmod 4755 "$bin/sudo"
 
+  install -m 0755 /dev/stdin "$bin/fixture-record-fault" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+operation="$1"
+shift
+test "${HP2R_FIXTURE_FAIL_RECORD_OPERATION:-}" = "$operation" || exit 0
+marker="$HP2R_FIXTURE_ROOT/tmp/record-fault-$operation"
+test ! -e "$marker" || exit 0
+matches=false
+case "$operation" in
+  normal-snapshot)
+    if test "${1-}" = "$HP2R_FIXTURE_ROOT/boot/firmware/config.txt" &&
+      [[ "${2-}" == "$HP2R_FIXTURE_ROOT"/var/lib/hyperpixel2r-kms/.hp2r-transaction.*/.hp2r-accepted-normal.* ]]; then
+      matches=true
+    fi
+    ;;
+  stock-allocation)
+    if [[ "${1-}" == "$HP2R_FIXTURE_ROOT"/var/lib/hyperpixel2r-kms/.hp2r-transaction.*/accepted-stock ]]; then
+      matches=true
+    fi
+    ;;
+  stock-derivation)
+    if [[ "${1-}" == "$HP2R_FIXTURE_ROOT"/var/lib/hyperpixel2r-kms/.hp2r-transaction.*/.hp2r-accepted-normal.* ]]; then
+      matches=true
+    fi
+    ;;
+  receipt-allocation|receipt-write)
+    if [[ "${1-}" == "$HP2R_FIXTURE_ROOT"/var/lib/hyperpixel2r-kms/.hp2r-transaction.*/accepted-state ]]; then
+      matches=true
+    fi
+    ;;
+  stock-publication)
+    if test "${1-}" = "$HP2R_FIXTURE_ROOT/var/lib/hyperpixel2r-kms/accepted-stock-config.txt"; then
+      matches=true
+    fi
+    ;;
+  receipt-publication|final-receipt-validation)
+    if test "${1-}" = "$HP2R_FIXTURE_ROOT/var/lib/hyperpixel2r-kms/accepted-state"; then
+      matches=true
+    fi
+    ;;
+  workspace-removal)
+    for argument in "$@"; do
+      if [[ "$argument" == "$HP2R_FIXTURE_ROOT"/var/lib/hyperpixel2r-kms/.hp2r-transaction.* ]]; then
+        matches=true
+        break
+      fi
+    done
+    ;;
+  sync) matches=true ;;
+  *) exit 64 ;;
+esac
+"$matches" || exit 0
+: > "$marker"
+exit 77
+SCRIPT
+
   install -m 0755 /dev/stdin "$bin/cp" <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 source_path="${@: -2:1}"
 destination="${@: -1}"
+"$(dirname "$0")/fixture-record-fault" normal-snapshot "$source_path" "$destination"
 incoming="$HP2R_FIXTURE_ROOT/tmp/hp2r-tryboot-stage.fixture/hyperpixel2r_kms.ko"
 no_dereference=false
 for argument in "$@"; do
@@ -109,6 +229,8 @@ SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
 destination="${@: -1}"
+"$(dirname "$0")/fixture-record-fault" stock-allocation "$destination"
+"$(dirname "$0")/fixture-record-fault" receipt-allocation "$destination"
 if test -n "${HP2R_INSTALL_ROOT:-}" && test "${HP2R_FIXTURE_FAIL_PRIVATE_FILE:-}" = candidate; then
   case "$destination" in
     "$HP2R_FIXTURE_ROOT"/var/lib/hyperpixel2r-kms/.hp2r-transaction.*/candidate)
@@ -121,6 +243,14 @@ if test -n "${HP2R_INSTALL_ROOT:-}" && test "${HP2R_FIXTURE_FAIL_PRIVATE_FILE:-}
   esac
 fi
 exec /usr/bin/install "$@"
+SCRIPT
+
+  install -m 0755 /dev/stdin "$bin/tee" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+destination="${@: -1}"
+"$(dirname "$0")/fixture-record-fault" receipt-write "$destination"
+exec /usr/bin/tee "$@"
 SCRIPT
 
   install -m 0755 /dev/stdin "$bin/test" <<'SCRIPT'
@@ -150,6 +280,9 @@ SCRIPT
   install -m 0755 /dev/stdin "$bin/awk" <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
+input="${@: -1}"
+"$(dirname "$0")/fixture-record-fault" stock-derivation "$input"
+"$(dirname "$0")/fixture-record-fault" final-receipt-validation "$input"
 if test -n "${HP2R_INSTALL_ROOT:-}" && test "${HP2R_FIXTURE_INSTRUMENT_SYMLINK_FOLLOW:-}" = 1; then
   for argument in "$@"; do
     if /usr/bin/test -L "$argument"; then
@@ -485,6 +618,8 @@ SCRIPT
 set -euo pipefail
 source_path="${@: -2:1}"
 destination="${@: -1}"
+"$(dirname "$0")/fixture-record-fault" stock-publication "$destination"
+"$(dirname "$0")/fixture-record-fault" receipt-publication "$destination"
 if test -n "${HP2R_INSTALL_ROOT:-}"; then
   if test -n "${HP2R_FIXTURE_FAIL_LEGACY_AT:-}"; then
     inject=false
@@ -536,6 +671,7 @@ SCRIPT
   install -m 0755 /dev/stdin "$bin/rm" <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
+"$(dirname "$0")/fixture-record-fault" workspace-removal "$@"
 if test -n "${HP2R_INSTALL_ROOT:-}" && test -n "${HP2R_FIXTURE_FAIL_LEGACY_AT:-}"; then
   inject=false
   for argument in "$@"; do
@@ -573,6 +709,13 @@ if test -n "${HP2R_INSTALL_ROOT:-}" && test "${HP2R_FIXTURE_FAIL_RM:-}" = worksp
   done
 fi
 exec /usr/bin/rm "$@"
+SCRIPT
+
+  install -m 0755 /dev/stdin "$bin/sync" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+"$(dirname "$0")/fixture-record-fault" sync
+exec /usr/bin/sync "$@"
 SCRIPT
 
   install -m 0755 /dev/stdin "$bin/chmod" <<'SCRIPT'
@@ -731,6 +874,7 @@ run_stage() {
   local fixture_release="${HP2R_FIXTURE_RELEASE_OVERRIDE:-$release}"
   local fixture_artifact="${HP2R_FIXTURE_ARTIFACT_DIR_OVERRIDE:-$repo_root/dist/artifacts/$release}"
   local fixture_source_root="${HP2R_FIXTURE_SOURCE_ROOT_OVERRIDE:-$repo_root}"
+  local fixture_replace_overlay="${HP2R_FIXTURE_REPLACE_OVERLAY:-vc4-kms-dpi-hyperpixel2r}"
   local result
 
   if PATH="$bin:$PATH" \
@@ -742,7 +886,7 @@ run_stage() {
     HP2R_TARGET=pi@fixture \
     "$repo_root/scripts/stage-tryboot.sh" \
       --artifact-dir "$fixture_artifact" \
-      --replace-overlay vc4-kms-dpi-hyperpixel2r; then
+      --replace-overlay "$fixture_replace_overlay"; then
     if test "${HP2R_FIXTURE_PRESERVE_MUTATIONS:-}" != 1; then
       assert_no_private_workspaces
     fi
@@ -1150,6 +1294,162 @@ if HP2R_FIXTURE_BOOT_MODE=755 run_stage; then
 else
   fail 'stage rejected the Raspberry Pi VFAT boot-file mode'
 fi
+
+# Every operation after record-accepted allocates its private workspace has a
+# distinct failure boundary.  Before either accepted leaf is published, the
+# failure must leave no durable receipt or stock candidate and no workspace.
+for record_fault in \
+  normal-snapshot stock-allocation stock-derivation receipt-allocation \
+  receipt-write stock-publication
+do
+  prepare_record_failure_target
+  export HP2R_FIXTURE_FAIL_RECORD_OPERATION="$record_fault"
+  if run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" \
+    > "$fixture/record-fault-$record_fault.out" 2>&1; then
+    fail "accepted record ignored injected $record_fault failure"
+  fi
+  unset HP2R_FIXTURE_FAIL_RECORD_OPERATION
+  assert_file "$root/tmp/record-fault-$record_fault"
+  assert_record_prepublication_failure
+done
+
+# Once a leaf has been atomically published, subsequent failures must preserve
+# the existing fail-closed authority shape while still removing the private
+# recorder workspace.  A stock-only leaf remains an orphan and blocks replay;
+# a complete receipt remains idempotently accepted.
+prepare_record_failure_target
+export HP2R_FIXTURE_FAIL_RECORD_OPERATION=receipt-publication
+if run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" \
+  > "$fixture/record-fault-receipt-publication.out" 2>&1; then
+  fail 'accepted record ignored injected receipt-publication failure'
+fi
+unset HP2R_FIXTURE_FAIL_RECORD_OPERATION
+assert_file "$root/tmp/record-fault-receipt-publication"
+assert_no_private_workspaces
+assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-state"
+assert_file "$root/var/lib/hyperpixel2r-kms/accepted-stock-config.txt"
+assert_record_target_unchanged
+if run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" >/dev/null 2>&1; then
+  fail 'accepted record resumed through an orphan accepted stock config'
+fi
+
+for record_fault in workspace-removal sync final-receipt-validation; do
+  prepare_record_failure_target
+  export HP2R_FIXTURE_FAIL_RECORD_OPERATION="$record_fault"
+  if run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" \
+    > "$fixture/record-fault-$record_fault.out" 2>&1; then
+    fail "accepted record ignored injected $record_fault failure"
+  fi
+  unset HP2R_FIXTURE_FAIL_RECORD_OPERATION
+  assert_file "$root/tmp/record-fault-$record_fault"
+  assert_no_private_workspaces
+  assert_file "$root/var/lib/hyperpixel2r-kms/accepted-state"
+  assert_file "$root/var/lib/hyperpixel2r-kms/accepted-stock-config.txt"
+  assert_record_target_unchanged
+  run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" >/dev/null
+done
+
+# RC18's healthy normal boot had accumulated three exact owned markers.  Keep
+# a byte-exact legacy copy, and require stage/commit to retain every unrelated
+# byte in order while replacing the owned declaration and canonical marker.
+new_target
+legacy_normal="$fixture/legacy-normal-config.txt"
+legacy_normal_original="$fixture/legacy-normal-original.txt"
+legacy_stage_expected="$fixture/legacy-stage-expected.txt"
+legacy_commit_expected="$fixture/legacy-commit-expected.txt"
+legacy_stock_expected="$fixture/legacy-stock-expected.txt"
+printf '%s\n' \
+  '[all]' \
+  '# unrelated comment before accepted ownership' \
+  'dtoverlay=vc4-kms-v3d' \
+  'dtparam=audio=on' \
+  '[pi4]' \
+  '# hyperpixel2r-kms accepted candidate' \
+  '# hyperpixel2r-kms accepted candidate' \
+  '# hyperpixel2r-kms accepted candidate' \
+  "dtoverlay=$overlay_file" \
+  '# unrelated comment after accepted ownership' \
+  'disable_overscan=1' \
+  'dtoverlay=vc4-fkms-v3d' \
+  > "$legacy_normal"
+cp "$legacy_normal" "$legacy_normal_original"
+printf '%s\n' \
+  '[all]' \
+  '# unrelated comment before accepted ownership' \
+  'dtoverlay=vc4-kms-v3d' \
+  'dtparam=audio=on' \
+  '[pi4]' \
+  '# unrelated comment after accepted ownership' \
+  'disable_overscan=1' \
+  'dtoverlay=vc4-fkms-v3d' \
+  '' \
+  '# hyperpixel2r-kms one-shot candidate' \
+  "dtoverlay=$overlay_file" \
+  > "$legacy_stage_expected"
+printf '%s\n' \
+  '[all]' \
+  '# unrelated comment before accepted ownership' \
+  'dtoverlay=vc4-kms-v3d' \
+  'dtparam=audio=on' \
+  '[pi4]' \
+  '# unrelated comment after accepted ownership' \
+  'disable_overscan=1' \
+  'dtoverlay=vc4-fkms-v3d' \
+  '' \
+  '# hyperpixel2r-kms accepted candidate' \
+  "dtoverlay=$overlay_file" \
+  > "$legacy_commit_expected"
+printf '%s\n' \
+  '[all]' \
+  '# unrelated comment before accepted ownership' \
+  'dtoverlay=vc4-kms-v3d' \
+  'dtparam=audio=on' \
+  '[pi4]' \
+  '# unrelated comment after accepted ownership' \
+  'disable_overscan=1' \
+  'dtoverlay=vc4-fkms-v3d' \
+  > "$legacy_stock_expected"
+cp "$legacy_normal" "$root/boot/firmware/config.txt"
+chown root:root "$root/boot/firmware/config.txt"
+chmod 0644 "$root/boot/firmware/config.txt"
+export HP2R_FIXTURE_REPLACE_OVERLAY="$overlay_file"
+run_stage >/dev/null
+unset HP2R_FIXTURE_REPLACE_OVERLAY
+cmp -s "$legacy_normal_original" "$root/boot/firmware/config.txt" ||
+  fail 'stage changed the legacy normal config'
+candidate="$root/boot/firmware/tryboot.txt"
+cmp -s "$legacy_stage_expected" "$candidate" ||
+  fail 'stage did not canonicalize the legacy candidate exactly'
+assert_exact_line_count "$candidate" "dtoverlay=$overlay_file" 1
+assert_exact_line_count "$candidate" '# hyperpixel2r-kms accepted candidate' 0
+assert_exact_line_count "$candidate" '# hyperpixel2r-kms one-shot candidate' 1
+assert_no_foreign_hyperpixel_overlay "$candidate" "$overlay_file"
+install_live_hardware
+run_controller commit-boot.sh >/dev/null
+cmp -s "$legacy_commit_expected" "$root/boot/firmware/config.txt" ||
+  fail 'commit did not canonicalize the legacy normal config exactly'
+assert_exact_line_count "$root/boot/firmware/config.txt" "dtoverlay=$overlay_file" 1
+assert_exact_line_count "$root/boot/firmware/config.txt" '# hyperpixel2r-kms accepted candidate' 1
+assert_no_foreign_hyperpixel_overlay "$root/boot/firmware/config.txt" "$overlay_file"
+
+# Record accepts the unmodified live legacy shape and publishes only the
+# derived stock boot config, binding both byte-exact config hashes in receipt.
+cp "$legacy_normal_original" "$root/boot/firmware/config.txt"
+chown root:root "$root/boot/firmware/config.txt"
+chmod 0644 "$root/boot/firmware/config.txt"
+run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" >/dev/null
+accepted_receipt="$root/var/lib/hyperpixel2r-kms/accepted-state"
+stock_config="$root/var/lib/hyperpixel2r-kms/accepted-stock-config.txt"
+cmp -s "$legacy_normal_original" "$root/boot/firmware/config.txt" ||
+  fail 'accepted record changed the legacy normal config'
+cmp -s "$legacy_stock_expected" "$stock_config" ||
+  fail 'accepted record did not derive the exact legacy stock config'
+legacy_normal_sha="$(sha256sum "$legacy_normal_original" | awk '{ print $1 }')"
+legacy_stock_sha="$(sha256sum "$legacy_stock_expected" | awk '{ print $1 }')"
+grep -Fxq "normal_config_sha256=$legacy_normal_sha" "$accepted_receipt" ||
+  fail 'accepted record did not bind the unchanged legacy normal config'
+grep -Fxq "stock_config_sha256=$legacy_stock_sha" "$accepted_receipt" ||
+  fail 'accepted record did not bind the derived legacy stock config'
 
 # Accepted lifecycle ownership is a separate durable protocol.  It records the
 # exact retained bundle and a surgical stock-boot candidate, then uninstalls
