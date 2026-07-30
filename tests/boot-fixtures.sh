@@ -1367,6 +1367,8 @@ printf '%s\n' \
   '# hyperpixel2r-kms accepted candidate' \
   '# hyperpixel2r-kms accepted candidate' \
   '# hyperpixel2r-kms accepted candidate' \
+  '# hyperpixel2r-kms accepted candidate (historical note)' \
+  '# hyperpixel2r-kms accepted-candidate' \
   "dtoverlay=$overlay_file" \
   '# unrelated comment after accepted ownership' \
   'disable_overscan=1' \
@@ -1379,6 +1381,8 @@ printf '%s\n' \
   'dtoverlay=vc4-kms-v3d' \
   'dtparam=audio=on' \
   '[pi4]' \
+  '# hyperpixel2r-kms accepted candidate (historical note)' \
+  '# hyperpixel2r-kms accepted-candidate' \
   '# unrelated comment after accepted ownership' \
   'disable_overscan=1' \
   'dtoverlay=vc4-fkms-v3d' \
@@ -1392,6 +1396,8 @@ printf '%s\n' \
   'dtoverlay=vc4-kms-v3d' \
   'dtparam=audio=on' \
   '[pi4]' \
+  '# hyperpixel2r-kms accepted candidate (historical note)' \
+  '# hyperpixel2r-kms accepted-candidate' \
   '# unrelated comment after accepted ownership' \
   'disable_overscan=1' \
   'dtoverlay=vc4-fkms-v3d' \
@@ -1405,6 +1411,8 @@ printf '%s\n' \
   'dtoverlay=vc4-kms-v3d' \
   'dtparam=audio=on' \
   '[pi4]' \
+  '# hyperpixel2r-kms accepted candidate (historical note)' \
+  '# hyperpixel2r-kms accepted-candidate' \
   '# unrelated comment after accepted ownership' \
   'disable_overscan=1' \
   'dtoverlay=vc4-fkms-v3d' \

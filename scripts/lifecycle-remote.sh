@@ -897,12 +897,13 @@ validate_overlay_declarations() {
   case "$output" in "$workspace"/*) ;; *) return 1 ;; esac
   assert_owned_regular "$output" 600 || return
 
-  sudo awk -v wanted="$replacement" '
+  sudo awk -v wanted="$replacement" -v marker="# hyperpixel2r-kms accepted candidate" '
     {
       line=$0
       trim=line
       sub(/^[[:space:]]+/, "", trim)
       sub(/[[:space:]]+$/, "", trim)
+      if (trim == marker) next
       if (trim ~ /^dtoverlay=/) {
         raw=substr(trim, 11)
         if (raw !~ /^[A-Za-z0-9._+-]+(,[A-Za-z0-9._+=:-]+)*$/) bad=1
@@ -2934,12 +2935,12 @@ write_surgical_stock_config() {
       sub(/^[[:space:]]+/, "", trim)
       sub(/[[:space:]]+$/, "", trim)
       if (trim == wanted) { selected++; next }
-      if (trim == "# hyperpixel2r-kms accepted candidate") { comments++; next }
+      if (trim == "# hyperpixel2r-kms accepted candidate") next
       if (trim ~ /^dtoverlay=/ && trim ~ /hyperpixel2r/) foreign++
       print line
     }
     END {
-      if (selected != 1 || foreign != 0 || comments > 1) exit 1
+      if (selected != 1 || foreign != 0) exit 1
     }
   ' "$input" | sudo tee "$output" >/dev/null || return
   assert_private_workspace "$workspace" || return
@@ -2993,6 +2994,7 @@ record_accepted() {
   assert_owned_regular "$normal_config" boot || die 'accepted normal boot config is unsafe'
 
   workspace="$(new_transaction_workspace)" || die 'failed to create acceptance workspace'
+  accepted_workspace="$workspace"
   normal_snapshot="$(privileged_snapshot "$normal_config" "$workspace" accepted-normal)" ||
     die 'failed to snapshot accepted normal config'
   stock="$(private_file "$workspace" accepted-stock)" || die 'failed to allocate stock config'
@@ -3023,6 +3025,7 @@ record_accepted() {
   atomic_copy "$receipt" "$accepted_state" 600 "$receipt_sha" ||
     die 'failed to publish accepted state'
   remove_transaction_workspace "$workspace" || die 'failed to remove acceptance workspace'
+  accepted_workspace=''
   sudo sync
   assert_accepted_state || die 'published accepted state failed validation'
   printf 'accepted %s\n' "$revision"
