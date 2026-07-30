@@ -310,6 +310,7 @@ git -C "$fixture" add .
 git -C "$fixture" commit -q --no-gpg-sign -m 'release fixture'
 source_revision="$(git -C "$fixture" rev-parse HEAD)"
 source_tree="$(git -C "$fixture" rev-parse 'HEAD^{tree}')"
+canonical_release="$(tr -d '\n' < "$fixture/release/current-release.txt")"
 release='6.18.34+rpt-rpi-v8'
 artifact_dir="$fixture/dist/artifacts/$release"
 target_dir="$fixture/dist/kernel-target/$release"
@@ -562,7 +563,7 @@ if "DO NOT MATCH THE HASHES" not in (result.stdout + result.stderr):
     raise SystemExit("tampered validator lock did not fail in pip hash-checking mode")
 PY
 
-"$fixture/scripts/validate-release-tag.sh" "v0.1.0-rc.19" "$source_revision"
+"$fixture/scripts/validate-release-tag.sh" "$canonical_release" "$source_revision"
 if "$fixture/scripts/validate-release-tag.sh" "v0.1.0-rc.18" "$source_revision"; then
   printf 'release tag validator accepted a tag that mismatches the canonical source release\n' >&2
   exit 1
@@ -612,7 +613,7 @@ printf 'v0.1.0-rc.18\n' > "$fixture/release/current-release.txt"
 git -C "$fixture" add release/current-release.txt
 git -C "$fixture" commit -q --no-gpg-sign -m 'distinct selected release marker fixture'
 rc18_source_revision="$(git -C "$fixture" rev-parse HEAD)"
-"$fixture/scripts/validate-release-tag.sh" "v0.1.0-rc.19" "$source_revision"
+"$fixture/scripts/validate-release-tag.sh" "$canonical_release" "$source_revision"
 "$fixture/scripts/validate-release-tag.sh" "v0.1.0-rc.18" "$rc18_source_revision"
 git -C "$fixture" switch -q --detach "$source_revision"
 
@@ -648,9 +649,9 @@ binding_output="$temporary_dir/source-ref-binding"
   --output "$binding_output"
 jq -e --arg commit "$checked_out_source" '.source.commit == $commit' \
   "$binding_output/driver-manifest.json" >/dev/null
-"$fixture/scripts/validate-release-tag.sh" "v0.1.0-rc.19" "$checked_out_source"
-git -C "$fixture" tag --annotate v0.1.0-rc.19 "$checked_out_source" --message 'source-ref binding fixture'
-test "$(git -C "$fixture" rev-parse 'v0.1.0-rc.19^{}')" = "$checked_out_source"
+"$fixture/scripts/validate-release-tag.sh" "$canonical_release" "$checked_out_source"
+git -C "$fixture" tag --annotate "$canonical_release" "$checked_out_source" --message 'source-ref binding fixture'
+test "$(git -C "$fixture" rev-parse "$canonical_release^{}")" = "$checked_out_source"
 
 archive_tar="$temporary_dir/source.tar"
 zstd -q -d -c "$first_output/hyperpixel2r-kms-source.tar.zst" > "$archive_tar"
