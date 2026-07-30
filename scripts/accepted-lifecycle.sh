@@ -39,7 +39,7 @@ done
 : "${target:?set HP2R_TARGET or pass --target}"
 hp2r_validate_target "$target"
 case "$action" in
-  record|stage-retained|uninstall|retire-inactive|prepare-new)
+  record|recover-record|stage-retained|uninstall|retire-inactive|prepare-new)
     [[ "$driver_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 64
     [[ "$source_revision" =~ ^[0-9a-f]{40}$ ]] || exit 64
     hp2r_validate_release "$kernel_release"
@@ -82,6 +82,10 @@ case "$action" in
   record)
     ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" \
       record-accepted "$driver_version" "$source_revision" "$kernel_release"
+    ;;
+  recover-record)
+    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" \
+      recover-accepted-record "$driver_version" "$source_revision" "$kernel_release"
     ;;
   prepare-new)
     ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" \

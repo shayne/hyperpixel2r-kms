@@ -358,7 +358,11 @@ if test "${1-}" = uname && test "${2-}" = -r; then
   exit
 fi
 if test "${1-}" = mktemp && test "${2-}" = -d; then
-  path=/tmp/hp2r-tryboot-stage.fixture
+  if test "${HP2R_FIXTURE_ACCEPTED_CONTROLLER:-}" = 1; then
+    path=/tmp/hp2r-accepted.fixture
+  else
+    path=/tmp/hp2r-tryboot-stage.fixture
+  fi
   mkdir -p "$HP2R_FIXTURE_ROOT$path"
   chown 65534:65534 "$HP2R_FIXTURE_ROOT$path"
   chmod 0700 "$HP2R_FIXTURE_ROOT$path"
@@ -385,9 +389,12 @@ if test "${1-}" = bash && test "${2-}" = -s; then
     bash -c 'id -u > "$HP2R_FIXTURE_ROOT/tmp/remote-uid"; exec bash "$@"' bash "$@"
   exit
 fi
-if test "${1-}" = bash && [[ "${2-}" == /tmp/hp2r-tryboot-stage.*/* ]]; then
+if test "${1-}" = bash && { [[ "${2-}" == /tmp/hp2r-tryboot-stage.*/* ]] || [[ "${2-}" == /tmp/hp2r-accepted.*/* ]]; }; then
   script="$HP2R_FIXTURE_ROOT$2"
   shift 2
+  if test "${HP2R_FIXTURE_ACCEPTED_CONTROLLER:-}" = 1; then
+    printf '%s\n' "$@" > "$HP2R_FIXTURE_ROOT/tmp/accepted-controller-remote-command"
+  fi
   setpriv --reuid=65534 --regid=65534 --clear-groups \
     env HP2R_INSTALL_ROOT="$HP2R_FIXTURE_ROOT" PATH="$PATH" \
     bash -c 'id -u > "$HP2R_FIXTURE_ROOT/tmp/remote-uid"; exec bash "$@"' bash "$script" "$@"
@@ -414,7 +421,10 @@ while test "${1-}" = -o; do shift 2; done
 while [[ "${1-}" == -* ]]; do shift; done
 source="$1"
 destination="${2#*:}"
-case "$destination" in /tmp/hp2r-tryboot-stage.*/*) ;; *) exit 64 ;; esac
+case "$destination" in
+  /tmp/hp2r-tryboot-stage.*/*|/tmp/hp2r-accepted.*/*) ;;
+  *) exit 64 ;;
+esac
 mkdir -p "$HP2R_FIXTURE_ROOT$destination"
 cp -RP "${source%/.}/." "$HP2R_FIXTURE_ROOT$destination"
 chown -R 65534:65534 "$HP2R_FIXTURE_ROOT$destination"
@@ -715,6 +725,9 @@ SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
 "$(dirname "$0")/fixture-record-fault" sync
+if test "${HP2R_FIXTURE_RECOVER_SYNC:-}" = 1; then
+  : > "$HP2R_FIXTURE_ROOT/tmp/recover-record-sync"
+fi
 exec /usr/bin/sync "$@"
 SCRIPT
 
@@ -933,6 +946,176 @@ run_accepted_remote() {
     HP2R_INSTALL_ROOT="$root" \
     HP2R_FIXTURE_LOG="$log" \
     bash "$repo_root/scripts/lifecycle-remote.sh" "$@"
+}
+
+run_accepted_controller() {
+  PATH="$bin:$PATH" \
+    HP2R_FIXTURE_ROOT="$root" \
+    HP2R_FIXTURE_RELEASE="$release" \
+    HP2R_FIXTURE_LOG="$log" \
+    HP2R_FIXTURE_REPO_ROOT="$repo_root" \
+    HP2R_FIXTURE_ACCEPTED_CONTROLLER=1 \
+    HP2R_TARGET=pi@fixture \
+    "$repo_root/scripts/accepted-lifecycle.sh" \
+      --action recover-record \
+      --driver-version 0.1.0 \
+      --source-revision "$source_revision" \
+      --kernel-release "$release"
+}
+
+prepare_recoverable_record_orphan() {
+  local state_dir="$root/var/lib/hyperpixel2r-kms"
+  local workspace_suffix=WorkspaceFixture
+  local normal_suffix=SnapshotFixture
+
+  # Derive the stock leaf through the existing recorder, then discard its
+  # published receipt.  This leaves the exact two snapshots created by the
+  # historical post-allocation cleanup defect, without relying on a hand-coded
+  # approximation of stock derivation.
+  prepare_record_failure_target
+  run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" >/dev/null
+  recover_derived_stock="$fixture/recover-derived-stock"
+  cp "$state_dir/accepted-stock-config.txt" "$recover_derived_stock"
+  rm -f -- "$state_dir/accepted-state" "$state_dir/accepted-stock-config.txt"
+  recover_workspace="$state_dir/.hp2r-transaction.$workspace_suffix"
+  mkdir "$recover_workspace"
+  recover_normal_snapshot="$recover_workspace/.hp2r-accepted-normal.$normal_suffix"
+  cp "$root/boot/firmware/config.txt" "$recover_normal_snapshot"
+  cp "$recover_derived_stock" "$recover_workspace/accepted-stock"
+  chown root:root "$recover_workspace" "$recover_normal_snapshot" \
+    "$recover_workspace/accepted-stock"
+  chmod 0700 "$recover_workspace"
+  chmod 0600 "$recover_normal_snapshot" "$recover_workspace/accepted-stock"
+  printf 'unrelated lifecycle state\n' > "$state_dir/recovery-unrelated-state"
+  chown root:root "$state_dir/recovery-unrelated-state"
+  chmod 0600 "$state_dir/recovery-unrelated-state"
+  mkdir -p "$root/opt"
+  printf 'unrelated installed state\n' > "$root/opt/recovery-unrelated-target"
+  chown root:root "$root/opt" "$root/opt/recovery-unrelated-target"
+  chmod 0755 "$root/opt"
+  chmod 0644 "$root/opt/recovery-unrelated-target"
+  assert_exact_recoverable_record_orphan
+}
+
+assert_exact_recoverable_record_orphan() {
+  local normal_snapshot="$recover_normal_snapshot"
+  local stock_snapshot="$recover_workspace/accepted-stock"
+  local leaf_count
+  local workspace_count
+  local workspace_suffix="${recover_workspace##*.}"
+  local normal_suffix="${normal_snapshot##*.}"
+
+  [[ "$workspace_suffix" =~ ^[A-Za-z0-9]+$ ]] ||
+    fail 'recoverable record workspace suffix is unsafe'
+  [[ "$normal_suffix" =~ ^[A-Za-z0-9]+$ ]] ||
+    fail 'recoverable normal snapshot suffix is unsafe'
+  test "$workspace_suffix" != "$normal_suffix" ||
+    fail 'recoverable fixture coupled independent mktemp suffixes'
+  test "$(stat -c '%U:%G:%a' "$recover_workspace")" = root:root:700 ||
+    fail 'recoverable record workspace ownership or mode is wrong'
+  assert_file "$normal_snapshot"
+  assert_file "$stock_snapshot"
+  test "$(stat -c '%U:%G:%a' "$normal_snapshot")" = root:root:600 ||
+    fail 'recoverable normal snapshot ownership or mode is wrong'
+  test "$(stat -c '%U:%G:%a' "$stock_snapshot")" = root:root:600 ||
+    fail 'recoverable stock snapshot ownership or mode is wrong'
+  leaf_count="$(find "$recover_workspace" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')"
+  test "$leaf_count" = 2 || fail 'recoverable record workspace has unexpected leaves'
+  workspace_count="$(find "$(dirname "$recover_workspace")" -mindepth 1 -maxdepth 1 \
+    -name '.hp2r-transaction.*' -print | wc -l | tr -d ' ')"
+  test "$workspace_count" = 1 ||
+    fail 'recoverable record fixture has competing transaction workspaces'
+  cmp -s "$normal_snapshot" "$root/boot/firmware/config.txt" ||
+    fail 'recoverable normal snapshot is not the current normal config'
+  cmp -s "$stock_snapshot" "$recover_derived_stock" ||
+    fail 'recoverable stock snapshot is not freshly derived'
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-state"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-stock-config.txt"
+}
+
+capture_recovery_state() {
+  local archive="$1"
+  local state_dir="$root/var/lib/hyperpixel2r-kms"
+
+  # Snapshot every durable entry, but not the containing directory metadata:
+  # verifier-workspace allocation may legitimately change only that mtime.
+  (
+    cd "$state_dir"
+    find . -mindepth 1 -maxdepth 1 -print0 |
+      sort -z |
+      tar --numeric-owner --null -T - -cf "$archive"
+  )
+}
+
+capture_recovery_target() {
+  local archive="$1"
+  local state_relative=var/lib/hyperpixel2r-kms
+
+  # The remote action must reject before touching normal boot state, the
+  # manifest-bound artifact, installed module, or installed overlay.  Exclude
+  # only fixture instrumentation and the state-directory inode itself, then
+  # append every durable state entry with metadata and bytes.
+  tar --numeric-owner --sort=name \
+    --exclude='./tmp' \
+    --exclude="./$state_relative" \
+    -C "$root" -cf "$archive" .
+  (
+    cd "$root"
+    find "./$state_relative" -mindepth 1 -maxdepth 1 -print0 |
+      sort -z |
+      tar --numeric-owner --null -T - -rf "$archive"
+  )
+}
+
+capture_recovery_preserved_target() {
+  local archive="$1"
+  local state_relative=var/lib/hyperpixel2r-kms
+
+  # A successful recovery may remove only the validated transaction
+  # workspace.  Preserve and compare every other target byte and metadata bit,
+  # including unrelated fixed-state-directory and installed-target sentinels.
+  # Exclude the state directory itself because removing its child necessarily
+  # changes the directory mtime, then append every non-workspace entry.
+  tar --numeric-owner --sort=name \
+    --exclude='./tmp' \
+    --exclude="./$state_relative" \
+    -C "$root" -cf "$archive" .
+  (
+    cd "$root"
+    find "./$state_relative" -mindepth 1 -maxdepth 1 \
+      ! -name '.hp2r-transaction.*' -print0 |
+      sort -z |
+      tar --numeric-owner --null -T - -rf "$archive"
+  )
+}
+
+assert_recovery_rejection_preserves_state() {
+  local label="$1"
+  local version="${2:-0.1.0}"
+  local revision="${3:-$source_revision}"
+  local kernel="${4:-$release}"
+  local before="$fixture/recover-record-$label-before.tar"
+  local after="$fixture/recover-record-$label-after.tar"
+  local target_before="$fixture/recover-record-$label-target-before.tar"
+  local target_after="$fixture/recover-record-$label-target-after.tar"
+
+  capture_recovery_state "$before"
+  capture_recovery_target "$target_before"
+  if run_accepted_remote recover-accepted-record "$version" "$revision" "$kernel" \
+    >"$fixture/recover-record-$label.out" 2>&1; then
+    fail "recover-record accepted hostile state: $label"
+  fi
+  capture_recovery_state "$after"
+  cmp -s "$before" "$after" ||
+    fail "recover-record mutated workspace or state after rejecting $label"
+  capture_recovery_target "$target_after"
+  cmp -s "$target_before" "$target_after" ||
+    fail "recover-record mutated installed state after rejecting $label"
+}
+
+assert_recovery_no_receipt() {
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-state"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-stock-config.txt"
 }
 
 install_live_hardware() {
@@ -1458,6 +1641,243 @@ grep -Fxq "normal_config_sha256=$legacy_normal_sha" "$accepted_receipt" ||
   fail 'accepted record did not bind the unchanged legacy normal config'
 grep -Fxq "stock_config_sha256=$legacy_stock_sha" "$accepted_receipt" ||
   fail 'accepted record did not bind the derived legacy stock config'
+
+# The public controller must accept exactly the recovery identity and forward
+# it untouched.  The target implementation is intentionally absent in this
+# RED task, so controller forwarding itself still returns nonzero here.
+new_target
+if run_accepted_controller >"$fixture/recover-record-controller.out" 2>&1; then
+  fail 'recover-record controller unexpectedly completed without a remote recovery implementation'
+fi
+controller_command="$fixture/recover-record-controller-command"
+printf '%s\n' recover-accepted-record 0.1.0 "$source_revision" "$release" > "$controller_command"
+cmp -s "$controller_command" "$root/tmp/accepted-controller-remote-command" ||
+  fail 'recover-record controller did not forward the exact remote command'
+
+# Reconstruct the one live-shaped legacy orphan: exact installed tuple and
+# normal boot, no durable lifecycle authority, and only the two root-private
+# recorder snapshots.  A valid recovery must remove only that workspace, sync,
+# and never publish an accepted receipt.
+prepare_recoverable_record_orphan
+recover_success_before="$fixture/recover-record-success-preserved-before.tar"
+recover_success_after="$fixture/recover-record-success-preserved-after.tar"
+capture_recovery_preserved_target "$recover_success_before"
+if ! HP2R_FIXTURE_RECOVER_SYNC=1 \
+  run_accepted_remote recover-accepted-record 0.1.0 "$source_revision" "$release" \
+    >"$fixture/recover-record-exact.out" 2>&1; then
+  grep -Fq 'usage: lifecycle-remote.sh' "$fixture/recover-record-exact.out" || {
+    cat "$fixture/recover-record-exact.out" >&2
+    fail 'recover-record exact fixture failed before the missing remote action'
+  }
+  cat "$fixture/recover-record-exact.out" >&2
+  fail 'recover-record remote action is intentionally unimplemented'
+fi
+assert_absent "$recover_workspace"
+assert_no_private_workspaces
+assert_recovery_no_receipt
+assert_file "$root/tmp/recover-record-sync"
+capture_recovery_preserved_target "$recover_success_after"
+cmp -s "$recover_success_before" "$recover_success_after" ||
+  fail 'recover-record success broadly mutated unrelated target state'
+
+# Once the exact workspace is gone, a repeat is a verified no-op: no receipt,
+# no fresh workspace, and no broad state cleanup.
+recover_noop_before="$fixture/recover-record-noop-before.tar"
+recover_noop_after="$fixture/recover-record-noop-after.tar"
+capture_recovery_target "$recover_noop_before"
+run_accepted_remote recover-accepted-record 0.1.0 "$source_revision" "$release" >/dev/null
+assert_no_private_workspaces
+assert_recovery_no_receipt
+capture_recovery_target "$recover_noop_after"
+cmp -s "$recover_noop_before" "$recover_noop_after" ||
+  fail 'recover-record idempotent replay mutated target state'
+
+# A process interruption on either side of removal is replay-safe.  Before
+# removal the exact orphan survives for a later recovery; after removal the
+# same rerun is the verified no-op above.
+for recover_boundary in recover-record-before-removal recover-record-after-removal; do
+  prepare_recoverable_record_orphan
+  recover_interrupt_full_before="$fixture/$recover_boundary-full-before.tar"
+  recover_interrupt_full_after="$fixture/$recover_boundary-full-after.tar"
+  recover_interrupt_preserved_before="$fixture/$recover_boundary-preserved-before.tar"
+  recover_interrupt_preserved_after="$fixture/$recover_boundary-preserved-after.tar"
+  recover_interrupt_replay_before="$fixture/$recover_boundary-replay-before.tar"
+  recover_interrupt_replay_after="$fixture/$recover_boundary-replay-after.tar"
+  capture_recovery_target "$recover_interrupt_full_before"
+  capture_recovery_preserved_target "$recover_interrupt_preserved_before"
+  recover_status=0
+  if HP2R_FIXTURE_INTERRUPT_AFTER="$recover_boundary" \
+    run_accepted_remote recover-accepted-record 0.1.0 "$source_revision" "$release" \
+      >"$fixture/$recover_boundary.out" 2>&1; then
+    fail "recover-record ignored interruption at $recover_boundary"
+  else
+    recover_status=$?
+  fi
+  test "$recover_status" = 97 ||
+    fail "recover-record interruption at $recover_boundary returned $recover_status"
+  case "$recover_boundary" in
+    recover-record-before-removal)
+      assert_exact_recoverable_record_orphan
+      capture_recovery_target "$recover_interrupt_full_after"
+      cmp -s "$recover_interrupt_full_before" "$recover_interrupt_full_after" ||
+        fail 'recover-record pre-removal interruption mutated target state'
+      ;;
+    recover-record-after-removal)
+      assert_absent "$recover_workspace"
+      assert_no_private_workspaces
+      capture_recovery_preserved_target "$recover_interrupt_preserved_after"
+      cmp -s "$recover_interrupt_preserved_before" "$recover_interrupt_preserved_after" ||
+        fail 'recover-record post-removal interruption broadly mutated target state'
+      capture_recovery_target "$recover_interrupt_replay_before"
+      ;;
+  esac
+  run_accepted_remote recover-accepted-record 0.1.0 "$source_revision" "$release" >/dev/null
+  assert_no_private_workspaces
+  assert_recovery_no_receipt
+  capture_recovery_preserved_target "$recover_interrupt_preserved_after"
+  cmp -s "$recover_interrupt_preserved_before" "$recover_interrupt_preserved_after" ||
+    fail "recover-record replay after $recover_boundary broadly mutated target state"
+  if test "$recover_boundary" = recover-record-after-removal; then
+    capture_recovery_target "$recover_interrupt_replay_after"
+    cmp -s "$recover_interrupt_replay_before" "$recover_interrupt_replay_after" ||
+      fail 'recover-record post-removal no-op replay mutated target state'
+  fi
+done
+
+# Any existing lifecycle authority makes the orphan ambiguous.  Every reject
+# preserves the complete state-directory archive byte-for-byte, including the
+# orphan leaves, and cannot publish an accepted receipt.
+for recovery_authority in \
+  tryboot-state rollback-state rollback-candidate-dkms-state \
+  rollback-candidate-tryboot accepted-state accepted-stock-config.txt \
+  accepted-transition accepted-transition-prior-config.txt accepted-uninstall \
+  accepted-uninstall-stock.txt
+do
+  prepare_recoverable_record_orphan
+  printf 'conflicting recovery authority\n' > "$root/var/lib/hyperpixel2r-kms/$recovery_authority"
+  assert_recovery_rejection_preserves_state "authority-$recovery_authority"
+done
+prepare_recoverable_record_orphan
+second_workspace="$root/var/lib/hyperpixel2r-kms/.hp2r-transaction.SecondWorkspace"
+second_normal="$second_workspace/.hp2r-accepted-normal.SecondSnapshot"
+mkdir "$second_workspace"
+cp "$root/boot/firmware/config.txt" "$second_normal"
+cp "$recover_derived_stock" "$second_workspace/accepted-stock"
+chown root:root "$second_workspace" "$second_normal" "$second_workspace/accepted-stock"
+chmod 0700 "$second_workspace"
+chmod 0600 "$second_normal" "$second_workspace/accepted-stock"
+assert_recovery_rejection_preserves_state authority-multiple-workspaces
+
+# Hostile workspaces and leaves must be rejected independently.  The saved
+# state archive proves both the original orphan and every hostile leaf remain
+# byte-identical after each nonzero result.
+for hostile_workspace in \
+  unsafe-suffix symlink-workspace workspace-owner workspace-mode nondirectory \
+  extra-leaf missing-leaf symlink-leaf leaf-owner leaf-mode leaf-type \
+  multiple-normal changed-normal changed-stock
+do
+  prepare_recoverable_record_orphan
+  case "$hostile_workspace" in
+    unsafe-suffix)
+      recover_workspace="$root/var/lib/hyperpixel2r-kms/.hp2r-transaction.unsafe-suffix"
+      mv "$root/var/lib/hyperpixel2r-kms/.hp2r-transaction.WorkspaceFixture" "$recover_workspace"
+      ;;
+    symlink-workspace)
+      symlink_workspace_target="$root/recovery-symlink-workspace-target"
+      symlink_workspace_normal="$symlink_workspace_target/.hp2r-accepted-normal.SymlinkSnapshot"
+      mkdir "$symlink_workspace_target"
+      cp "$root/boot/firmware/config.txt" "$symlink_workspace_normal"
+      cp "$recover_derived_stock" "$symlink_workspace_target/accepted-stock"
+      chown root:root "$symlink_workspace_target" "$symlink_workspace_normal" \
+        "$symlink_workspace_target/accepted-stock"
+      chmod 0700 "$symlink_workspace_target"
+      chmod 0600 "$symlink_workspace_normal" "$symlink_workspace_target/accepted-stock"
+      rm -rf -- "$recover_workspace"
+      ln -s "$symlink_workspace_target" "$recover_workspace"
+      ;;
+    workspace-owner) chown 65534:65534 "$recover_workspace" ;;
+    workspace-mode) chmod 0755 "$recover_workspace" ;;
+    nondirectory)
+      rm -rf -- "$recover_workspace"
+      printf 'not a workspace\n' > "$recover_workspace"
+      chown root:root "$recover_workspace"
+      chmod 0700 "$recover_workspace"
+      ;;
+    extra-leaf)
+      printf 'unexpected\n' > "$recover_workspace/unexpected-leaf"
+      chown root:root "$recover_workspace/unexpected-leaf"
+      chmod 0600 "$recover_workspace/unexpected-leaf"
+      ;;
+    missing-leaf) rm -f -- "$recover_workspace/accepted-stock" ;;
+    symlink-leaf)
+      symlink_leaf_target="$root/recovery-symlink-leaf-target"
+      cp "$recover_derived_stock" "$symlink_leaf_target"
+      chown root:root "$symlink_leaf_target"
+      chmod 0600 "$symlink_leaf_target"
+      rm -f -- "$recover_workspace/accepted-stock"
+      ln -s "$symlink_leaf_target" "$recover_workspace/accepted-stock"
+      ;;
+    leaf-owner) chown 65534:65534 "$recover_workspace/accepted-stock" ;;
+    leaf-mode) chmod 0644 "$recover_workspace/accepted-stock" ;;
+    leaf-type)
+      rm -f -- "$recover_workspace/accepted-stock"
+      mkdir "$recover_workspace/accepted-stock"
+      chown root:root "$recover_workspace/accepted-stock"
+      chmod 0600 "$recover_workspace/accepted-stock"
+      ;;
+    multiple-normal)
+      cp "$recover_normal_snapshot" \
+        "$recover_workspace/.hp2r-accepted-normal.SecondFixture"
+      chown root:root "$recover_workspace/.hp2r-accepted-normal.SecondFixture"
+      chmod 0600 "$recover_workspace/.hp2r-accepted-normal.SecondFixture"
+      ;;
+    changed-normal) printf 'snapshot drift\n' >> "$recover_normal_snapshot" ;;
+    changed-stock) printf 'stock drift\n' >> "$recover_workspace/accepted-stock" ;;
+  esac
+  assert_recovery_rejection_preserves_state "hostile-$hostile_workspace"
+done
+
+# The recovery request remains bound to the exact installed tuple.  Each
+# independent artifact, installed-leaf, and normal-config drift must leave the
+# old private workspace untouched.
+prepare_recoverable_record_orphan
+assert_recovery_rejection_preserves_state tuple-version 0.1.1
+prepare_recoverable_record_orphan
+assert_recovery_rejection_preserves_state tuple-revision 0.1.0 \
+  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+prepare_recoverable_record_orphan
+assert_recovery_rejection_preserves_state tuple-release 0.1.0 "$source_revision" \
+  6.18.35+rpt-rpi-v8
+
+for installed_drift in artifact-tree manifest module-bytes module-path overlay-bytes overlay-path normal-config exact-overlay foreign-overlay; do
+  prepare_recoverable_record_orphan
+  artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+  module="$root/lib/modules/$release/extra/hyperpixel2r_kms.ko"
+  overlay="$root/boot/firmware/overlays/$overlay_file"
+  case "$installed_drift" in
+    artifact-tree) mv "$artifact" "$artifact.moved" ;;
+    manifest) printf 'manifest drift\n' >> "$artifact/manifest.txt" ;;
+    module-bytes) printf 'module drift\n' >> "$module" ;;
+    module-path) mv "$module" "$module.moved" ;;
+    overlay-bytes) printf 'overlay drift\n' >> "$overlay" ;;
+    overlay-path) mv "$overlay" "$overlay.moved" ;;
+    normal-config) printf '# normal drift\n' >> "$root/boot/firmware/config.txt" ;;
+    exact-overlay)
+      sed -i "s/^dtoverlay=$overlay_file$/dtoverlay=vc4-kms-v3d/" \
+        "$root/boot/firmware/config.txt"
+      cp "$root/boot/firmware/config.txt" "$recover_normal_snapshot"
+      chown root:root "$recover_normal_snapshot"
+      chmod 0600 "$recover_normal_snapshot"
+      ;;
+    foreign-overlay)
+      printf 'dtoverlay=hyperpixel2r-kms-ffffffffffff.dtbo\n' >> "$root/boot/firmware/config.txt"
+      cp "$root/boot/firmware/config.txt" "$recover_normal_snapshot"
+      chown root:root "$recover_normal_snapshot"
+      chmod 0600 "$recover_normal_snapshot"
+      ;;
+  esac
+  assert_recovery_rejection_preserves_state "installed-$installed_drift"
+done
 
 # Accepted lifecycle ownership is a separate durable protocol.  It records the
 # exact retained bundle and a surgical stock-boot candidate, then uninstalls
