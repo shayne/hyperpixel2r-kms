@@ -121,7 +121,6 @@ jobs:
             test -n "$digest" && test -n "$name"
             gh attestation verify "$downloads/$name" \
               --repo shayne/hyperpixel2r-kms \
-              --signer-repo shayne/hyperpixel2r-kms \
               --signer-workflow shayne/hyperpixel2r-kms/.github/workflows/stable-draft.yml \
               --source-ref refs/heads/main \
               --source-digest "$SOURCE_COMMIT" \
@@ -129,7 +128,6 @@ jobs:
           done < "$downloads/SHA256SUMS"
           gh attestation verify "$downloads/hyperpixel2r-kms-source.tar.zst" \
             --repo shayne/hyperpixel2r-kms \
-            --signer-repo shayne/hyperpixel2r-kms \
             --signer-workflow shayne/hyperpixel2r-kms/.github/workflows/stable-draft.yml \
             --source-ref refs/heads/main \
             --source-digest "$SOURCE_COMMIT" \

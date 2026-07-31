@@ -207,7 +207,7 @@ if stable_promote.is_file():
         "scripts/stable_release.py publish",
         "scripts/stable_release.py confirm",
         '--result "$RUNNER_TEMP/stable-publication.json"',
-        "--signer-repo shayne/hyperpixel2r-kms",
+        "--repo shayne/hyperpixel2r-kms",
         "--signer-workflow shayne/hyperpixel2r-kms/.github/workflows/stable-draft.yml",
         "--source-ref refs/heads/main",
         "--deny-self-hosted-runners",
@@ -216,6 +216,8 @@ if stable_promote.is_file():
     ):
         if required not in workflow:
             failures.append(f"stable promotion workflow contract is missing: {required}")
+    if "--signer-repo " in workflow:
+        failures.append("stable promotion must not combine mutually exclusive signer selectors")
     forbidden = (
         "package-release",
         "build-driver",
