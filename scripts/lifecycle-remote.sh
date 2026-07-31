@@ -1716,7 +1716,7 @@ stage() {
   module_file="$6"
   overlay_file="$7"
   applied_dtb_file="$8"
-  replacement="$9"
+  replacement="${9-}"
   incoming="${root}${incoming_logical}"
   artifact_dir="$artifact_root/$driver_version/$revision/$release"
   module_path="${root}/lib/modules/$release/extra/$module_file"

@@ -413,6 +413,13 @@ fi
 if test "${1-}" = bash && { [[ "${2-}" == /tmp/hp2r-tryboot-stage.*/* ]] || [[ "${2-}" == /tmp/hp2r-accepted.*/* ]]; }; then
   script="$HP2R_FIXTURE_ROOT$2"
   shift 2
+  if test "${HP2R_FIXTURE_DROP_EMPTY_SSH_ARGS:-}" = 1; then
+    filtered=()
+    for argument in "$@"; do
+      test -z "$argument" || filtered+=("$argument")
+    done
+    set -- "${filtered[@]}"
+  fi
   if test "${HP2R_FIXTURE_ACCEPTED_CONTROLLER:-}" = 1; then
     printf '%s\n' "$@" > "$HP2R_FIXTURE_ROOT/tmp/accepted-controller-remote-command"
   fi
@@ -940,7 +947,7 @@ run_stage() {
   local fixture_release="${HP2R_FIXTURE_RELEASE_OVERRIDE:-$release}"
   local fixture_artifact="${HP2R_FIXTURE_ARTIFACT_DIR_OVERRIDE:-$repo_root/dist/artifacts/$release}"
   local fixture_source_root="${HP2R_FIXTURE_SOURCE_ROOT_OVERRIDE:-$repo_root}"
-  local fixture_replace_overlay="${HP2R_FIXTURE_REPLACE_OVERLAY:-vc4-kms-dpi-hyperpixel2r}"
+  local fixture_replace_overlay="${HP2R_FIXTURE_REPLACE_OVERLAY-vc4-kms-dpi-hyperpixel2r}"
   local result
 
   if PATH="$bin:$PATH" \
@@ -1594,6 +1601,21 @@ install_live_hardware
 if ! HP2R_FIXTURE_DROP_EMPTY_SSH_ARGS=1 run_verify >/dev/null; then
   fail 'verify lost optional empty expectations across the OpenSSH command boundary'
 fi
+
+# A stock normal config has no display overlay to replace.  Real OpenSSH
+# reconstructs the remote command through a shell and drops the trailing empty
+# replacement argument, so the remote stage interface must treat an absent
+# ninth argument as the intentional no-replacement case.
+new_target
+sed -i '/dtoverlay=vc4-kms-dpi-hyperpixel2r/d' \
+  "$root/boot/firmware/config.txt"
+if ! HP2R_FIXTURE_DROP_EMPTY_SSH_ARGS=1 \
+  HP2R_FIXTURE_REPLACE_OVERLAY='' run_stage >/dev/null; then
+  fail 'stage lost the empty replacement across the OpenSSH command boundary'
+fi
+assert_file "$root/boot/firmware/tryboot.txt"
+grep -Fqx "dtoverlay=$overlay_file" "$root/boot/firmware/tryboot.txt" ||
+  fail 'stage did not publish the generic overlay without a replacement'
 
 # Raspberry Pi firmware is normally VFAT with fmask=0022, so chmod 0644 still
 # reports mode 0755.  Publishing a boot artifact must accept that mount mode.
