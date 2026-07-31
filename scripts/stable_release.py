@@ -705,7 +705,8 @@ class GhGitBackend:
         self, release_id: int, name: str, path: pathlib.Path
     ) -> dict[str, Any]:
         endpoint = (
-            f"repos/{REPOSITORY}/releases/{release_id}/assets"
+            f"https://uploads.github.com/repos/{REPOSITORY}/releases/"
+            f"{release_id}/assets"
             f"?name={urllib.parse.quote(name, safe='')}"
         )
         return self._gh_json(

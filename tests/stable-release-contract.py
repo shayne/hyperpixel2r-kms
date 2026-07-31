@@ -35,6 +35,47 @@ assert (
 )
 
 
+def exercise_real_upload_endpoint_contract() -> None:
+    calls: list[list[str]] = []
+    original_run = stable_release.subprocess.run
+
+    def fake_run(
+        arguments: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess:
+        calls.append(arguments)
+        return subprocess.CompletedProcess(
+            arguments,
+            0,
+            stdout=(
+                b'{"id":100,"name":"SBOM.spdx.json","size":7,'
+                b'"digest":"sha256:'
+                + b"0" * 64
+                + b'"}'
+            ),
+        )
+
+    stable_release.subprocess.run = fake_run
+    try:
+        with tempfile.TemporaryDirectory(prefix="hp2r-upload-endpoint.") as temporary:
+            asset = pathlib.Path(temporary) / "SBOM.spdx.json"
+            asset.write_bytes(b"fixture")
+            stable_release.GhGitBackend().upload_asset(
+                42, "SBOM.spdx.json", asset
+            )
+    finally:
+        stable_release.subprocess.run = original_run
+
+    assert len(calls) == 1
+    arguments = calls[0]
+    assert (
+        "https://uploads.github.com/repos/shayne/hyperpixel2r-kms/"
+        "releases/42/assets?name=SBOM.spdx.json"
+    ) in arguments
+
+
+exercise_real_upload_endpoint_contract()
+
+
 class FakeBackend:
     def __init__(self) -> None:
         self.release: dict | None = None
