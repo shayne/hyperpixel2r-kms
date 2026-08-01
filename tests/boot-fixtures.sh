@@ -557,7 +557,9 @@ marker="$HP2R_FIXTURE_ROOT/var/lib/dkms/registered"
 if test "$module" = planeradar-hyperpixel2r; then
   marker="$HP2R_FIXTURE_ROOT/var/lib/dkms/registered-planeradar"
 fi
-if test "$version" != 0.1.1; then marker="$HP2R_FIXTURE_ROOT/var/lib/dkms/registered-$version"; fi
+if test "$module" = hyperpixel2r-kms && test "$version" != 0.1.1; then
+  marker="$HP2R_FIXTURE_ROOT/var/lib/dkms/registered-$version"
+fi
 kernel=''
 architecture=aarch64
 for ((index = 1; index <= $#; index++)); do
@@ -2080,7 +2082,7 @@ done
 # independent artifact, installed-leaf, and normal-config drift must leave the
 # old private workspace untouched.
 prepare_recoverable_record_orphan
-assert_recovery_rejection_preserves_state tuple-version 0.1.1
+assert_recovery_rejection_preserves_state tuple-version 0.1.2
 prepare_recoverable_record_orphan
 assert_recovery_rejection_preserves_state tuple-revision 0.1.1 \
   bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -2923,7 +2925,7 @@ grep -Eq '^dtoverlay=hyperpixel2r-kms-[0-9a-f]{12}\.dtbo$' "$root/boot/firmware/
 # a loaded module from another version cannot be promoted accidentally.
 new_target
 run_stage >/dev/null
-export HP2R_FIXTURE_LIVE_DRIVER_VERSION=0.1.1
+export HP2R_FIXTURE_LIVE_DRIVER_VERSION=0.1.2
 install_live_hardware
 if run_controller commit-boot.sh >/dev/null 2>&1; then
   fail 'commit accepted a live module version that differs from the candidate'
@@ -2952,7 +2954,7 @@ assert_file "$root/boot/firmware/tryboot.txt"
 # identity.  Rollback must fail before it moves state or removes a leaf.
 state_mutations=(
   'schema_version:1'
-  'driver_version:0.1.1'
+  'driver_version:0.1.2'
   'source_revision:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
   'source_tree:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
   'kernel_release:6.18.35+rpt-rpi-v8'
@@ -2976,7 +2978,7 @@ for mutation in "${state_mutations[@]}"; do
 done
 manifest_mutations=(
   'schema_version:2'
-  'driver_version:0.1.1'
+  'driver_version:0.1.2'
   'source_tree:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
   'kernel_release:6.18.35+rpt-rpi-v8'
   'module_file:foreign.ko'
