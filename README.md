@@ -1,17 +1,14 @@
 # HyperPixel 2 Round KMS driver
 
-This is a small, standalone DRM/KMS driver for one oddly specific piece of
-hardware: a HyperPixel 2.1 Round on a Raspberry Pi Zero 2 W. That specificity
-is not an accident. Display drivers are where a one-line configuration change
-can turn into an evening with a serial console, so the project chooses one
-known shape over a heroic compatibility matrix.
+This repository provides a standalone DRM/KMS driver for the Pimoroni
+HyperPixel 2.1 Round on a Raspberry Pi Zero 2 W. It is tested with 64-bit
+Raspberry Pi OS Lite Trixie and the exact kernel checks described below.
 
 <!-- HP2R_CURRENT_RELEASE=v0.1.1-rc.1 -->
 
-Stable release: `v0.1.0`. The next candidate is `v0.1.1-rc.1`. It adds a
-supervised staging mode for installers while leaving the normal one-shot
-tryboot workflow alone. The package can prove what it built, but it still
-cannot make every future Raspberry Pi kernel agree to run it.
+Stable release: [`v0.1.1`](https://github.com/shayne/hyperpixel2r-kms/releases/tag/v0.1.1).
+This source revision retains `v0.1.1-rc.1` as its canonical candidate marker
+for the release contract.
 
 ## Supported shape
 
@@ -62,21 +59,17 @@ mise run commit-boot
 An installer that owns reboot and reconnect may pass `--stage-only`. That
 publishes the same verified candidate and transaction state but keeps the Pi
 online, giving the installer time to save its own durable phase before it asks
-for the one tryboot reboot. People running the commands by hand should use the
-normal command above.
+for the one tryboot reboot. For manual operation, use the normal command above.
 
-The recovery story is deliberately boring: if a candidate cannot boot, the
-firmware clears tryboot and the next power cycle returns to the old boot path.
-Do not promote a candidate because it merely compiled. Compilers are very
-polite about helping you make a bad boot decision.
+If a candidate cannot boot, the firmware clears tryboot and the next power
+cycle returns to the previous boot path. A successful build is not sufficient
+for promotion; verify the display and touch hardware first.
 
 ## Exact kernels and DKMS
 
 Each release binds its source archive and any prebuilt bundle to a full source
 commit, source tree, architecture, and kernel release. A prebuilt module is
-accepted only when those facts, its vermagic, module metadata, overlay, and
-applied-DTB evidence agree. Anything less is how “close enough” becomes a
-display that is very close to not displaying.
+rejected when any of these values differ.
 
 The installed source supports DKMS for the normal Raspberry Pi OS maintenance
 path. DKMS is not a guarantee that an arbitrary future kernel or display stack
@@ -105,8 +98,8 @@ gh attestation verify hyperpixel2r-kms-source.tar.zst \
   --signer-workflow shayne/hyperpixel2r-kms/.github/workflows/release.yml
 ```
 
-The source archive is the durable fallback. An exact archive is a convenience,
-not a substitute for checking that the Pi in front of you still matches it.
+The source archive supports local exact-kernel builds. A module archive is
+valid only when its kernel facts match the target Pi.
 
 Stable releases have a stricter two-step path. The draft workflow verifies,
 packages, checksums, and attests the four release files, then creates an
@@ -116,7 +109,7 @@ again and checks its release ID, asset IDs, sizes, digests, manifest, SBOM,
 source identity, and attestations. Only then does it create the annotated tag
 and publish the same draft. Promotion does not build or upload anything.
 
-`v0.1.0` is the current stable release. The candidate named above is the next
+`v0.1.1` is the current stable release. The candidate named above is the next
 patch and stays a prerelease until its exact source and boot path pass the same
 hardware acceptance process.
 
@@ -137,6 +130,5 @@ mise run verify
 ```
 
 That runs the protocol, GPIO, build-contract, boot-lifecycle, and release
-contract tests. The release packager also runs two clean builds in CI so a
-different archive is treated as a failure to explain, not as a cute property of
-compression.
+contract tests. The release packager performs two clean builds in CI and rejects
+nondeterministic archives.
