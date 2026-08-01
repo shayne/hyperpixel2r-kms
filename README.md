@@ -6,13 +6,12 @@ is not an accident. Display drivers are where a one-line configuration change
 can turn into an evening with a serial console, so the project chooses one
 known shape over a heroic compatibility matrix.
 
-<!-- HP2R_CURRENT_RELEASE=v0.1.0-rc.22 -->
+<!-- HP2R_CURRENT_RELEASE=v0.1.1-rc.1 -->
 
-Current release: `v0.1.0-rc.22` is a release candidate. It has host-side build
-and boot-lifecycle checks, reproducible source packaging, and signed GitHub
-provenance. It is still a release candidate, which is a useful warning label:
-the package can prove what it built, but it cannot make every future Raspberry
-Pi kernel agree to run it.
+Stable release: `v0.1.0`. The next candidate is `v0.1.1-rc.1`. It adds a
+supervised staging mode for installers while leaving the normal one-shot
+tryboot workflow alone. The package can prove what it built, but it still
+cannot make every future Raspberry Pi kernel agree to run it.
 
 ## Supported shape
 
@@ -47,8 +46,9 @@ mise run stage-tryboot
 ```
 
 `stage-tryboot` changes the next boot only. It does not overwrite the known
-good boot configuration. Reboot the Pi once, then verify the candidate before
-making anything permanent:
+good boot configuration. The command requests that one-shot reboot itself;
+wait for SSH to return, then verify the candidate before making anything
+permanent:
 
 ```sh
 mise run verify-boot -- --json
@@ -58,6 +58,12 @@ mise run rollback-boot
 # Only after the candidate has been checked:
 mise run commit-boot
 ```
+
+An installer that owns reboot and reconnect may pass `--stage-only`. That
+publishes the same verified candidate and transaction state but keeps the Pi
+online, giving the installer time to save its own durable phase before it asks
+for the one tryboot reboot. People running the commands by hand should use the
+normal command above.
 
 The recovery story is deliberately boring: if a candidate cannot boot, the
 firmware clears tryboot and the next power cycle returns to the old boot path.
@@ -91,8 +97,8 @@ match the Pi in front of you. GitHub Actions creates provenance and SBOM
 attestations for the published payloads.
 
 ```sh
-gh release download v0.1.0-rc.22 -R shayne/hyperpixel2r-kms -D dist/v0.1.0-rc.22
-cd dist/v0.1.0-rc.22
+gh release download v0.1.1-rc.1 -R shayne/hyperpixel2r-kms -D dist/v0.1.1-rc.1
+cd dist/v0.1.1-rc.1
 sha256sum -c SHA256SUMS
 gh attestation verify hyperpixel2r-kms-source.tar.zst \
   -R shayne/hyperpixel2r-kms \
@@ -110,8 +116,9 @@ again and checks its release ID, asset IDs, sizes, digests, manifest, SBOM,
 source identity, and attestations. Only then does it create the annotated tag
 and publish the same draft. Promotion does not build or upload anything.
 
-There is no published stable release yet. The current public release remains
-the candidate named above.
+`v0.1.0` is the current stable release. The candidate named above is the next
+patch and stays a prerelease until its exact source and boot path pass the same
+hardware acceptance process.
 
 ## Provenance and license
 

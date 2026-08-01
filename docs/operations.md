@@ -20,10 +20,11 @@ mise run stage-tryboot
 committed source revision, then copies the verified module, overlay, complete
 manifest, and source tree to versioned driver-owned locations on the Pi. It
 snapshots normal config, writes a candidate `tryboot.txt`, saves any older
-`tryboot.txt`, and records a root-owned `0600` transaction state file. If any
-stage step fails, it restores the previous tryboot file and removes every new
-candidate leaf, source tree, DKMS registration, artifact, and state file.
-Normal boot config is never rewritten by a trial.
+`tryboot.txt`, records a root-owned `0600` transaction state file, and requests
+one one-shot tryboot reboot. If any stage step fails, it restores the previous
+tryboot file and removes every new candidate leaf, source tree, DKMS
+registration, artifact, and state file. Normal boot config is never rewritten
+by a trial.
 
 Before candidate publication, staging requires a root-owned non-symlink
 kernel-module directory chain and verifies that `depmod` selects the exact
@@ -40,7 +41,22 @@ matches. It never leaves both display overlays in the candidate.
 mise run stage-tryboot -- --replace-overlay existing-overlay-name
 ```
 
-After SSH returns, inspect the candidate with the machine-readable check:
+Supervising installers must separate staging from reboot so their own durable
+transaction record cannot lose a race with SSH disappearing. They can publish
+the verified candidate without rebooting:
+
+```sh
+mise run stage-tryboot -- --stage-only
+```
+
+That mode leaves the same root-owned driver transaction and `tryboot.txt` in
+place. It does not boot the candidate. The supervising installer must first
+persist its staged phase, then request exactly one `reboot '0 tryboot'`, wait
+for SSH to return, and continue with verification. The ordinary command still
+stages and requests the reboot itself.
+
+After the Pi reboots and SSH returns, inspect the candidate with the
+machine-readable check:
 
 ```sh
 mise run verify-boot -- --json

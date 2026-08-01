@@ -41,7 +41,7 @@ device, SDL KMSDRM backend, and OpenGL ES 2 renderer are present.
 
 ```sh
 mise run stage-tryboot
-# reboot the Pi once
+# stage-tryboot requests the one-shot reboot; wait for SSH to return
 mise run verify-boot -- --json
 mise run commit-boot
 ```

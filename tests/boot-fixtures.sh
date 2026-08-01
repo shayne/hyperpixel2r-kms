@@ -51,7 +51,7 @@ prepare_record_failure_target() {
   run_stage >/dev/null
   install_live_hardware
   run_controller commit-boot.sh >/dev/null
-  artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+  artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
   record_normal_before="$fixture/record-normal-before"
   record_artifact_before="$fixture/record-artifact-before"
   record_module_before="$(sha256sum "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko" | awk '{ print $1 }')"
@@ -62,7 +62,7 @@ prepare_record_failure_target() {
 }
 
 assert_record_target_unchanged() {
-  local artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+  local artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
 
   cmp -s "$record_normal_before" "$root/boot/firmware/config.txt" ||
     fail 'accepted record failure changed the normal config'
@@ -557,7 +557,7 @@ marker="$HP2R_FIXTURE_ROOT/var/lib/dkms/registered"
 if test "$module" = planeradar-hyperpixel2r; then
   marker="$HP2R_FIXTURE_ROOT/var/lib/dkms/registered-planeradar"
 fi
-if test "$version" != 0.1.0; then marker="$HP2R_FIXTURE_ROOT/var/lib/dkms/registered-$version"; fi
+if test "$version" != 0.1.1; then marker="$HP2R_FIXTURE_ROOT/var/lib/dkms/registered-$version"; fi
 kernel=''
 architecture=aarch64
 for ((index = 1; index <= $#; index++)); do
@@ -693,7 +693,7 @@ if test -n "${HP2R_INSTALL_ROOT:-}"; then
     esac
   fi
   case "${HP2R_FIXTURE_FAIL_MV:-}:$destination" in
-    artifact:"$HP2R_FIXTURE_ROOT"/usr/lib/hyperpixel2r-kms/*|dkms-new:"$HP2R_FIXTURE_ROOT"/usr/src/hyperpixel2r-kms-0.1.0|normal:"$HP2R_FIXTURE_ROOT"/boot/firmware/config.txt|tryboot:"$HP2R_FIXTURE_ROOT"/boot/firmware/tryboot.txt|stage-state:"$HP2R_FIXTURE_ROOT"/var/lib/hyperpixel2r-kms/tryboot-state|state:"$HP2R_FIXTURE_ROOT"/var/lib/hyperpixel2r-kms/.tryboot-state-hold.*|module-hold:"$HP2R_FIXTURE_ROOT"/lib/modules/*/extra/hyperpixel2r_kms.ko.hp2r-rollback-hold)
+    artifact:"$HP2R_FIXTURE_ROOT"/usr/lib/hyperpixel2r-kms/*|dkms-new:"$HP2R_FIXTURE_ROOT"/usr/src/hyperpixel2r-kms-0.1.1|normal:"$HP2R_FIXTURE_ROOT"/boot/firmware/config.txt|tryboot:"$HP2R_FIXTURE_ROOT"/boot/firmware/tryboot.txt|stage-state:"$HP2R_FIXTURE_ROOT"/var/lib/hyperpixel2r-kms/tryboot-state|state:"$HP2R_FIXTURE_ROOT"/var/lib/hyperpixel2r-kms/.tryboot-state-hold.*|module-hold:"$HP2R_FIXTURE_ROOT"/lib/modules/*/extra/hyperpixel2r_kms.ko.hp2r-rollback-hold)
       marker="$HP2R_FIXTURE_ROOT/tmp/mv-failed-${HP2R_FIXTURE_FAIL_MV}"
       if test ! -e "$marker"; then
         : > "$marker"
@@ -959,7 +959,8 @@ run_stage() {
     HP2R_TARGET=pi@fixture \
     "$repo_root/scripts/stage-tryboot.sh" \
       --artifact-dir "$fixture_artifact" \
-      --replace-overlay "$fixture_replace_overlay"; then
+      --replace-overlay "$fixture_replace_overlay" \
+      "$@"; then
     if test "${HP2R_FIXTURE_PRESERVE_MUTATIONS:-}" != 1; then
       assert_no_private_workspaces
     fi
@@ -1018,7 +1019,7 @@ run_accepted_controller() {
     HP2R_TARGET=pi@fixture \
     "$repo_root/scripts/accepted-lifecycle.sh" \
       --action recover-record \
-      --driver-version 0.1.0 \
+      --driver-version 0.1.1 \
       --source-revision "$source_revision" \
       --kernel-release "$release"
 }
@@ -1033,7 +1034,7 @@ prepare_recoverable_record_orphan() {
   # historical post-allocation cleanup defect, without relying on a hand-coded
   # approximation of stock derivation.
   prepare_record_failure_target
-  run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" >/dev/null
+  run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" >/dev/null
   recover_derived_stock="$fixture/recover-derived-stock"
   cp "$state_dir/accepted-stock-config.txt" "$recover_derived_stock"
   rm -f -- "$state_dir/accepted-state" "$state_dir/accepted-stock-config.txt"
@@ -1151,7 +1152,7 @@ capture_recovery_preserved_target() {
 
 assert_recovery_rejection_preserves_state() {
   local label="$1"
-  local version="${2:-0.1.0}"
+  local version="${2:-0.1.1}"
   local revision="${3:-$source_revision}"
   local kernel="${4:-$release}"
   local before="$fixture/recover-record-$label-before.tar"
@@ -1187,7 +1188,7 @@ install_live_hardware() {
     "$root/sys/class/input/event0/device"
   ln -s ../../../../devices/platform/fixture-panel \
     "$root/sys/bus/platform/drivers/hyperpixel2r-kms/fixture-panel"
-  printf '%s\n' "${HP2R_FIXTURE_LIVE_DRIVER_VERSION:-0.1.0}" > "$root/sys/module/hyperpixel2r_kms/version"
+  printf '%s\n' "${HP2R_FIXTURE_LIVE_DRIVER_VERSION:-0.1.1}" > "$root/sys/module/hyperpixel2r_kms/version"
   printf 'shayne,hyperpixel2r-kms\0' > "$root/sys/devices/platform/fixture-panel/of_node/compatible"
   printf 'connected\n' > "$root/sys/class/drm/card0-DPI-1/status"
   printf '480x480\n' > "$root/sys/class/drm/card0-DPI-1/modes"
@@ -1215,7 +1216,7 @@ assert_verify_rejects_binding() {
 prepare_prior_dkms() {
   local label="$1"
   local registration="${2:-added}"
-  local directory="$root/usr/src/hyperpixel2r-kms-0.1.0"
+  local directory="$root/usr/src/hyperpixel2r-kms-0.1.1"
   local name
 
   mkdir -p "$directory" "$root/var/lib/dkms"
@@ -1242,7 +1243,7 @@ prepare_prior_dkms() {
 
 prepare_exact_candidate_dkms() {
   local registration="${1:-added}"
-  local directory="$root/usr/src/hyperpixel2r-kms-0.1.0"
+  local directory="$root/usr/src/hyperpixel2r-kms-0.1.1"
   local name
 
   mkdir -p "$directory" "$root/var/lib/dkms"
@@ -1296,7 +1297,7 @@ prepare_installed_rollback_shape() {
     grep -Fxq 'module_existed=false' "$state" ||
       fail 'created rollback matrix did not record its transaction-created module'
   fi
-  first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+  first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
   assert_dkms_inventory "$first_artifact/dkms-prior-state" added \
     "$release"$'\taarch64\tinstalled'
 }
@@ -1339,13 +1340,13 @@ set_prior_dkms_kernel_state() {
 
   case "$state" in
     built)
-      run_fixture_dkms build -m hyperpixel2r-kms -v 0.1.0 \
+      run_fixture_dkms build -m hyperpixel2r-kms -v 0.1.1 \
         -k "$kernel" -a "$architecture"
       ;;
     installed)
-      run_fixture_dkms build -m hyperpixel2r-kms -v 0.1.0 \
+      run_fixture_dkms build -m hyperpixel2r-kms -v 0.1.1 \
         -k "$kernel" -a "$architecture"
-      run_fixture_dkms install -m hyperpixel2r-kms -v 0.1.0 \
+      run_fixture_dkms install -m hyperpixel2r-kms -v 0.1.1 \
         -k "$kernel" -a "$architecture"
       ;;
     *) fail "unsupported per-kernel DKMS state fixture: $state" ;;
@@ -1388,7 +1389,7 @@ assert_dkms_inventory() {
 assert_prior_dkms() {
   local expected_sums="$1"
   local registration="${2:-added}"
-  local directory="$root/usr/src/hyperpixel2r-kms-0.1.0"
+  local directory="$root/usr/src/hyperpixel2r-kms-0.1.1"
 
   test "$(stat -c '%U:%G:%a' "$directory")" = root:root:755 || fail 'prior DKMS directory ownership or mode drifted'
   while IFS=' ' read -r expected name; do
@@ -1423,7 +1424,7 @@ assert_clean_failed_stage() {
   assert_absent "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko"
   assert_absent "$root/boot/firmware/overlays/$overlay_file"
   assert_absent "$root/usr/lib/hyperpixel2r-kms"
-  assert_absent "$root/usr/src/hyperpixel2r-kms-0.1.0"
+  assert_absent "$root/usr/src/hyperpixel2r-kms-0.1.1"
   assert_absent "$root/var/lib/dkms/registered"
 }
 
@@ -1470,12 +1471,12 @@ prepare_shared_module_inactive_retirement() {
   install_live_hardware
   run_controller commit-boot.sh >/dev/null
 
-  inactive_retirement_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+  inactive_retirement_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
   inactive_retirement_overlay="$overlay_file"
   inactive_retirement_overlay_path="$root/boot/firmware/overlays/$inactive_retirement_overlay"
   active_retirement_revision='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
   active_retirement_overlay='hyperpixel2r-kms-aaaaaaaaaaaa.dtbo'
-  active_retirement_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$active_retirement_revision/$release"
+  active_retirement_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$active_retirement_revision/$release"
   active_retirement_overlay_path="$root/boot/firmware/overlays/$active_retirement_overlay"
   active_retirement_module_path="$root/lib/modules/$release/extra/hyperpixel2r_kms.ko"
 
@@ -1537,7 +1538,7 @@ assert_shared_module_active_target_unchanged() {
 assert_shared_module_retirement_rejected() {
   local label="$1"
 
-  if run_accepted_remote retire-inactive 0.1.0 "$source_revision" "$release" \
+  if run_accepted_remote retire-inactive 0.1.1 "$source_revision" "$release" \
     >"$fixture/shared-retirement-$label.out" 2>&1; then
     fail "inactive retirement accepted unproven shared module ownership: $label"
   fi
@@ -1567,7 +1568,7 @@ assert_rollback_rejects_manifest_mutation() {
 
   new_target
   run_stage >/dev/null
-  manifest="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release/manifest.txt"
+  manifest="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release/manifest.txt"
   replace_manifest_value "$manifest" "$key" "$value"
   if run_controller rollback-boot.sh >/dev/null 2>&1; then
     fail "rollback accepted manifest identity drift: $key"
@@ -1579,6 +1580,16 @@ assert_rollback_rejects_manifest_mutation() {
 # RED contract: a declaration with parameters is still exactly one declaration
 # of the requested overlay.  The candidate must replace it, not leave it in
 # addition to the generic HyperPixel overlay.
+new_target
+run_stage --stage-only >/dev/null
+assert_file "$root/boot/firmware/tryboot.txt"
+assert_file "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+if grep -Fxq 'tryboot-reboot' "$log"; then
+  fail 'stage-only requested a tryboot reboot'
+fi
+assert_absent "$root/proc/device-tree/chosen/bootloader/tryboot"
+run_controller rollback-boot.sh >/dev/null
+
 new_target
 if run_stage; then
   candidate="$root/boot/firmware/tryboot.txt"
@@ -1646,7 +1657,7 @@ for record_fault in \
 do
   prepare_record_failure_target
   export HP2R_FIXTURE_FAIL_RECORD_OPERATION="$record_fault"
-  if run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" \
+  if run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" \
     > "$fixture/record-fault-$record_fault.out" 2>&1; then
     fail "accepted record ignored injected $record_fault failure"
   fi
@@ -1661,7 +1672,7 @@ done
 # a complete receipt remains idempotently accepted.
 prepare_record_failure_target
 export HP2R_FIXTURE_FAIL_RECORD_OPERATION=receipt-publication
-if run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" \
+if run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" \
   > "$fixture/record-fault-receipt-publication.out" 2>&1; then
   fail 'accepted record ignored injected receipt-publication failure'
 fi
@@ -1671,14 +1682,14 @@ assert_no_private_workspaces
 assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-state"
 assert_file "$root/var/lib/hyperpixel2r-kms/accepted-stock-config.txt"
 assert_record_target_unchanged
-if run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" >/dev/null 2>&1; then
+if run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" >/dev/null 2>&1; then
   fail 'accepted record resumed through an orphan accepted stock config'
 fi
 
 for record_fault in workspace-removal sync final-receipt-validation; do
   prepare_record_failure_target
   export HP2R_FIXTURE_FAIL_RECORD_OPERATION="$record_fault"
-  if run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" \
+  if run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" \
     > "$fixture/record-fault-$record_fault.out" 2>&1; then
     fail "accepted record ignored injected $record_fault failure"
   fi
@@ -1688,7 +1699,7 @@ for record_fault in workspace-removal sync final-receipt-validation; do
   assert_file "$root/var/lib/hyperpixel2r-kms/accepted-state"
   assert_file "$root/var/lib/hyperpixel2r-kms/accepted-stock-config.txt"
   assert_record_target_unchanged
-  run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" >/dev/null
+  run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" >/dev/null
 done
 
 # RC18's healthy normal boot had accumulated three exact owned markers.  Keep
@@ -1787,7 +1798,7 @@ assert_no_foreign_hyperpixel_overlay "$root/boot/firmware/config.txt" "$overlay_
 cp "$legacy_normal_original" "$root/boot/firmware/config.txt"
 chown root:root "$root/boot/firmware/config.txt"
 chmod 0644 "$root/boot/firmware/config.txt"
-run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" >/dev/null
+run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" >/dev/null
 accepted_receipt="$root/var/lib/hyperpixel2r-kms/accepted-state"
 stock_config="$root/var/lib/hyperpixel2r-kms/accepted-stock-config.txt"
 cmp -s "$legacy_normal_original" "$root/boot/firmware/config.txt" ||
@@ -1809,7 +1820,7 @@ if run_accepted_controller >"$fixture/recover-record-controller.out" 2>&1; then
   fail 'recover-record controller unexpectedly accepted an empty target'
 fi
 controller_command="$fixture/recover-record-controller-command"
-printf '%s\n' recover-accepted-record 0.1.0 "$source_revision" "$release" > "$controller_command"
+printf '%s\n' recover-accepted-record 0.1.1 "$source_revision" "$release" > "$controller_command"
 cmp -s "$controller_command" "$root/tmp/accepted-controller-remote-command" ||
   fail 'recover-record controller did not forward the exact remote command'
 
@@ -1822,7 +1833,7 @@ recovery_find_before="$fixture/recover-record-find-before.tar"
 recovery_find_after="$fixture/recover-record-find-after.tar"
 capture_recovery_target "$recovery_find_before"
 if HP2R_FIXTURE_FAIL_RECOVERY_FIND=state \
-  run_accepted_remote recover-accepted-record 0.1.0 "$source_revision" "$release" \
+  run_accepted_remote recover-accepted-record 0.1.1 "$source_revision" "$release" \
     >"$fixture/recover-record-find.out" 2>&1; then
   fail 'recover-record accepted an unreadable workspace enumeration'
 fi
@@ -1836,7 +1847,7 @@ recovery_leaves_before="$fixture/recover-record-leaves-before.tar"
 recovery_leaves_after="$fixture/recover-record-leaves-after.tar"
 capture_recovery_target "$recovery_leaves_before"
 if HP2R_FIXTURE_FAIL_RECOVERY_FIND=leaves \
-  run_accepted_remote recover-accepted-record 0.1.0 "$source_revision" "$release" \
+  run_accepted_remote recover-accepted-record 0.1.1 "$source_revision" "$release" \
     >"$fixture/recover-record-leaves.out" 2>&1; then
   fail 'recover-record accepted an unreadable workspace leaf enumeration'
 fi
@@ -1850,7 +1861,7 @@ recover_success_before="$fixture/recover-record-success-preserved-before.tar"
 recover_success_after="$fixture/recover-record-success-preserved-after.tar"
 capture_recovery_preserved_target "$recover_success_before"
 if ! HP2R_FIXTURE_RECOVER_SYNC=1 \
-  run_accepted_remote recover-accepted-record 0.1.0 "$source_revision" "$release" \
+  run_accepted_remote recover-accepted-record 0.1.1 "$source_revision" "$release" \
     >"$fixture/recover-record-exact.out" 2>&1; then
   cat "$fixture/recover-record-exact.out" >&2
   fail 'recover-record did not recover exact workspace'
@@ -1868,7 +1879,7 @@ cmp -s "$recover_success_before" "$recover_success_after" ||
 recover_noop_before="$fixture/recover-record-noop-before.tar"
 recover_noop_after="$fixture/recover-record-noop-after.tar"
 capture_recovery_target "$recover_noop_before"
-run_accepted_remote recover-accepted-record 0.1.0 "$source_revision" "$release" >/dev/null
+run_accepted_remote recover-accepted-record 0.1.1 "$source_revision" "$release" >/dev/null
 assert_no_private_workspaces
 assert_recovery_no_receipt
 capture_recovery_target "$recover_noop_after"
@@ -1890,7 +1901,7 @@ for recover_boundary in recover-record-before-removal recover-record-after-remov
   capture_recovery_preserved_target "$recover_interrupt_preserved_before"
   recover_status=0
   if HP2R_FIXTURE_INTERRUPT_AFTER="$recover_boundary" \
-    run_accepted_remote recover-accepted-record 0.1.0 "$source_revision" "$release" \
+    run_accepted_remote recover-accepted-record 0.1.1 "$source_revision" "$release" \
       >"$fixture/$recover_boundary.out" 2>&1; then
     fail "recover-record ignored interruption at $recover_boundary"
   else
@@ -1914,7 +1925,7 @@ for recover_boundary in recover-record-before-removal recover-record-after-remov
       capture_recovery_target "$recover_interrupt_replay_before"
       ;;
   esac
-  run_accepted_remote recover-accepted-record 0.1.0 "$source_revision" "$release" >/dev/null
+  run_accepted_remote recover-accepted-record 0.1.1 "$source_revision" "$release" >/dev/null
   assert_no_private_workspaces
   assert_recovery_no_receipt
   capture_recovery_preserved_target "$recover_interrupt_preserved_after"
@@ -1932,7 +1943,7 @@ done
 prepare_recoverable_record_orphan
 recovery_replacement="$root/var/lib/hyperpixel2r-kms/.hp2r-transaction.ReplacementFixture"
 if HP2R_FIXTURE_RECOVERY_SWAP_WORKSPACE=1 \
-  run_accepted_remote recover-accepted-record 0.1.0 "$source_revision" "$release" \
+  run_accepted_remote recover-accepted-record 0.1.1 "$source_revision" "$release" \
     >"$fixture/recover-record-workspace-swap.out" 2>&1; then
   fail 'recover-record accepted a replacement workspace after validation'
 fi
@@ -1955,7 +1966,7 @@ assert_recovery_no_receipt
 prepare_recoverable_record_orphan
 recovery_normal_replacement="$recover_workspace/.hp2r-accepted-normal.ReplacementSnapshot"
 if HP2R_FIXTURE_RECOVERY_SWAP_NORMAL_LEAF=1 \
-  run_accepted_remote recover-accepted-record 0.1.0 "$source_revision" "$release" \
+  run_accepted_remote recover-accepted-record 0.1.1 "$source_revision" "$release" \
     >"$fixture/recover-record-normal-leaf-swap.out" 2>&1; then
   fail 'recover-record accepted a replacement normal snapshot after validation'
 fi
@@ -2071,15 +2082,15 @@ done
 prepare_recoverable_record_orphan
 assert_recovery_rejection_preserves_state tuple-version 0.1.1
 prepare_recoverable_record_orphan
-assert_recovery_rejection_preserves_state tuple-revision 0.1.0 \
+assert_recovery_rejection_preserves_state tuple-revision 0.1.1 \
   bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 prepare_recoverable_record_orphan
-assert_recovery_rejection_preserves_state tuple-release 0.1.0 "$source_revision" \
+assert_recovery_rejection_preserves_state tuple-release 0.1.1 "$source_revision" \
   6.18.35+rpt-rpi-v8
 
 for installed_drift in artifact-tree manifest module-bytes module-path overlay-bytes overlay-path normal-config exact-overlay foreign-overlay; do
   prepare_recoverable_record_orphan
-  artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+  artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
   module="$root/lib/modules/$release/extra/hyperpixel2r_kms.ko"
   overlay="$root/boot/firmware/overlays/$overlay_file"
   case "$installed_drift" in
@@ -2114,7 +2125,7 @@ new_target
 run_stage >/dev/null
 install_live_hardware
 run_controller commit-boot.sh >/dev/null
-run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" >/dev/null
+run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" >/dev/null
 accepted_receipt="$root/var/lib/hyperpixel2r-kms/accepted-state"
 stock_config="$root/var/lib/hyperpixel2r-kms/accepted-stock-config.txt"
 assert_file "$accepted_receipt"
@@ -2124,7 +2135,7 @@ grep -Fxq 'schema_version=2' "$accepted_receipt" ||
 if grep -Eq '^[[:space:]]*dtoverlay=.*hyperpixel2r' "$stock_config"; then
   fail 'accepted stock boot candidate retained a driver declaration'
 fi
-accepted_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+accepted_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
 accepted_inventory_sha="$(sha256sum "$accepted_artifact/dkms-prior-state" | awk '{ print $1 }')"
 grep -Fxq "prior_dkms_inventory_sha256=$accepted_inventory_sha" "$accepted_receipt" ||
   fail 'accepted driver receipt did not bind the complete DKMS inventory'
@@ -2132,7 +2143,7 @@ new_revision='cccccccccccccccccccccccccccccccccccccccc'
 new_overlay='hyperpixel2r-kms-cccccccccccc.dtbo'
 if HP2R_FIXTURE_INTERRUPT_AFTER=accepted-transition-published \
   run_accepted_remote prepare-new-accepted \
-    0.1.0 "$new_revision" "$release" "$(printf d%.0s {1..64})" \
+    0.1.1 "$new_revision" "$release" "$(printf d%.0s {1..64})" \
     hyperpixel2r_kms.ko "$(printf e%.0s {1..64})" \
     "$new_overlay" "$(printf f%.0s {1..64})" >/dev/null 2>&1; then
   fail 'new transition ignored interruption after pre-mutation journal publication'
@@ -2147,7 +2158,7 @@ grep -Fxq 'kind=new' "$new_transition" ||
   fail 'new transition journal lost its candidate kind'
 grep -Fxq "candidate_source_revision=$new_revision" "$new_transition" ||
   fail 'new transition journal lost its exact candidate identity'
-assert_absent "$root/usr/lib/hyperpixel2r-kms/0.1.0/$new_revision/$release"
+assert_absent "$root/usr/lib/hyperpixel2r-kms/0.1.1/$new_revision/$release"
 assert_absent "$root/boot/firmware/tryboot.txt"
 grep -Fxq "dtoverlay=$overlay_file" "$root/boot/firmware/config.txt" ||
   fail 'new journal publication mutated the accepted boot config'
@@ -2185,7 +2196,7 @@ for boundary in \
   candidate-tryboot-state-published candidate-staged-published
 do
   run_accepted_remote prepare-new-accepted \
-    0.1.0 "$new_stage_revision" "$release" "$new_stage_manifest_sha" \
+    0.1.1 "$new_stage_revision" "$release" "$new_stage_manifest_sha" \
     hyperpixel2r_kms.ko "$new_stage_module_sha" \
     "$new_stage_overlay" "$new_stage_overlay_sha" >/dev/null
   if HP2R_FIXTURE_INTERRUPT_AFTER="$boundary" \
@@ -2198,7 +2209,7 @@ do
   assert_file "$new_transition"
   run_accepted_remote recover-accepted >/dev/null
   assert_absent "$new_transition"
-  assert_absent "$root/usr/lib/hyperpixel2r-kms/0.1.0/$new_stage_revision/$release"
+  assert_absent "$root/usr/lib/hyperpixel2r-kms/0.1.1/$new_stage_revision/$release"
   assert_absent "$root/boot/firmware/tryboot.txt"
   grep -Fxq "dtoverlay=$overlay_file" "$root/boot/firmware/config.txt" ||
     fail "new accepted recovery after $boundary did not restore prior boot"
@@ -2211,7 +2222,7 @@ done
 
 retained_revision='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 retained_overlay='hyperpixel2r-kms-bbbbbbbbbbbb.dtbo'
-retained_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$retained_revision/$release"
+retained_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$retained_revision/$release"
 mkdir -p "$(dirname "$retained_artifact")"
 cp -a "$accepted_artifact" "$retained_artifact"
 mv "$retained_artifact/$overlay_file" "$retained_artifact/$retained_overlay"
@@ -2227,7 +2238,7 @@ for boundary in \
   retained-dkms-activated retained-tryboot-published retained-staged-published
 do
   if HP2R_FIXTURE_INTERRUPT_AFTER="$boundary" \
-    run_accepted_remote stage-retained 0.1.0 "$retained_revision" "$release" >/dev/null 2>&1; then
+    run_accepted_remote stage-retained 0.1.1 "$retained_revision" "$release" >/dev/null 2>&1; then
     fail "retained transition accepted interruption at $boundary"
   fi
   assert_file "$root/var/lib/hyperpixel2r-kms/accepted-transition"
@@ -2237,14 +2248,14 @@ do
     fail "retained recovery after $boundary did not restore prior boot"
 done
 
-run_accepted_remote stage-retained 0.1.0 "$retained_revision" "$release" >/dev/null
+run_accepted_remote stage-retained 0.1.1 "$retained_revision" "$release" >/dev/null
 assert_file "$root/var/lib/hyperpixel2r-kms/accepted-transition"
 run_accepted_remote recover-accepted >/dev/null
 assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition"
 grep -Fxq "dtoverlay=$overlay_file" "$root/boot/firmware/config.txt" ||
   fail 'pre-commit accepted recovery did not restore the prior overlay'
 
-run_accepted_remote stage-retained 0.1.0 "$retained_revision" "$release" >/dev/null
+run_accepted_remote stage-retained 0.1.1 "$retained_revision" "$release" >/dev/null
 run_accepted_remote commit-retained >/dev/null
 grep -Fxq "dtoverlay=$retained_overlay" "$root/boot/firmware/config.txt" ||
   fail 'retained commit did not publish the candidate overlay'
@@ -2252,7 +2263,7 @@ run_accepted_remote recover-accepted >/dev/null
 grep -Fxq "dtoverlay=$overlay_file" "$root/boot/firmware/config.txt" ||
   fail 'post-commit accepted recovery did not restore the prior overlay'
 
-run_accepted_remote stage-retained 0.1.0 "$retained_revision" "$release" >/dev/null
+run_accepted_remote stage-retained 0.1.1 "$retained_revision" "$release" >/dev/null
 run_accepted_remote commit-retained >/dev/null
 run_accepted_remote mark-verified-accepted >/dev/null
 assert_file "$root/var/lib/hyperpixel2r-kms/accepted-transition"
@@ -2283,12 +2294,12 @@ for boundary in \
   uninstall-receipt-removed
 do
   if HP2R_FIXTURE_INTERRUPT_AFTER="$boundary" \
-    run_accepted_remote uninstall-accepted 0.1.0 "$retained_revision" "$release" >/dev/null 2>&1; then
+    run_accepted_remote uninstall-accepted 0.1.1 "$retained_revision" "$release" >/dev/null 2>&1; then
     fail "accepted uninstall ignored interruption at $boundary"
   fi
   assert_file "$root/var/lib/hyperpixel2r-kms/accepted-uninstall"
 done
-run_accepted_remote uninstall-accepted 0.1.0 "$retained_revision" "$release" >/dev/null
+run_accepted_remote uninstall-accepted 0.1.1 "$retained_revision" "$release" >/dev/null
 grep -Fxq '[all]' "$root/boot/firmware/config.txt" ||
   fail 'accepted uninstall did not restore the proven stock boot candidate'
 grep -Fxq 'dtparam=audio=on' "$root/boot/firmware/config.txt" ||
@@ -2308,7 +2319,7 @@ assert_dkms_kernel_state "$release" installed
 grep -Fxq 'hyperpixel2r_kms.ko: updates/dkms/hyperpixel2r_kms.ko' \
   "$root/lib/modules/$release/modules.dep" ||
   fail 'accepted uninstall did not restore prior DKMS module resolution'
-run_accepted_remote retire-inactive 0.1.0 "$source_revision" "$release" >/dev/null
+run_accepted_remote retire-inactive 0.1.1 "$source_revision" "$release" >/dev/null
 assert_absent "$accepted_artifact"
 if HP2R_FIXTURE_INTERRUPT_AFTER=uninstall-artifact-removed \
   run_accepted_remote finalize-uninstall-accepted >/dev/null 2>&1; then
@@ -2327,13 +2338,13 @@ assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-uninstall"
 # the normal config, active overlay, retained active bundle, and installed
 # module prove that distinct ownership without ambiguity.
 prepare_shared_module_inactive_retirement
-run_accepted_remote retire-inactive 0.1.0 "$source_revision" "$release" >/dev/null
+run_accepted_remote retire-inactive 0.1.1 "$source_revision" "$release" >/dev/null
 assert_absent "$inactive_retirement_artifact"
 assert_shared_module_active_target_unchanged
 
 prepare_shared_module_inactive_retirement
 rm -rf -- "$active_retirement_artifact"
-if run_accepted_remote retire-inactive 0.1.0 "$source_revision" "$release" \
+if run_accepted_remote retire-inactive 0.1.1 "$source_revision" "$release" \
   >"$fixture/shared-retirement-missing-artifact.out" 2>&1; then
   fail 'inactive retirement accepted a shared module without its active retained artifact'
 fi
@@ -2375,12 +2386,12 @@ exercise_accepted_inventory_uninstall() {
     set_prior_dkms_kernel_state "$future_kernel" "$future_state"
   fi
   sums="$fixture/prior-dkms-$label.sums"
-  (cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$sums"
+  (cd "$root/usr/src/hyperpixel2r-kms-0.1.1" && sha256sum * | sed 's#  # #') > "$sums"
   run_stage >/dev/null
   install_live_hardware
   run_controller commit-boot.sh >/dev/null
-  run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" >/dev/null
-  artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+  run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" >/dev/null
+  artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
   receipt="$root/var/lib/hyperpixel2r-kms/accepted-state"
   marker="$artifact/dkms-prior-state"
   marker_sha="$(sha256sum "$marker" | awk '{ print $1 }')"
@@ -2390,11 +2401,11 @@ exercise_accepted_inventory_uninstall() {
     fail "$label accepted receipt lost its DKMS inventory checksum"
   if HP2R_FIXTURE_INTERRUPT_AFTER=uninstall-dkms-restored \
     run_accepted_remote uninstall-accepted \
-      0.1.0 "$source_revision" "$release" >/dev/null 2>&1; then
+      0.1.1 "$source_revision" "$release" >/dev/null 2>&1; then
     fail "$label accepted uninstall ignored DKMS-restored interruption"
   fi
   run_accepted_remote uninstall-accepted \
-    0.1.0 "$source_revision" "$release" >/dev/null
+    0.1.1 "$source_revision" "$release" >/dev/null
   journal="$root/var/lib/hyperpixel2r-kms/accepted-uninstall"
   grep -Fxq 'schema_version=3' "$journal" ||
     fail "$label accepted uninstall journal is not schema 3"
@@ -2421,13 +2432,13 @@ prepare_prior_dkms accepted-inventory-drift installed
 run_stage >/dev/null
 install_live_hardware
 run_controller commit-boot.sh >/dev/null
-run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" >/dev/null
-accepted_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" >/dev/null
+accepted_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
 accepted_receipt="$root/var/lib/hyperpixel2r-kms/accepted-state"
 sed -i 's/^source_state=added$/source_state=unregistered/' \
   "$accepted_artifact/dkms-prior-state"
 if run_accepted_remote uninstall-accepted \
-  0.1.0 "$source_revision" "$release" >/dev/null 2>&1; then
+  0.1.1 "$source_revision" "$release" >/dev/null 2>&1; then
   fail 'accepted uninstall accepted a checksum-drifted valid DKMS inventory'
 fi
 assert_file "$accepted_receipt"
@@ -2441,18 +2452,18 @@ prepare_prior_dkms accepted-detached-drift installed
 run_stage >/dev/null
 install_live_hardware
 run_controller commit-boot.sh >/dev/null
-run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" >/dev/null
-accepted_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" >/dev/null
+accepted_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
 if HP2R_FIXTURE_INTERRUPT_AFTER=uninstall-artifact-detached \
   run_accepted_remote uninstall-accepted \
-    0.1.0 "$source_revision" "$release" >/dev/null 2>&1; then
+    0.1.1 "$source_revision" "$release" >/dev/null 2>&1; then
   fail 'accepted uninstall ignored artifact-detached interruption'
 fi
 detached_artifact="$accepted_artifact.accepted-uninstall"
 sed -i 's/^source_state=added$/source_state=unregistered/' \
   "$detached_artifact/dkms-prior-state"
 if run_accepted_remote uninstall-accepted \
-  0.1.0 "$source_revision" "$release" >/dev/null 2>&1; then
+  0.1.1 "$source_revision" "$release" >/dev/null 2>&1; then
   fail 'accepted uninstall replay accepted a checksum-drifted detached inventory'
 fi
 assert_file "$root/var/lib/hyperpixel2r-kms/accepted-uninstall"
@@ -2464,14 +2475,14 @@ prepare_prior_dkms accepted-hashless-full
 run_stage >/dev/null
 install_live_hardware
 run_controller commit-boot.sh >/dev/null
-run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" >/dev/null
+run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" >/dev/null
 accepted_receipt="$root/var/lib/hyperpixel2r-kms/accepted-state"
 sed -i \
   -e 's/^schema_version=2$/schema_version=1/' \
   -e '/^prior_dkms_inventory_sha256=/d' \
   "$accepted_receipt"
 if run_accepted_remote uninstall-accepted \
-  0.1.0 "$source_revision" "$release" >/dev/null 2>&1; then
+  0.1.1 "$source_revision" "$release" >/dev/null 2>&1; then
   fail 'accepted uninstall accepted a hashless full DKMS inventory'
 fi
 assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-uninstall"
@@ -2481,13 +2492,13 @@ assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-uninstall"
 new_target
 prepare_prior_dkms accepted-legacy-scalar
 legacy_sums="$fixture/prior-dkms-accepted-legacy.sums"
-(cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$legacy_sums"
+(cd "$root/usr/src/hyperpixel2r-kms-0.1.1" && sha256sum * | sed 's#  # #') > "$legacy_sums"
 run_stage >/dev/null
 install_live_hardware
 run_controller commit-boot.sh >/dev/null
-accepted_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+accepted_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
 printf 'registered\n' > "$accepted_artifact/dkms-prior-state"
-run_accepted_remote record-accepted 0.1.0 "$source_revision" "$release" >/dev/null
+run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" >/dev/null
 accepted_receipt="$root/var/lib/hyperpixel2r-kms/accepted-state"
 sed -i \
   -e 's/^schema_version=2$/schema_version=1/' \
@@ -2495,14 +2506,14 @@ sed -i \
   "$accepted_receipt"
 if HP2R_FIXTURE_INTERRUPT_AFTER=uninstall-journal-published \
   run_accepted_remote uninstall-accepted \
-    0.1.0 "$source_revision" "$release" >/dev/null 2>&1; then
+    0.1.1 "$source_revision" "$release" >/dev/null 2>&1; then
   fail 'legacy accepted uninstall ignored journal interruption'
 fi
 grep -Fxq 'schema_version=2' \
   "$root/var/lib/hyperpixel2r-kms/accepted-uninstall" ||
   fail 'legacy accepted uninstall did not retain the schema-2 journal'
 run_accepted_remote uninstall-accepted \
-  0.1.0 "$source_revision" "$release" >/dev/null
+  0.1.1 "$source_revision" "$release" >/dev/null
 assert_prior_dkms "$legacy_sums" added
 run_accepted_remote finalize-uninstall-accepted >/dev/null
 
@@ -2541,7 +2552,7 @@ grep -Fxq 'prior_tryboot_sha256=none' "$state"
 grep -Fxq 'module_existed=false' "$state"
 grep -Fxq 'overlay_existed=false' "$state"
 grep -Fq 'fixture committed source: hyperpixel2r_kms_main.c' \
-  "$root/usr/src/hyperpixel2r-kms-0.1.0/hyperpixel2r_kms_main.c" ||
+  "$root/usr/src/hyperpixel2r-kms-0.1.1/hyperpixel2r_kms_main.c" ||
   fail 'DKMS source was not materialized from the committed source identity'
 test "$(grep -n 'tryboot-reboot\|remote-rm' "$log" | sed -n '1p' | cut -d: -f2-)" = 'remote-rm /tmp/hp2r-tryboot-stage.fixture' ||
   fail 'validated remote stage payload survived until reboot'
@@ -2704,7 +2715,7 @@ unset HP2R_FIXTURE_RACE_POST_PUBLISH_INCOMING_MODULE
 assert_file "$root/tmp/incoming-module-replaced"
 expected_module_sha="$(awk -F= '$1 == "module_sha256" { print $2 }' "$root/var/lib/hyperpixel2r-kms/tryboot-state")"
 actual_module_sha="$(sha256sum "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko" | awk '{ print $1 }')"
-artifact_module_sha="$(sha256sum "$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release/hyperpixel2r_kms.ko" | awk '{ print $1 }')"
+artifact_module_sha="$(sha256sum "$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release/hyperpixel2r_kms.ko" | awk '{ print $1 }')"
 test "$actual_module_sha" = "$expected_module_sha" || fail 'post-publication incoming module replaced the checksum-bound module'
 test "$artifact_module_sha" = "$expected_module_sha" || fail 'stored artifact module does not match transaction state'
 
@@ -2760,7 +2771,7 @@ done
 
 # Mixed and malformed DKMS output is never treated as an unregistered source.
 new_target
-export HP2R_FIXTURE_DKMS_STATUS=$'hyperpixel2r-kms/0.1.0: added\nhyperpixel2r-kms/0.1.0: broken'
+export HP2R_FIXTURE_DKMS_STATUS=$'hyperpixel2r-kms/0.1.1: added\nhyperpixel2r-kms/0.1.1: broken'
 if run_stage >/dev/null 2>&1; then fail 'mixed DKMS status was accepted'; fi
 unset HP2R_FIXTURE_DKMS_STATUS
 assert_clean_failed_stage
@@ -2771,10 +2782,10 @@ assert_clean_failed_stage
 new_target
 prepare_prior_dkms oversized-kernel-inventory
 prior_dkms_sums="$fixture/prior-dkms-oversized-inventory.sums"
-(cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
+(cd "$root/usr/src/hyperpixel2r-kms-0.1.1" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
 HP2R_FIXTURE_DKMS_STATUS=''
 for ((index = 1; index <= 17; index++)); do
-  HP2R_FIXTURE_DKMS_STATUS+="hyperpixel2r-kms/0.1.0, 6.18.$index+rpt-rpi-v8, aarch64: built"$'\n'
+  HP2R_FIXTURE_DKMS_STATUS+="hyperpixel2r-kms/0.1.1, 6.18.$index+rpt-rpi-v8, aarch64: built"$'\n'
 done
 export HP2R_FIXTURE_DKMS_STATUS
 if run_stage >/dev/null 2>&1; then fail 'oversized DKMS kernel inventory was accepted'; fi
@@ -2849,7 +2860,7 @@ new_target
 run_stage >/dev/null
 install_live_hardware
 json="$(run_verify)"
-test "$json" = '{"schema_version":1,"driver_version":"0.1.0","kernel_release":"6.18.34+rpt-rpi-v8","module":"hyperpixel2r_kms","drm_mode":"480x480","touch":true,"sdl_driver":"KMSDRM","renderer":"opengles2","accepted":true}' ||
+test "$json" = '{"schema_version":1,"driver_version":"0.1.1","kernel_release":"6.18.34+rpt-rpi-v8","module":"hyperpixel2r_kms","drm_mode":"480x480","touch":true,"sdl_driver":"KMSDRM","renderer":"opengles2","accepted":true}' ||
   fail 'verify JSON was not derived from the live fake target'
 
 rm -f -- "$root/sys/bus/platform/drivers/hyperpixel2r-kms/fixture-panel"
@@ -2933,7 +2944,7 @@ if run_controller rollback-boot.sh >/dev/null 2>&1; then fail 'rollback accepted
 assert_file "$root/boot/firmware/tryboot.txt"
 new_target
 run_stage >/dev/null
-printf 'tamper\n' >> "$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release/manifest.txt"
+printf 'tamper\n' >> "$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release/manifest.txt"
 if run_controller rollback-boot.sh >/dev/null 2>&1; then fail 'rollback accepted manifest drift'; fi
 assert_file "$root/boot/firmware/tryboot.txt"
 
@@ -2983,7 +2994,7 @@ done
 # rather than a malformed manifest must reject it.
 new_target
 run_stage >/dev/null
-artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
 foreign_revision='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 foreign_overlay='hyperpixel2r-kms-aaaaaaaaaaaa.dtbo'
 mv "$artifact/$overlay_file" "$artifact/$foreign_overlay"
@@ -2998,10 +3009,10 @@ assert_file "$root/var/lib/hyperpixel2r-kms/tryboot-state"
 new_target
 run_stage >/dev/null
 run_controller rollback-boot.sh >/dev/null
-assert_absent "$root/usr/src/hyperpixel2r-kms-0.1.0"
-assert_file "$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release/manifest.txt"
+assert_absent "$root/usr/src/hyperpixel2r-kms-0.1.1"
+assert_file "$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release/manifest.txt"
 if run_stage >/dev/null 2>&1; then fail 'inactive stored artifact was silently replaced'; fi
-assert_file "$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release/manifest.txt"
+assert_file "$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release/manifest.txt"
 
 # Uninstall must parse overlay declarations structurally: parameters do not
 # make an owned generic overlay safe to ignore.
@@ -3012,7 +3023,7 @@ printf 'dtoverlay=hyperpixel2r-kms-aaaaaaaaaaaa.dtbo,rotate=90\n' >> "$root/boot
 if run_controller uninstall.sh >/dev/null 2>&1; then
   fail 'uninstall accepted a parameterized owned generic overlay declaration'
 fi
-assert_file "$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release/manifest.txt"
+assert_file "$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release/manifest.txt"
 
 # All firmware snapshots use one audited root-owned primitive.  The static
 # contract rejects the redirection and unprivileged-temp forms that broke the
@@ -3134,7 +3145,7 @@ test "$exact_source_mismatch_sha" != "$candidate_manifest_module_sha" ||
   fail 'exact-source mismatch fixture accidentally matched the candidate module'
 PATH="$bin:$PATH" HP2R_FIXTURE_ROOT="$root" HP2R_FIXTURE_RELEASE="$release" depmod -a "$release"
 run_stage >/dev/null
-first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
 assert_dkms_inventory "$first_artifact/dkms-prior-state" added \
   "$release"$'\taarch64\tinstalled'
 assert_absent "$exact_source_installed_module"
@@ -3211,9 +3222,9 @@ grep -Fxq 'hyperpixel2r_kms.ko: extra/hyperpixel2r_kms.ko' \
 new_target
 prepare_prior_dkms successful-rollback
 prior_dkms_sums="$fixture/prior-dkms-successful.sums"
-(cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
+(cd "$root/usr/src/hyperpixel2r-kms-0.1.1" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
 run_stage >/dev/null
-first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
 assert_dkms_inventory "$first_artifact/dkms-prior-state" added
 assert_file "$first_artifact/prior-dkms/hyperpixel2r_kms_main.c"
 run_controller rollback-boot.sh >/dev/null
@@ -3226,7 +3237,7 @@ assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
 new_target
 prepare_prior_dkms inventory-checksum-binding
 run_stage >/dev/null
-first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
 sed -i 's/^source_state=added$/source_state=unregistered/' \
   "$first_artifact/dkms-prior-state"
 if run_controller rollback-boot.sh >/dev/null 2>&1; then
@@ -3241,9 +3252,9 @@ assert_file "$root/var/lib/hyperpixel2r-kms/tryboot-state"
 new_target
 prepare_prior_dkms version-one-compatibility
 prior_dkms_sums="$fixture/prior-dkms-version-one.sums"
-(cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
+(cd "$root/usr/src/hyperpixel2r-kms-0.1.1" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
 run_stage >/dev/null
-first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
 printf 'registered\n' > "$first_artifact/dkms-prior-state"
 state="$root/var/lib/hyperpixel2r-kms/tryboot-state"
 sed -i \
@@ -3261,10 +3272,10 @@ assert_prior_dkms "$prior_dkms_sums" added
 new_target
 prepare_prior_dkms version-two-compatibility
 prior_dkms_sums="$fixture/prior-dkms-version-two.sums"
-(cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
+(cd "$root/usr/src/hyperpixel2r-kms-0.1.1" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
 run_stage >/dev/null
 state="$root/var/lib/hyperpixel2r-kms/tryboot-state"
-first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
 printf 'registered\n' > "$first_artifact/dkms-prior-state"
 sed -i \
   -e 's/^schema_version=3$/schema_version=2/' \
@@ -3281,7 +3292,7 @@ assert_prior_dkms "$prior_dkms_sums" added
 new_target
 prepare_prior_dkms installed-kernel-rollback installed
 prior_dkms_sums="$fixture/prior-dkms-installed.sums"
-(cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
+(cd "$root/usr/src/hyperpixel2r-kms-0.1.1" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
 prior_installed_module="$root/lib/modules/$release/updates/dkms/hyperpixel2r_kms.ko"
 prior_installed_sha="$(sha256sum "$prior_installed_module" | awk '{ print $1 }')"
 PATH="$bin:$PATH" HP2R_FIXTURE_ROOT="$root" HP2R_FIXTURE_RELEASE="$release" depmod -a "$release"
@@ -3289,7 +3300,7 @@ grep -Fxq 'hyperpixel2r_kms.ko: updates/dkms/hyperpixel2r_kms.ko' \
   "$root/lib/modules/$release/modules.dep" ||
   fail 'fixture did not begin with the prior DKMS module resolved'
 run_stage >/dev/null
-first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
 assert_dkms_inventory "$first_artifact/dkms-prior-state" added \
   "$release"$'\taarch64\tinstalled'
 assert_absent "$prior_installed_module"
@@ -3351,7 +3362,7 @@ grep -Fxq 'schema_version=3' "$state" ||
   fail 'shared installed rollback fixture is not a schema-3 transaction'
 grep -Fxq 'module_existed=true' "$state" ||
   fail 'shared installed rollback fixture did not record the preexisting module'
-first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
 assert_dkms_inventory "$first_artifact/dkms-prior-state" added \
   "$release"$'\taarch64\tinstalled'
 assert_absent "$shared_installed_module"
@@ -3591,9 +3602,9 @@ future_release='6.18.35+rpt-rpi-v8'
 new_target
 prepare_prior_dkms direct-built-rollback built
 prior_dkms_sums="$fixture/prior-dkms-direct-built.sums"
-(cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
+(cd "$root/usr/src/hyperpixel2r-kms-0.1.1" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
 run_stage >/dev/null
-first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
 assert_dkms_inventory "$first_artifact/dkms-prior-state" added \
   "$release"$'\taarch64\tbuilt'
 run_controller rollback-boot.sh >/dev/null
@@ -3603,13 +3614,13 @@ new_target
 prepare_prior_dkms running-and-future-installed installed
 set_prior_dkms_kernel_state "$future_release" installed
 prior_dkms_sums="$fixture/prior-dkms-two-installed.sums"
-(cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
+(cd "$root/usr/src/hyperpixel2r-kms-0.1.1" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
 running_installed="$root/lib/modules/$release/updates/dkms/hyperpixel2r_kms.ko"
 future_installed="$root/lib/modules/$future_release/updates/dkms/hyperpixel2r_kms.ko"
 running_installed_sha="$(sha256sum "$running_installed" | awk '{ print $1 }')"
 future_installed_sha="$(sha256sum "$future_installed" | awk '{ print $1 }')"
 run_stage >/dev/null
-first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
 assert_dkms_inventory "$first_artifact/dkms-prior-state" added \
   "$release"$'\taarch64\tinstalled' \
   "$future_release"$'\taarch64\tinstalled'
@@ -3627,11 +3638,11 @@ new_target
 prepare_prior_dkms mixed-built-installed built
 set_prior_dkms_kernel_state "$future_release" installed
 prior_dkms_sums="$fixture/prior-dkms-mixed.sums"
-(cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
+(cd "$root/usr/src/hyperpixel2r-kms-0.1.1" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
 future_installed="$root/lib/modules/$future_release/updates/dkms/hyperpixel2r_kms.ko"
 future_installed_sha="$(sha256sum "$future_installed" | awk '{ print $1 }')"
 run_stage >/dev/null
-first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
 assert_dkms_inventory "$first_artifact/dkms-prior-state" added \
   "$release"$'\taarch64\tbuilt' \
   "$future_release"$'\taarch64\tinstalled'
@@ -3645,11 +3656,11 @@ new_target
 prepare_prior_dkms future-only-installed
 set_prior_dkms_kernel_state "$future_release" installed
 prior_dkms_sums="$fixture/prior-dkms-future-only.sums"
-(cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
+(cd "$root/usr/src/hyperpixel2r-kms-0.1.1" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
 future_installed="$root/lib/modules/$future_release/updates/dkms/hyperpixel2r_kms.ko"
 future_installed_sha="$(sha256sum "$future_installed" | awk '{ print $1 }')"
 run_stage >/dev/null
-first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
 assert_dkms_inventory "$first_artifact/dkms-prior-state" added \
   "$future_release"$'\taarch64\tinstalled'
 run_controller rollback-boot.sh >/dev/null
@@ -3664,7 +3675,7 @@ new_target
 prepare_prior_dkms multi-kernel-stage-cleanup installed
 set_prior_dkms_kernel_state "$future_release" installed
 prior_dkms_sums="$fixture/prior-dkms-multi-stage-cleanup.sums"
-(cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
+(cd "$root/usr/src/hyperpixel2r-kms-0.1.1" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
 running_installed="$root/lib/modules/$release/updates/dkms/hyperpixel2r_kms.ko"
 future_installed="$root/lib/modules/$future_release/updates/dkms/hyperpixel2r_kms.ko"
 running_installed_sha="$(sha256sum "$running_installed" | awk '{ print $1 }')"
@@ -3708,9 +3719,9 @@ test "$(sha256sum "$prior_overlay" | awk '{ print $1 }')" = "$prior_overlay_sha"
 new_target
 prepare_prior_dkms successful-unregistered unregistered
 prior_dkms_sums="$fixture/prior-dkms-unregistered.sums"
-(cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
+(cd "$root/usr/src/hyperpixel2r-kms-0.1.1" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
 run_stage >/dev/null
-first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
+first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
 assert_dkms_inventory "$first_artifact/dkms-prior-state" unregistered
 run_controller rollback-boot.sh >/dev/null
 assert_prior_dkms "$prior_dkms_sums" unregistered
@@ -3724,12 +3735,12 @@ set_prior_dkms_kernel_state "$future_release" installed
 candidate_future_module="$root/lib/modules/$future_release/updates/dkms/hyperpixel2r_kms.ko"
 candidate_future_sha="$(sha256sum "$candidate_future_module" | awk '{ print $1 }')"
 candidate_dkms_sums="$fixture/candidate-dkms-compensation.sums"
-(cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$candidate_dkms_sums"
+(cd "$root/usr/src/hyperpixel2r-kms-0.1.1" && sha256sum * | sed 's#  # #') > "$candidate_dkms_sums"
 export HP2R_FIXTURE_FAIL_MV=module-hold
 if run_controller rollback-boot.sh >/dev/null 2>&1; then fail 'rollback accepted injected state move failure'; fi
 unset HP2R_FIXTURE_FAIL_MV
 while IFS=' ' read -r expected name; do
-  test "$(sha256sum "$root/usr/src/hyperpixel2r-kms-0.1.0/$name" | awk '{print $1}')" = "$expected" ||
+  test "$(sha256sum "$root/usr/src/hyperpixel2r-kms-0.1.1/$name" | awk '{print $1}')" = "$expected" ||
     fail "rollback compensation did not restore candidate DKMS bytes: $name"
 done < "$candidate_dkms_sums"
 assert_file "$root/var/lib/dkms/registered"
@@ -3747,14 +3758,14 @@ new_target
 prepare_prior_dkms rollback-no-dkms
 run_stage >/dev/null
 candidate_dkms_sums="$fixture/candidate-dkms-no-dkms.sums"
-(cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$candidate_dkms_sums"
+(cd "$root/usr/src/hyperpixel2r-kms-0.1.1" && sha256sum * | sed 's#  # #') > "$candidate_dkms_sums"
 export HP2R_FIXTURE_NO_DKMS=1 HP2R_FIXTURE_FAIL_MV=module-hold
 if run_controller rollback-boot.sh >/dev/null 2>&1; then
   fail 'rollback accepted injected state move failure without dkms'
 fi
 unset HP2R_FIXTURE_NO_DKMS HP2R_FIXTURE_FAIL_MV
 while IFS=' ' read -r expected name; do
-  test "$(sha256sum "$root/usr/src/hyperpixel2r-kms-0.1.0/$name" | awk '{print $1}')" = "$expected" ||
+  test "$(sha256sum "$root/usr/src/hyperpixel2r-kms-0.1.1/$name" | awk '{print $1}')" = "$expected" ||
     fail "no-dkms rollback compensation did not restore candidate bytes: $name"
 done < "$candidate_dkms_sums"
 assert_file "$root/boot/firmware/tryboot.txt"
@@ -3767,12 +3778,12 @@ new_target
 prepare_prior_dkms rollback-source-compensation
 run_stage >/dev/null
 candidate_dkms_sums="$fixture/candidate-dkms-source-compensation.sums"
-(cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$candidate_dkms_sums"
+(cd "$root/usr/src/hyperpixel2r-kms-0.1.1" && sha256sum * | sed 's#  # #') > "$candidate_dkms_sums"
 export HP2R_FIXTURE_FAIL_MV=dkms-new
 if run_controller rollback-boot.sh >/dev/null 2>&1; then fail 'rollback accepted injected DKMS source publish failure'; fi
 unset HP2R_FIXTURE_FAIL_MV
 while IFS=' ' read -r expected name; do
-  test "$(sha256sum "$root/usr/src/hyperpixel2r-kms-0.1.0/$name" | awk '{print $1}')" = "$expected" ||
+  test "$(sha256sum "$root/usr/src/hyperpixel2r-kms-0.1.1/$name" | awk '{print $1}')" = "$expected" ||
     fail "rollback source compensation did not restore candidate bytes: $name"
 done < "$candidate_dkms_sums"
 assert_file "$root/var/lib/dkms/registered"
@@ -3786,7 +3797,7 @@ for replacement_fault in dkms-remove dkms-new stage-state; do
   new_target
   prepare_prior_dkms "$replacement_fault"
   prior_dkms_sums="$fixture/prior-dkms-${replacement_fault}.sums"
-  (cd "$root/usr/src/hyperpixel2r-kms-0.1.0" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
+  (cd "$root/usr/src/hyperpixel2r-kms-0.1.1" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
   case "$replacement_fault" in
     dkms-remove) export HP2R_FIXTURE_FAIL_DKMS_REMOVE=1 ;;
     dkms-new|stage-state) export HP2R_FIXTURE_FAIL_MV="$replacement_fault" ;;
@@ -3804,35 +3815,35 @@ assert_absent "$root/boot/firmware/overlays/$overlay_file"
 
 # Existing reused DKMS trees are complete, regular, root-owned source trees.
 # An extra or symlinked leaf is rejected before it can be reused or registered.
-printf 'foreign\n' > "$root/usr/src/hyperpixel2r-kms-0.1.0/foreign.c"
+printf 'foreign\n' > "$root/usr/src/hyperpixel2r-kms-0.1.1/foreign.c"
 if run_stage >/dev/null 2>&1; then fail 'extra DKMS leaf was accepted'; fi
-rm -f -- "$root/usr/src/hyperpixel2r-kms-0.1.0/foreign.c"
-rm -f -- "$root/usr/src/hyperpixel2r-kms-0.1.0/Kbuild"
-ln -s /etc/passwd "$root/usr/src/hyperpixel2r-kms-0.1.0/Kbuild"
+rm -f -- "$root/usr/src/hyperpixel2r-kms-0.1.1/foreign.c"
+rm -f -- "$root/usr/src/hyperpixel2r-kms-0.1.1/Kbuild"
+ln -s /etc/passwd "$root/usr/src/hyperpixel2r-kms-0.1.1/Kbuild"
 if run_stage >/dev/null 2>&1; then fail 'symlinked DKMS leaf was accepted'; fi
-rm -f -- "$root/usr/src/hyperpixel2r-kms-0.1.0/Kbuild"
-printf 'fixture committed source: Kbuild\n' > "$root/usr/src/hyperpixel2r-kms-0.1.0/Kbuild"
+rm -f -- "$root/usr/src/hyperpixel2r-kms-0.1.1/Kbuild"
+printf 'fixture committed source: Kbuild\n' > "$root/usr/src/hyperpixel2r-kms-0.1.1/Kbuild"
 
 # A new committed source revision may reuse the fixed DKMS package version.
 # Its proven old tree is backed up, unregistered, replaced, and registered
 # again; the fresh source bytes—not the stale tree—must be left active.
-printf 'stale but regular source\n' > "$root/usr/src/hyperpixel2r-kms-0.1.0/hyperpixel2r_kms_main.c"
+printf 'stale but regular source\n' > "$root/usr/src/hyperpixel2r-kms-0.1.1/hyperpixel2r_kms_main.c"
 run_stage >/dev/null
 grep -Fq 'fixture committed source: hyperpixel2r_kms_main.c' \
-  "$root/usr/src/hyperpixel2r-kms-0.1.0/hyperpixel2r_kms_main.c" ||
+  "$root/usr/src/hyperpixel2r-kms-0.1.1/hyperpixel2r_kms_main.c" ||
   fail 'DKMS source replacement did not install committed bytes'
-grep -Fq 'dkms remove -m hyperpixel2r-kms -v 0.1.0 --all' "$log" ||
+grep -Fq 'dkms remove -m hyperpixel2r-kms -v 0.1.1 --all' "$log" ||
   fail 'DKMS source replacement did not unregister the prior registration'
 run_controller rollback-boot.sh >/dev/null
 
 # Add a second release for the original version plus an independent candidate
 # source tree for a second driver version.  Uninstall must validate all stored
-# bundles before it mutates anything, preserve the recognized prior 0.1.0 tree,
+# bundles before it mutates anything, preserve the recognized prior 0.1.1 tree,
 # and remove only the candidate-owned 0.2.0 tree.
 second_release='6.18.35+rpt-rpi-v8'
 second_revision='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$source_revision/$release"
-second_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.0/$second_revision/$second_release"
+first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
+second_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$second_revision/$second_release"
 mkdir -p "$(dirname "$second_artifact")"
 cp -a "$first_artifact" "$second_artifact"
 mv "$second_artifact/$overlay_file" "$second_artifact/hyperpixel2r-kms-aaaaaaaaaaaa.dtbo"
@@ -3873,7 +3884,7 @@ mkdir -p "$malformed_version_dir/not-a-revision"
 if run_controller uninstall.sh >/dev/null 2>&1; then
   fail 'uninstall accepted a mixed malformed artifact state'
 fi
-assert_file "$root/usr/src/hyperpixel2r-kms-0.1.0/hyperpixel2r_kms_main.c"
+assert_file "$root/usr/src/hyperpixel2r-kms-0.1.1/hyperpixel2r_kms_main.c"
 assert_file "$root/usr/src/hyperpixel2r-kms-$third_version/hyperpixel2r_kms_main.c"
 rmdir -- "$malformed_version_dir/not-a-revision" "$malformed_version_dir"
 
@@ -3883,7 +3894,7 @@ if ! run_controller uninstall.sh >/dev/null 2>&1; then
   fail 'uninstall failed to reconcile the validated multi-version artifact set'
 fi
 assert_absent "$root/usr/lib/hyperpixel2r-kms"
-assert_file "$root/usr/src/hyperpixel2r-kms-0.1.0/hyperpixel2r_kms_main.c"
+assert_file "$root/usr/src/hyperpixel2r-kms-0.1.1/hyperpixel2r_kms_main.c"
 assert_file "$root/var/lib/dkms/registered"
 assert_absent "$root/usr/src/hyperpixel2r-kms-$third_version"
 assert_absent "$root/var/lib/dkms/registered-$third_version"

@@ -54,17 +54,19 @@ if [[ "$check_help_output" != *"--kernel-target"* ]]; then
 fi
 
 stage_help_output="$("$repo_root/scripts/stage-tryboot.sh" --help)"
-if [[ "$stage_help_output" != *"--kernel-target"* ]]; then
-  printf 'stage-tryboot.sh --help must document --kernel-target\n' >&2
-  exit 1
-fi
+for option in --kernel-target --stage-only; do
+  if [[ "$stage_help_output" != *"$option"* ]]; then
+    printf 'stage-tryboot.sh --help must document %s\n' "$option" >&2
+    exit 1
+  fi
+done
 
 temporary_dir="$(mktemp -d "${TMPDIR:-/tmp}/hp2r-build-contract.XXXXXX")"
 trap 'rm -rf "$temporary_dir"' EXIT
 valid_manifest="$temporary_dir/manifest.txt"
 cat > "$valid_manifest" <<'MANIFEST'
 schema_version	1
-driver_version	0.1.0
+driver_version	0.1.1
 source_revision	0000000000000000000000000000000000000000
 source_tree	1111111111111111111111111111111111111111
 kernel_release	6.18.34+rpt-rpi-v8

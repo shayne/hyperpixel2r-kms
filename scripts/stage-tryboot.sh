@@ -16,6 +16,7 @@ Options:
   --artifact-dir DIR           Exact-kernel artifact directory
   --kernel-target DIR          Exported kernel target parent (default: dist/kernel-target)
   --replace-overlay NAME       Replace exactly one declared overlay NAME
+  --stage-only                 Stage the candidate without requesting a reboot
   -h, --help                   Show this help
 USAGE
 }
@@ -24,12 +25,14 @@ target="${HP2R_TARGET:-}"
 artifact_dir=''
 kernel_target_parent="$repo_root/dist/kernel-target"
 replace_overlay=''
+stage_only=false
 while test "$#" -gt 0; do
   case "$1" in
     --target) test "$#" -ge 2 || { echo '--target requires a value' >&2; exit 64; }; target="$2"; shift 2 ;;
     --artifact-dir) test "$#" -ge 2 || { echo '--artifact-dir requires a value' >&2; exit 64; }; artifact_dir="$2"; shift 2 ;;
     --kernel-target) test "$#" -ge 2 || { echo '--kernel-target requires a value' >&2; exit 64; }; kernel_target_parent="$2"; shift 2 ;;
     --replace-overlay) test "$#" -ge 2 || { echo '--replace-overlay requires a value' >&2; exit 64; }; replace_overlay="$2"; shift 2 ;;
+    --stage-only) stage_only=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 64 ;;
   esac
@@ -113,6 +116,10 @@ ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" stage
 # around can only widen a later recovery surface.
 ssh "${ssh_options[@]}" "$target" rm -rf -- "$remote_stage"
 remote_stage=''
+if "$stage_only"; then
+  printf 'Staged tryboot candidate without requesting a reboot\n'
+  exit 0
+fi
 set +e
 ssh "${ssh_options[@]}" "$target" "sudo reboot '0 tryboot'" >/dev/null 2>&1
 reboot_status=$?

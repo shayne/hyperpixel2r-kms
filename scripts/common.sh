@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-HP2R_DRIVER_VERSION="0.1.0"
+HP2R_DRIVER_VERSION="0.1.1"
 HP2R_DEFAULT_BUILD_IMAGE="hyperpixel2r-kms-kernel-builder:debian-trixie-gcc14"
 
 hp2r_validate_target() {

@@ -70,7 +70,7 @@ base_dtb_sha256='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 
 {
   printf 'schema_version\t1\n'
-  printf 'driver_version\t0.1.0\n'
+  printf 'driver_version\t0.1.1\n'
   printf 'source_revision\t%s\n' "$source_revision"
   printf 'source_tree\t%s\n' "$source_tree"
   printf 'kernel_release\t%s\n' "$release"
