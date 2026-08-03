@@ -1640,6 +1640,145 @@ assert_rollback_rejects_manifest_mutation() {
   assert_file "$root/var/lib/hyperpixel2r-kms/tryboot-state"
 }
 
+exercise_inactive_uninstall_backlight_matrix() {
+  local artifact prior_sha drift_sha
+
+  # A completed rollback leaves the exact proven predecessor live.  The
+  # inactive artifact still owns the proof needed to preserve it and retire
+  # the bundle.
+  new_target
+  printf 'fixture inactive prior backlight policy\n' > "$backlight_rule_path"
+  chown root:root "$backlight_rule_path"
+  chmod 0644 "$backlight_rule_path"
+  prior_sha="$(sha256sum "$backlight_rule_path" | awk '{ print $1 }')"
+  run_stage >/dev/null
+  run_controller rollback-boot.sh >/dev/null
+  run_controller uninstall.sh >/dev/null
+  test "$(sha256sum "$backlight_rule_path" | awk '{ print $1 }')" = "$prior_sha" ||
+    fail 'inactive uninstall did not preserve the exact proven prior rule'
+  assert_absent "$root/usr/lib/hyperpixel2r-kms"
+
+  # Candidate bytes are owned only through the exact artifact digest.  When a
+  # predecessor existed, inactive cleanup restores its exact snapshot.
+  new_target
+  printf 'fixture candidate-replaced prior policy\n' > "$backlight_rule_path"
+  chown root:root "$backlight_rule_path"
+  chmod 0644 "$backlight_rule_path"
+  prior_sha="$(sha256sum "$backlight_rule_path" | awk '{ print $1 }')"
+  run_stage >/dev/null
+  run_controller rollback-boot.sh >/dev/null
+  artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
+  cp "$artifact/$backlight_rule_file" "$backlight_rule_path"
+  chown root:root "$backlight_rule_path"
+  chmod 0644 "$backlight_rule_path"
+  run_controller uninstall.sh >/dev/null
+  test "$(sha256sum "$backlight_rule_path" | awk '{ print $1 }')" = "$prior_sha" ||
+    fail 'inactive uninstall did not restore prior bytes over candidate bytes'
+  assert_absent "$root/usr/lib/hyperpixel2r-kms"
+
+  # Candidate bytes with a proven-absent predecessor are removed.
+  new_target
+  run_stage >/dev/null
+  run_controller rollback-boot.sh >/dev/null
+  artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
+  cp "$artifact/$backlight_rule_file" "$backlight_rule_path"
+  chown root:root "$backlight_rule_path"
+  chmod 0644 "$backlight_rule_path"
+  run_controller uninstall.sh >/dev/null
+  assert_absent "$backlight_rule_path"
+  assert_absent "$root/usr/lib/hyperpixel2r-kms"
+
+  # An absent path with a proven-absent predecessor remains absent while the
+  # inactive artifact is retired.
+  new_target
+  run_stage >/dev/null
+  run_controller rollback-boot.sh >/dev/null
+  assert_absent "$backlight_rule_path"
+  run_controller uninstall.sh >/dev/null
+  assert_absent "$backlight_rule_path"
+  assert_absent "$root/usr/lib/hyperpixel2r-kms"
+
+  # All other regular-file drift is foreign and must be preserved while the
+  # inactive artifact remains available as recovery authority.
+  new_target
+  run_stage >/dev/null
+  run_controller rollback-boot.sh >/dev/null
+  artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
+  printf 'foreign inactive backlight policy\n' > "$backlight_rule_path"
+  chown root:root "$backlight_rule_path"
+  chmod 0644 "$backlight_rule_path"
+  drift_sha="$(sha256sum "$backlight_rule_path" | awk '{ print $1 }')"
+  if run_controller uninstall.sh >/dev/null 2>&1; then
+    fail 'inactive uninstall accepted foreign regular backlight rule drift'
+  fi
+  test "$(sha256sum "$backlight_rule_path" | awk '{ print $1 }')" = "$drift_sha" ||
+    fail 'rejected inactive uninstall changed foreign backlight rule bytes'
+  assert_file "$artifact/manifest.txt"
+
+  # A symlink is never owned rule state, including when its target happens to
+  # contain candidate bytes.
+  new_target
+  run_stage >/dev/null
+  run_controller rollback-boot.sh >/dev/null
+  artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
+  ln -s "$artifact/$backlight_rule_file" "$backlight_rule_path"
+  if run_controller uninstall.sh >/dev/null 2>&1; then
+    fail 'inactive uninstall accepted a symlinked backlight rule'
+  fi
+  test -L "$backlight_rule_path" ||
+    fail 'rejected inactive uninstall changed the symlinked backlight rule'
+  assert_file "$artifact/manifest.txt"
+}
+
+exercise_prior_absent_accepted_uninstall_proof_guard() {
+  local proof journal proof_sha
+
+  new_target
+  run_stage >/dev/null
+  install_live_hardware
+  run_controller commit-boot.sh >/dev/null
+  run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" >/dev/null
+  run_accepted_remote uninstall-accepted \
+    0.1.1 "$source_revision" "$release" >/dev/null
+  journal="$root/var/lib/hyperpixel2r-kms/accepted-uninstall"
+  proof="$root/var/lib/hyperpixel2r-kms/accepted-prior-backlight-rule"
+  grep -Fxq 'phase=receipt_removed' "$journal" ||
+    fail 'prior-absent hostile fixture did not reach receipt-removed phase'
+  grep -Fxq 'prior_backlight_rule_existed=false' "$journal" ||
+    fail 'prior-absent hostile fixture journal has the wrong prior policy'
+  assert_absent "$proof"
+
+  printf 'foreign root-owned accepted prior proof\n' > "$proof"
+  chown root:root "$proof"
+  chmod 0600 "$proof"
+  proof_sha="$(sha256sum "$proof" | awk '{ print $1 }')"
+  if run_accepted_remote finalize-uninstall-accepted >/dev/null 2>&1; then
+    fail 'prior-absent accepted finalizer deleted an unauthorized proof file'
+  fi
+  assert_file "$proof"
+  test "$(sha256sum "$proof" | awk '{ print $1 }')" = "$proof_sha" ||
+    fail 'rejected prior-absent finalizer changed unauthorized proof bytes'
+  assert_file "$journal"
+  grep -Fxq 'phase=receipt_removed' "$journal" ||
+    fail 'rejected prior-absent finalizer changed its journal phase'
+}
+
+case "${HP2R_FIXTURE_CASE:-}" in
+  inactive-uninstall-backlight)
+    exercise_inactive_uninstall_backlight_matrix
+    exit 0
+    ;;
+  prior-absent-uninstall-proof)
+    exercise_prior_absent_accepted_uninstall_proof_guard
+    exit 0
+    ;;
+  '')
+    exercise_inactive_uninstall_backlight_matrix
+    exercise_prior_absent_accepted_uninstall_proof_guard
+    ;;
+  *) fail "unknown fixture case: $HP2R_FIXTURE_CASE" ;;
+esac
+
 # RED contract: a declaration with parameters is still exactly one declaration
 # of the requested overlay.  The candidate must replace it, not leave it in
 # addition to the generic HyperPixel overlay.

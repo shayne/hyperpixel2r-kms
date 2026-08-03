@@ -120,6 +120,7 @@ docker run --rm \
   --volume "$fixture_repo:/repo:ro" \
   --workdir /repo \
   --env HP2R_FIXTURE_REPO_ROOT=/repo \
+  --env HP2R_FIXTURE_CASE="${HP2R_FIXTURE_CASE:-}" \
   "$image" \
   bash tests/boot-fixtures.sh
 

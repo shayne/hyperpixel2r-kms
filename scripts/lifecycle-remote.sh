@@ -4695,7 +4695,9 @@ assert_accepted_uninstall() {
     case "$(accepted_uninstall_value prior_backlight_rule_existed)" in
       true)
         [[ "$(accepted_uninstall_value prior_backlight_rule_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
-        if sudo test -e "$accepted_prior_backlight_rule"; then
+        if sudo test -L "$accepted_prior_backlight_rule"; then
+          return 1
+        elif sudo test -e "$accepted_prior_backlight_rule"; then
           assert_owned_regular "$accepted_prior_backlight_rule" 600 || return
           test "$(sha "$accepted_prior_backlight_rule")" = \
             "$(accepted_uninstall_value prior_backlight_rule_sha256)" || return
@@ -4707,6 +4709,8 @@ assert_accepted_uninstall() {
         ;;
       false)
         test "$(accepted_uninstall_value prior_backlight_rule_sha256)" = none || return
+        test ! -L "$accepted_prior_backlight_rule" && \
+          test ! -e "$accepted_prior_backlight_rule" || return
         ;;
       *) return 1 ;;
     esac
@@ -5010,25 +5014,18 @@ uninstall_accepted() {
 
 finalize_uninstall_accepted() {
   local version revision release artifact detached phase
+  local prior_backlight_rule_existed prior_backlight_rule_sha
 
   if ! sudo test -e "$accepted_uninstall" && ! sudo test -L "$accepted_uninstall"; then
+    if sudo test -e "$accepted_prior_backlight_rule" || \
+      sudo test -L "$accepted_prior_backlight_rule"; then
+      die 'orphan accepted prior backlight rule lacks journal authority'
+    fi
     if sudo test -e "$accepted_uninstall_stock" || sudo test -L "$accepted_uninstall_stock"; then
       assert_owned_regular "$accepted_uninstall_stock" 600 ||
         die 'orphan accepted uninstall stock is unsafe'
       sudo rm -- "$accepted_uninstall_stock" ||
         die 'failed to clear orphan accepted uninstall stock'
-    fi
-    if sudo test -e "$accepted_prior_backlight_rule" || \
-      sudo test -L "$accepted_prior_backlight_rule"; then
-      assert_owned_regular "$accepted_prior_backlight_rule" 600 ||
-        die 'orphan accepted prior backlight rule is unsafe'
-      assert_owned_regular "$backlight_rule_path" 644 ||
-        die 'restored prior backlight rule is unsafe'
-      test "$(sha "$backlight_rule_path")" = \
-        "$(sha "$accepted_prior_backlight_rule")" ||
-        die 'restored prior backlight rule differs from orphan proof'
-      sudo rm -- "$accepted_prior_backlight_rule" ||
-        die 'failed to clear orphan accepted prior backlight rule'
     fi
     printf 'accepted uninstall already finalized\n'
     return
@@ -5056,17 +5053,35 @@ finalize_uninstall_accepted() {
     set_accepted_uninstall_phase receipt_removed artifact_removed ||
       die 'failed to publish artifact-removed uninstall phase'
   fi
+  if test "$(accepted_uninstall_value schema_version)" = 4; then
+    prior_backlight_rule_existed="$(accepted_uninstall_value prior_backlight_rule_existed)"
+    prior_backlight_rule_sha="$(accepted_uninstall_value prior_backlight_rule_sha256)"
+    if test "$prior_backlight_rule_existed" = true; then
+      assert_owned_regular "$backlight_rule_path" 644 ||
+        die 'restored prior backlight rule is unsafe'
+      test "$(sha "$backlight_rule_path")" = "$prior_backlight_rule_sha" ||
+        die 'restored prior backlight rule differs from journal proof'
+      if sudo test -L "$accepted_prior_backlight_rule"; then
+        die 'accepted prior backlight rule became unsafe'
+      elif sudo test -e "$accepted_prior_backlight_rule"; then
+        assert_owned_regular "$accepted_prior_backlight_rule" 600 ||
+          die 'accepted prior backlight rule became unsafe'
+        test "$(sha "$accepted_prior_backlight_rule")" = \
+          "$prior_backlight_rule_sha" ||
+          die 'accepted prior backlight rule differs from journal proof'
+        sudo rm -- "$accepted_prior_backlight_rule" ||
+          die 'failed to clear accepted prior backlight rule'
+      fi
+    else
+      test ! -L "$accepted_prior_backlight_rule" && \
+        test ! -e "$accepted_prior_backlight_rule" ||
+        die 'prior-absent accepted uninstall gained a proof file'
+    fi
+  fi
   sudo rm -- "$accepted_uninstall" || die 'failed to clear accepted uninstall journal'
   fixture_interrupt_after uninstall-journal-cleared
   sudo rm -- "$accepted_uninstall_stock" ||
     die 'failed to clear accepted uninstall stock'
-  if sudo test -e "$accepted_prior_backlight_rule" ||
-    sudo test -L "$accepted_prior_backlight_rule"; then
-    assert_owned_regular "$accepted_prior_backlight_rule" 600 ||
-      die 'accepted prior backlight rule became unsafe'
-    sudo rm -- "$accepted_prior_backlight_rule" ||
-      die 'failed to clear accepted prior backlight rule'
-  fi
   sudo sync
   printf 'finalized accepted uninstall %s\n' "$revision"
 }
@@ -5125,7 +5140,7 @@ uninstall() {
   local -a artifacts=() releases=() overlays=() driver_versions=()
   local artifact record_tail prior record_version known_version source_match prior_dkms_state_value dkms_dir="" restore_prior_dkms=false remove_dkms=false
   local manifest_schema rule_candidate_sha='' prior_rule_existed='' prior_rule_sha='' prior_rule_source=''
-  local candidate_sha candidate_prior_existed candidate_prior_sha candidate_prior_source
+  local candidate_sha candidate_prior_existed candidate_prior_sha candidate_prior_source live_rule_sha
   for config in "$normal_config" "$tryboot_config"; do
     test ! -L "$config" && test ! -e "$config" && continue
     require_regular "$config" || die 'unsafe boot config during uninstall'
@@ -5283,15 +5298,23 @@ uninstall() {
       die 'unsafe installed backlight rule'
     elif sudo test -e "$backlight_rule_path"; then
       assert_owned_regular "$backlight_rule_path" 644 || die 'unsafe installed backlight rule'
-      test "$(sha "$backlight_rule_path")" = "$rule_candidate_sha" ||
-        die 'installed backlight rule is not checksum-proven owned'
-      if test "$prior_rule_existed" = true; then
-        atomic_copy "$prior_rule_source" "$backlight_rule_path" 644 "$prior_rule_sha" ||
-          die 'failed to restore prior backlight rule'
+      live_rule_sha="$(sha "$backlight_rule_path")"
+      if test "$live_rule_sha" = "$rule_candidate_sha"; then
+        if test "$prior_rule_existed" = true; then
+          atomic_copy "$prior_rule_source" "$backlight_rule_path" 644 "$prior_rule_sha" ||
+            die 'failed to restore prior backlight rule'
+        else
+          sudo rm -f -- "$backlight_rule_path" || die 'failed to remove installed backlight rule'
+        fi
+        reload_backlight_permissions false || die 'failed to reload restored backlight permissions'
+      elif test "$prior_rule_existed" = true && \
+        test "$live_rule_sha" = "$prior_rule_sha"; then
+        :
       else
-        sudo rm -f -- "$backlight_rule_path" || die 'failed to remove installed backlight rule'
+        die 'installed backlight rule is not checksum-proven owned'
       fi
-      reload_backlight_permissions false || die 'failed to reload restored backlight permissions'
+    elif test "$prior_rule_existed" = true; then
+      die 'proven prior backlight rule is missing'
     fi
   fi
   for record in "${artifacts[@]}"; do
