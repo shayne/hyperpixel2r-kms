@@ -7,16 +7,21 @@
   "required": [
     "schema_version",
     "driver_version",
+    "capabilities",
     "source",
     "supported",
     "reproducibility",
     "artifacts"
   ],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": { "const": 2 },
     "driver_version": {
       "type": "string",
       "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"
+    },
+    "capabilities": {
+      "type": "array",
+      "const": ["pwm-backlight-v1"]
     },
     "source": {
       "type": "object",

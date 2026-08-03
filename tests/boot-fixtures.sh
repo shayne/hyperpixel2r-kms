@@ -10,9 +10,11 @@ release='6.18.34+rpt-rpi-v8'
 source_revision="$(awk -F '\t' '$1 == "source_revision" { print $2 }' "$repo_root/dist/artifacts/$release/manifest.txt")"
 source_tree="$(awk -F '\t' '$1 == "source_tree" { print $2 }' "$repo_root/dist/artifacts/$release/manifest.txt")"
 overlay_file="hyperpixel2r-kms-${source_revision:0:12}.dtbo"
+backlight_rule_file='70-planeradar-backlight.rules'
 fixture="$(mktemp -d)"
 chmod 0755 "$fixture"
 root="$fixture/root"
+backlight_rule_path="$root/etc/udev/rules.d/$backlight_rule_file"
 bin="$fixture/bin"
 bin_no_dkms="$fixture/bin-no-dkms"
 log="$fixture/commands.log"
@@ -33,6 +35,14 @@ assert_absent() {
 
 assert_file() {
   test -f "$1" && test ! -L "$1" || fail "missing regular file: $1"
+}
+
+assert_backlight_rule_installed() {
+  assert_file "$backlight_rule_path"
+  test "$(stat -c '%U:%G:%a' "$backlight_rule_path")" = root:root:644 ||
+    fail 'installed backlight rule ownership or mode drifted'
+  cmp -s "$repo_root/dist/artifacts/$release/$backlight_rule_file" \
+    "$backlight_rule_path" || fail 'installed backlight rule bytes drifted'
 }
 
 assert_no_private_workspaces() {
@@ -115,6 +125,7 @@ new_target() {
   mkdir -p \
     "$root/boot/firmware/overlays" \
     "$root/lib/modules/$release" \
+    "$root/etc/udev/rules.d" \
     "$root/tmp" \
     "$root/var/lib" \
     "$bin"
@@ -520,6 +531,31 @@ SCRIPT
   install -m 0755 /dev/stdin "$bin/reboot" <<'SCRIPT'
 #!/usr/bin/env bash
 exit 64
+SCRIPT
+
+  install -m 0755 /dev/stdin "$bin/udevadm" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1-}" in
+  control)
+    test "${2-}" = --reload-rules
+    printf 'udevadm reload\n' >> "$HP2R_FIXTURE_LOG"
+    ;;
+  trigger)
+    test "$*" = 'trigger --action=add --subsystem-match=backlight --sysname-match=planeradar-backlight'
+    rule="$HP2R_FIXTURE_ROOT/etc/udev/rules.d/70-planeradar-backlight.rules"
+    brightness="$HP2R_FIXTURE_ROOT/sys/class/backlight/planeradar-backlight/brightness"
+    if test -f "$brightness" && test -f "$rule"; then
+      expected='SUBSYSTEM=="backlight", KERNEL=="planeradar-backlight", RUN+="/usr/bin/chgrp video /sys%p/brightness", RUN+="/usr/bin/chmod 0660 /sys%p/brightness"'
+      if test "$(cat "$rule")" = "$expected"; then
+        chgrp video "$brightness"
+        chmod 0660 "$brightness"
+      fi
+    fi
+    printf 'udevadm trigger planeradar-backlight\n' >> "$HP2R_FIXTURE_LOG"
+    ;;
+  *) exit 64 ;;
+esac
 SCRIPT
 
   install -m 0755 /dev/stdin "$bin/uname" <<'SCRIPT'
@@ -1187,6 +1223,7 @@ install_live_hardware() {
     "$root/sys/bus/platform/drivers/hyperpixel2r-kms" \
     "$root/sys/devices/platform/fixture-panel/of_node" \
     "$root/sys/class/drm/card0-DPI-1" \
+    "$root/sys/class/backlight/planeradar-backlight" \
     "$root/sys/class/input/event0/device"
   ln -s ../../../../devices/platform/fixture-panel \
     "$root/sys/bus/platform/drivers/hyperpixel2r-kms/fixture-panel"
@@ -1194,6 +1231,8 @@ install_live_hardware() {
   printf 'shayne,hyperpixel2r-kms\0' > "$root/sys/devices/platform/fixture-panel/of_node/compatible"
   printf 'connected\n' > "$root/sys/class/drm/card0-DPI-1/status"
   printf '480x480\n' > "$root/sys/class/drm/card0-DPI-1/modes"
+  printf '255\n' > "$root/sys/class/backlight/planeradar-backlight/max_brightness"
+  printf '128\n' > "$root/sys/class/backlight/planeradar-backlight/brightness"
   printf 'EDT FT5406\n' > "$root/sys/class/input/event0/device/name"
 }
 
@@ -1290,8 +1329,8 @@ prepare_installed_rollback_shape() {
   PATH="$bin:$PATH" HP2R_FIXTURE_ROOT="$root" HP2R_FIXTURE_RELEASE="$release" depmod -a "$release"
   run_stage >/dev/null
   state="$root/var/lib/hyperpixel2r-kms/tryboot-state"
-  grep -Fxq 'schema_version=3' "$state" ||
-    fail "rollback matrix shape is not schema 3: $shape"
+  grep -Fxq 'schema_version=4' "$state" ||
+    fail "rollback matrix shape is not schema 4: $shape"
   if test "$shape" = shared; then
     grep -Fxq 'module_existed=true' "$state" ||
       fail 'shared rollback matrix did not record its preexisting module'
@@ -1425,9 +1464,13 @@ assert_clean_failed_stage() {
   assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
   assert_absent "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko"
   assert_absent "$root/boot/firmware/overlays/$overlay_file"
+  if test -e "$root/usr/lib/hyperpixel2r-kms"; then
+    find "$root/usr/lib/hyperpixel2r-kms" -printf 'surviving stage path: %P %u:%g %m\n' >&2
+  fi
   assert_absent "$root/usr/lib/hyperpixel2r-kms"
   assert_absent "$root/usr/src/hyperpixel2r-kms-0.1.1"
   assert_absent "$root/var/lib/dkms/registered"
+  assert_absent "$backlight_rule_path"
 }
 
 assert_workspace_remove_retried() {
@@ -1463,6 +1506,24 @@ replace_manifest_value() {
     END { exit !found }
   ' "$file" > "$temporary"
   mv -f -- "$temporary" "$file"
+}
+
+downgrade_artifact_to_schema_one() {
+  local artifact="$1"
+  local manifest="$artifact/manifest.txt"
+  local temporary="$fixture/schema-one-manifest"
+
+  awk -F '\t' '
+    $1 == "schema_version" { print "schema_version\t1"; next }
+    $1 == "capability" || $1 == "backlight_rule_file" ||
+      $1 == "backlight_rule_sha256" { next }
+    { print }
+  ' "$manifest" > "$temporary"
+  mv -f -- "$temporary" "$manifest"
+  chown root:root "$manifest"
+  chmod 0644 "$manifest"
+  rm -f -- "$artifact/$backlight_rule_file" \
+    "$artifact/prior-backlight-rule" "$backlight_rule_path"
 }
 
 prepare_shared_module_inactive_retirement() {
@@ -1584,6 +1645,7 @@ assert_rollback_rejects_manifest_mutation() {
 # addition to the generic HyperPixel overlay.
 new_target
 run_stage --stage-only >/dev/null
+assert_backlight_rule_installed
 assert_file "$root/boot/firmware/tryboot.txt"
 assert_file "$root/var/lib/hyperpixel2r-kms/tryboot-state"
 if grep -Fxq 'tryboot-reboot' "$log"; then
@@ -1591,6 +1653,28 @@ if grep -Fxq 'tryboot-reboot' "$log"; then
 fi
 assert_absent "$root/proc/device-tree/chosen/bootloader/tryboot"
 run_controller rollback-boot.sh >/dev/null
+assert_absent "$backlight_rule_path"
+
+# Candidate permission state is transactional. A process death after the rule
+# is installed must be recoverable without retaining candidate permissions.
+new_target
+if HP2R_FIXTURE_INTERRUPT_AFTER=candidate-rule-installed run_stage >/dev/null 2>&1; then
+  fail 'stage ignored interruption after installing the backlight rule'
+fi
+assert_clean_failed_stage
+
+# A preexisting exact path is distinct user state. Candidate rollback must
+# restore its byte identity rather than deleting or replacing it permanently.
+new_target
+printf 'fixture prior backlight policy\n' > "$backlight_rule_path"
+chown root:root "$backlight_rule_path"
+chmod 0644 "$backlight_rule_path"
+prior_rule_sha="$(sha256sum "$backlight_rule_path" | awk '{ print $1 }')"
+run_stage >/dev/null
+assert_backlight_rule_installed
+run_controller rollback-boot.sh >/dev/null
+test "$(sha256sum "$backlight_rule_path" | awk '{ print $1 }')" = "$prior_rule_sha" ||
+  fail 'rollback did not restore the proven prior backlight rule'
 
 new_target
 if run_stage; then
@@ -1649,6 +1733,18 @@ if HP2R_FIXTURE_BOOT_MODE=755 run_stage; then
 else
   fail 'stage rejected the Raspberry Pi VFAT boot-file mode'
 fi
+
+# Commit is the first post-reboot acceptance gate.  A published permission
+# rule without the named backlight device is not an operational candidate.
+new_target
+run_stage >/dev/null
+install_live_hardware
+rm -rf -- "$root/sys/class/backlight/planeradar-backlight"
+if run_controller commit-boot.sh >/dev/null 2>&1; then
+  fail 'commit accepted a missing named backlight device'
+fi
+assert_file "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+assert_backlight_rule_installed
 
 # Every operation after record-accepted allocates its private workspace has a
 # distinct failure boundary.  Before either accepted leaf is published, the
@@ -2120,10 +2216,46 @@ for installed_drift in artifact-tree manifest module-bytes module-path overlay-b
   assert_recovery_rejection_preserves_state "installed-$installed_drift"
 done
 
+# A schema-2 accepted receipt predates driver ownership of the backlight rule.
+# Preparing the first capable successor must prove the ambient rule state and
+# carry that proof into the new schema-4 transition without mutating it.
+new_target
+run_stage >/dev/null
+install_live_hardware
+run_controller commit-boot.sh >/dev/null
+legacy_accepted_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
+downgrade_artifact_to_schema_one "$legacy_accepted_artifact"
+run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" >/dev/null
+legacy_accepted_receipt="$root/var/lib/hyperpixel2r-kms/accepted-state"
+grep -Fxq 'schema_version=2' "$legacy_accepted_receipt" ||
+  fail 'legacy accepted upgrade fixture is not schema 2'
+legacy_successor='eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
+if HP2R_FIXTURE_INTERRUPT_AFTER=accepted-transition-published \
+  run_accepted_remote prepare-new-accepted \
+    0.1.1 "$legacy_successor" "$release" "$(printf d%.0s {1..64})" \
+    hyperpixel2r_kms.ko "$(printf e%.0s {1..64})" \
+    hyperpixel2r-kms-eeeeeeeeeeee.dtbo "$(printf f%.0s {1..64})" \
+    "$backlight_rule_file" "$(printf a%.0s {1..64})" >/dev/null 2>&1; then
+  fail 'legacy accepted upgrade ignored transition publication interruption'
+fi
+legacy_transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
+grep -Fxq 'schema_version=4' "$legacy_transition" ||
+  fail 'legacy accepted upgrade did not publish a schema-4 transition'
+grep -Fxq 'prior_backlight_rule_existed=false' "$legacy_transition" ||
+  fail 'legacy accepted upgrade did not prove the ambient rule was absent'
+assert_absent "$backlight_rule_path"
+run_accepted_remote recover-accepted >/dev/null
+assert_absent "$legacy_transition"
+assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-prior-backlight-rule"
+
 # Accepted lifecycle ownership is a separate durable protocol.  It records the
 # exact retained bundle and a surgical stock-boot candidate, then uninstalls
 # only that receipt without enumerating sibling artifacts.
 new_target
+printf 'fixture accepted prior backlight policy\n' > "$backlight_rule_path"
+chown root:root "$backlight_rule_path"
+chmod 0644 "$backlight_rule_path"
+accepted_prior_rule_sha="$(sha256sum "$backlight_rule_path" | awk '{ print $1 }')"
 run_stage >/dev/null
 install_live_hardware
 run_controller commit-boot.sh >/dev/null
@@ -2132,8 +2264,20 @@ accepted_receipt="$root/var/lib/hyperpixel2r-kms/accepted-state"
 stock_config="$root/var/lib/hyperpixel2r-kms/accepted-stock-config.txt"
 assert_file "$accepted_receipt"
 assert_file "$stock_config"
-grep -Fxq 'schema_version=2' "$accepted_receipt" ||
+grep -Fxq 'schema_version=3' "$accepted_receipt" ||
   fail 'accepted driver receipt schema is missing'
+grep -Fxq 'backlight_rule_file=70-planeradar-backlight.rules' "$accepted_receipt" ||
+  fail 'accepted receipt lost the rule identity'
+grep -Fxq 'prior_backlight_rule_existed=true' "$accepted_receipt" ||
+  fail 'accepted receipt did not preserve existing prior-rule proof'
+grep -Fxq "prior_backlight_rule_sha256=$accepted_prior_rule_sha" "$accepted_receipt" ||
+  fail 'accepted receipt lost the prior-rule checksum'
+accepted_prior_rule="$root/var/lib/hyperpixel2r-kms/accepted-prior-backlight-rule"
+assert_file "$accepted_prior_rule"
+test "$(stat -c '%U:%G:%a' "$accepted_prior_rule")" = root:root:600 ||
+  fail 'accepted prior-rule proof ownership or mode drifted'
+test "$(sha256sum "$accepted_prior_rule" | awk '{ print $1 }')" = \
+  "$accepted_prior_rule_sha" || fail 'accepted prior-rule proof bytes drifted'
 if grep -Eq '^[[:space:]]*dtoverlay=.*hyperpixel2r' "$stock_config"; then
   fail 'accepted stock boot candidate retained a driver declaration'
 fi
@@ -2147,13 +2291,16 @@ if HP2R_FIXTURE_INTERRUPT_AFTER=accepted-transition-published \
   run_accepted_remote prepare-new-accepted \
     0.1.1 "$new_revision" "$release" "$(printf d%.0s {1..64})" \
     hyperpixel2r_kms.ko "$(printf e%.0s {1..64})" \
-    "$new_overlay" "$(printf f%.0s {1..64})" >/dev/null 2>&1; then
+    "$new_overlay" "$(printf f%.0s {1..64})" \
+    "$backlight_rule_file" "$(printf a%.0s {1..64})" >/dev/null 2>&1; then
   fail 'new transition ignored interruption after pre-mutation journal publication'
 fi
 new_transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
 assert_file "$new_transition"
-grep -Fxq 'schema_version=3' "$new_transition" ||
-  fail 'new transition did not publish the complete v3 journal'
+grep -Fxq 'schema_version=4' "$new_transition" ||
+  fail 'new transition did not publish the complete v4 journal'
+grep -Fxq 'candidate_backlight_rule_file=70-planeradar-backlight.rules' "$new_transition" ||
+  fail 'new transition lost the candidate rule identity'
 grep -Fxq 'candidate_dkms_inventory_sha256=pending' "$new_transition" ||
   fail 'prepared new transition did not record its pending DKMS inventory binding'
 grep -Fxq 'kind=new' "$new_transition" ||
@@ -2200,7 +2347,8 @@ do
   run_accepted_remote prepare-new-accepted \
     0.1.1 "$new_stage_revision" "$release" "$new_stage_manifest_sha" \
     hyperpixel2r_kms.ko "$new_stage_module_sha" \
-    "$new_stage_overlay" "$new_stage_overlay_sha" >/dev/null
+    "$new_stage_overlay" "$new_stage_overlay_sha" \
+    "$backlight_rule_file" "$(awk -F '\t' '$1 == "backlight_rule_sha256" { print $2 }' "$new_stage_artifact/manifest.txt")" >/dev/null
   if HP2R_FIXTURE_INTERRUPT_AFTER="$boundary" \
     HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
     HP2R_FIXTURE_ARTIFACT_DIR_OVERRIDE="$new_stage_artifact" \
@@ -2287,12 +2435,14 @@ do
 done
 run_accepted_remote finalize-accepted >/dev/null
 run_accepted_remote finalize-accepted >/dev/null
+assert_backlight_rule_installed
 grep -Fxq "source_revision=$retained_revision" "$accepted_receipt" ||
   fail 'retained acceptance did not rotate the exact receipt'
 printf 'dtparam=audio=on\n' >> "$root/boot/firmware/config.txt"
 for boundary in \
   uninstall-journal-published uninstall-boot-restored uninstall-dkms-restored \
-  uninstall-module-removed uninstall-overlay-removed uninstall-artifact-detached \
+  uninstall-module-removed uninstall-overlay-removed uninstall-rule-restored \
+  uninstall-artifact-detached \
   uninstall-receipt-removed
 do
   if HP2R_FIXTURE_INTERRUPT_AFTER="$boundary" \
@@ -2308,10 +2458,19 @@ grep -Fxq 'dtparam=audio=on' "$root/boot/firmware/config.txt" ||
   fail 'accepted uninstall did not preserve an unrelated changed boot line'
 assert_absent "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko"
 assert_absent "$root/boot/firmware/overlays/$retained_overlay"
+assert_file "$backlight_rule_path"
+test "$(sha256sum "$backlight_rule_path" | awk '{ print $1 }')" = \
+  "$accepted_prior_rule_sha" || fail 'accepted uninstall did not restore the prior rule'
 assert_absent "$accepted_receipt"
 assert_file "$root/var/lib/hyperpixel2r-kms/accepted-uninstall"
-grep -Fxq 'schema_version=3' "$root/var/lib/hyperpixel2r-kms/accepted-uninstall" ||
-  fail 'accepted uninstall did not publish the checksum-bound v3 journal'
+grep -Fxq 'schema_version=4' "$root/var/lib/hyperpixel2r-kms/accepted-uninstall" ||
+  fail 'accepted uninstall did not publish the checksum-bound v4 journal'
+grep -Fxq 'prior_backlight_rule_existed=true' \
+  "$root/var/lib/hyperpixel2r-kms/accepted-uninstall" ||
+  fail 'accepted uninstall journal lost existing prior-rule proof'
+grep -Fxq "prior_backlight_rule_sha256=$accepted_prior_rule_sha" \
+  "$root/var/lib/hyperpixel2r-kms/accepted-uninstall" ||
+  fail 'accepted uninstall journal lost the prior-rule checksum'
 retained_inventory_sha="$(sha256sum "$retained_artifact.accepted-uninstall/dkms-prior-state" | awk '{ print $1 }')"
 grep -Fxq "prior_dkms_inventory_sha256=$retained_inventory_sha" \
   "$root/var/lib/hyperpixel2r-kms/accepted-uninstall" ||
@@ -2334,6 +2493,7 @@ if HP2R_FIXTURE_INTERRUPT_AFTER=uninstall-journal-cleared \
 fi
 run_accepted_remote finalize-uninstall-accepted >/dev/null
 assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-uninstall"
+assert_absent "$accepted_prior_rule"
 
 # An inactive artifact may share the generic installed module path and exact
 # module bytes with a distinct active artifact.  Retirement is safe only when
@@ -2397,8 +2557,8 @@ exercise_accepted_inventory_uninstall() {
   receipt="$root/var/lib/hyperpixel2r-kms/accepted-state"
   marker="$artifact/dkms-prior-state"
   marker_sha="$(sha256sum "$marker" | awk '{ print $1 }')"
-  grep -Fxq 'schema_version=2' "$receipt" ||
-    fail "$label accepted receipt is not schema 2"
+  grep -Fxq 'schema_version=3' "$receipt" ||
+    fail "$label accepted receipt is not schema 3"
   grep -Fxq "prior_dkms_inventory_sha256=$marker_sha" "$receipt" ||
     fail "$label accepted receipt lost its DKMS inventory checksum"
   if HP2R_FIXTURE_INTERRUPT_AFTER=uninstall-dkms-restored \
@@ -2409,8 +2569,8 @@ exercise_accepted_inventory_uninstall() {
   run_accepted_remote uninstall-accepted \
     0.1.1 "$source_revision" "$release" >/dev/null
   journal="$root/var/lib/hyperpixel2r-kms/accepted-uninstall"
-  grep -Fxq 'schema_version=3' "$journal" ||
-    fail "$label accepted uninstall journal is not schema 3"
+  grep -Fxq 'schema_version=4' "$journal" ||
+    fail "$label accepted uninstall journal is not schema 4"
   grep -Fxq "prior_dkms_inventory_sha256=$marker_sha" "$journal" ||
     fail "$label accepted uninstall journal lost its DKMS inventory checksum"
   case "$running_state" in
@@ -2480,8 +2640,12 @@ run_controller commit-boot.sh >/dev/null
 run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" >/dev/null
 accepted_receipt="$root/var/lib/hyperpixel2r-kms/accepted-state"
 sed -i \
-  -e 's/^schema_version=2$/schema_version=1/' \
+  -e 's/^schema_version=3$/schema_version=1/' \
   -e '/^prior_dkms_inventory_sha256=/d' \
+  -e '/^backlight_rule_file=/d' \
+  -e '/^backlight_rule_sha256=/d' \
+  -e '/^prior_backlight_rule_existed=/d' \
+  -e '/^prior_backlight_rule_sha256=/d' \
   "$accepted_receipt"
 if run_accepted_remote uninstall-accepted \
   0.1.1 "$source_revision" "$release" >/dev/null 2>&1; then
@@ -2499,6 +2663,7 @@ run_stage >/dev/null
 install_live_hardware
 run_controller commit-boot.sh >/dev/null
 accepted_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
+downgrade_artifact_to_schema_one "$accepted_artifact"
 printf 'registered\n' > "$accepted_artifact/dkms-prior-state"
 run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" >/dev/null
 accepted_receipt="$root/var/lib/hyperpixel2r-kms/accepted-state"
@@ -2546,13 +2711,17 @@ run_stage >/dev/null
 state="$root/var/lib/hyperpixel2r-kms/tryboot-state"
 assert_file "$state"
 test "$(stat -c '%U:%G:%a' "$state")" = root:root:600 || fail 'state ownership or mode is not exact'
-test "$(awk 'END {print NR}' "$state")" = 19 || fail 'state schema cardinality changed'
-grep -Fxq 'schema_version=3' "$state"
+test "$(awk 'END {print NR}' "$state")" = 23 || fail 'state schema cardinality changed'
+grep -Fxq 'schema_version=4' "$state"
 grep -Eq '^candidate_config_sha256=[0-9a-f]{64}$' "$state"
 grep -Eq '^prior_dkms_inventory_sha256=[0-9a-f]{64}$' "$state"
 grep -Fxq 'prior_tryboot_sha256=none' "$state"
 grep -Fxq 'module_existed=false' "$state"
 grep -Fxq 'overlay_existed=false' "$state"
+grep -Fxq 'backlight_rule_file=70-planeradar-backlight.rules' "$state"
+grep -Eq '^backlight_rule_sha256=[0-9a-f]{64}$' "$state"
+grep -Fxq 'prior_backlight_rule_existed=false' "$state"
+grep -Fxq 'prior_backlight_rule_sha256=none' "$state"
 grep -Fq 'fixture committed source: hyperpixel2r_kms_main.c' \
   "$root/usr/src/hyperpixel2r-kms-0.1.1/hyperpixel2r_kms_main.c" ||
   fail 'DKMS source was not materialized from the committed source identity'
@@ -2972,20 +3141,27 @@ state_mutations=(
   'module_existed:maybe'
   'overlay_existed:maybe'
   'prior_dkms_inventory_sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  'backlight_rule_file:foreign.rules'
+  'backlight_rule_sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  'prior_backlight_rule_existed:maybe'
+  'prior_backlight_rule_sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
 )
 for mutation in "${state_mutations[@]}"; do
   assert_rollback_rejects_state_mutation "${mutation%%:*}" "${mutation#*:}"
 done
 manifest_mutations=(
-  'schema_version:2'
+  'schema_version:1'
   'driver_version:0.1.2'
   'source_tree:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
   'kernel_release:6.18.35+rpt-rpi-v8'
+  'capability:foreign-capability'
   'module_file:foreign.ko'
   'module_sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
   'overlay_sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
   'applied_dtb_file:foreign.dtb'
   'applied_dtb_sha256:ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
+  'backlight_rule_file:foreign.rules'
+  'backlight_rule_sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 )
 for mutation in "${manifest_mutations[@]}"; do
   assert_rollback_rejects_manifest_mutation "${mutation%%:*}" "${mutation#*:}"
@@ -3257,13 +3433,18 @@ prior_dkms_sums="$fixture/prior-dkms-version-one.sums"
 (cd "$root/usr/src/hyperpixel2r-kms-0.1.1" && sha256sum * | sed 's#  # #') > "$prior_dkms_sums"
 run_stage >/dev/null
 first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
+downgrade_artifact_to_schema_one "$first_artifact"
 printf 'registered\n' > "$first_artifact/dkms-prior-state"
 state="$root/var/lib/hyperpixel2r-kms/tryboot-state"
 sed -i \
-  -e 's/^schema_version=3$/schema_version=1/' \
+  -e 's/^schema_version=4$/schema_version=1/' \
   -e '/^module_existed=/d' \
   -e '/^overlay_existed=/d' \
   -e '/^prior_dkms_inventory_sha256=/d' \
+  -e '/^backlight_rule_file=/d' \
+  -e '/^backlight_rule_sha256=/d' \
+  -e '/^prior_backlight_rule_existed=/d' \
+  -e '/^prior_backlight_rule_sha256=/d' \
   "$state"
 run_controller rollback-boot.sh >/dev/null
 assert_prior_dkms "$prior_dkms_sums" added
@@ -3278,10 +3459,15 @@ prior_dkms_sums="$fixture/prior-dkms-version-two.sums"
 run_stage >/dev/null
 state="$root/var/lib/hyperpixel2r-kms/tryboot-state"
 first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
+downgrade_artifact_to_schema_one "$first_artifact"
 printf 'registered\n' > "$first_artifact/dkms-prior-state"
 sed -i \
-  -e 's/^schema_version=3$/schema_version=2/' \
+  -e 's/^schema_version=4$/schema_version=2/' \
   -e '/^prior_dkms_inventory_sha256=/d' \
+  -e '/^backlight_rule_file=/d' \
+  -e '/^backlight_rule_sha256=/d' \
+  -e '/^prior_backlight_rule_existed=/d' \
+  -e '/^prior_backlight_rule_sha256=/d' \
   "$state"
 run_controller rollback-boot.sh >/dev/null
 assert_prior_dkms "$prior_dkms_sums" added
@@ -3360,8 +3546,8 @@ shared_extra_sha="$(sha256sum "$shared_extra_module" | awk '{ print $1 }')"
 PATH="$bin:$PATH" HP2R_FIXTURE_ROOT="$root" HP2R_FIXTURE_RELEASE="$release" depmod -a "$release"
 run_stage >/dev/null
 state="$root/var/lib/hyperpixel2r-kms/tryboot-state"
-grep -Fxq 'schema_version=3' "$state" ||
-  fail 'shared installed rollback fixture is not a schema-3 transaction'
+grep -Fxq 'schema_version=4' "$state" ||
+  fail 'shared installed rollback fixture is not a schema-4 transaction'
 grep -Fxq 'module_existed=true' "$state" ||
   fail 'shared installed rollback fixture did not record the preexisting module'
 first_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"

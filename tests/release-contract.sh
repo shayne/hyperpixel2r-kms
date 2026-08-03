@@ -283,6 +283,8 @@ allowed_hyphen_interface="${legacy_identity}-backlight"
 allowed_hyphen_pins="${allowed_hyphen_interface}-pins"
 allowed_underscore_interface="${legacy_identity}_backlight"
 allowed_underscore_pins="${allowed_underscore_interface}_pins"
+allowed_backlight_name="$allowed_hyphen_interface"
+allowed_backlight_rule="70-${allowed_hyphen_interface}.rules"
 temporary_dir="$(mktemp -d "${TMPDIR:-/tmp}/hp2r-release-contract.XXXXXX")"
 trap 'rm -rf "$temporary_dir"' EXIT
 
@@ -378,7 +380,7 @@ release_identity_token_allowed() {
       ;;
     scripts/check-artifacts.sh)
       case "$identity_token" in
-        "$allowed_hyphen_interface"|"$allowed_hyphen_pins") return 0 ;;
+        "$allowed_hyphen_interface"|"$allowed_hyphen_pins"|"$allowed_backlight_rule") return 0 ;;
       esac
       ;;
     scripts/common.sh)
@@ -386,7 +388,8 @@ release_identity_token_allowed() {
         "$allowed_hyphen_interface"|\
         "$allowed_hyphen_pins"|\
         "$allowed_underscore_interface"|\
-        "$allowed_underscore_pins") return 0 ;;
+        "$allowed_underscore_pins"|\
+        "$allowed_backlight_rule") return 0 ;;
       esac
       ;;
     tests/backlight-contract.sh)
@@ -394,6 +397,11 @@ release_identity_token_allowed() {
         "$allowed_hyphen_interface"|\
         "$allowed_hyphen_pins"|\
         "$allowed_underscore_interface") return 0 ;;
+      esac
+      ;;
+    packaging/70-planeradar-backlight.rules|scripts/accepted-lifecycle.sh|scripts/build-driver.sh|scripts/stage-tryboot.sh|tests/boot-scripts.sh|tests/build-contract.sh|tests/release-contract.sh)
+      case "$identity_token" in
+        "$allowed_backlight_name"|"$allowed_backlight_rule") return 0 ;;
       esac
       ;;
   esac
@@ -424,6 +432,15 @@ check_release_identity "$legitimate_identity_root" || {
   exit 1
 }
 
+legitimate_rule_root="$(
+  identity_fixture legitimate-rule packaging/70-planeradar-backlight.rules \
+    "KERNEL==\"$allowed_backlight_name\""
+)"
+check_release_identity "$legitimate_rule_root" || {
+  printf 'release identity guard rejected the exact public backlight rule token\n' >&2
+  exit 1
+}
+
 binary_identity_root="$temporary_dir/identity-binary"
 binary_identity_path=overlays/hyperpixel2r-kms-overlay.dts
 mkdir -p "$binary_identity_root/$(dirname "$binary_identity_path")"
@@ -440,7 +457,8 @@ for hostile_fixture in \
   'hyphen-suffix|overlays/hyperpixel2r-kms-overlay.dts' \
   'underscore-suffix|scripts/common.sh' \
   'hyphen-prefix|scripts/check-artifacts.sh' \
-  'underscore-prefix|tests/backlight-contract.sh'
+  'underscore-prefix|tests/backlight-contract.sh' \
+  'rule-suffix|packaging/70-planeradar-backlight.rules'
 do
   IFS='|' read -r fixture_name fixture_path <<< "$hostile_fixture"
   case "$fixture_name" in
@@ -448,6 +466,7 @@ do
     underscore-suffix) fixture_text="${allowed_underscore_pins}_private" ;;
     hyphen-prefix) fixture_text="secret-$allowed_hyphen_interface" ;;
     underscore-prefix) fixture_text="private_$allowed_underscore_pins" ;;
+    rule-suffix) fixture_text="${allowed_backlight_name}-private" ;;
   esac
   hostile_identity_root="$(
     identity_fixture "$fixture_name" "$fixture_path" "$fixture_text"
@@ -490,25 +509,28 @@ overlay_file="hyperpixel2r-kms-${source_revision:0:12}.dtbo"
 printf 'synthetic module fixture\n' > "$artifact_dir/hyperpixel2r_kms.ko"
 printf 'synthetic overlay fixture\n' > "$artifact_dir/$overlay_file"
 printf 'synthetic applied dtb fixture\n' > "$artifact_dir/hyperpixel2r-kms-applied.dtb"
+printf '%s\n' 'SUBSYSTEM=="backlight", KERNEL=="planeradar-backlight", RUN+="/usr/bin/chgrp video /sys%p/brightness", RUN+="/usr/bin/chmod 0660 /sys%p/brightness"' > "$artifact_dir/70-planeradar-backlight.rules"
 for helper in host-fixdep host-modpost host-genksyms; do
   printf 'synthetic %s fixture\n' "$helper" > "$artifact_dir/$helper"
 done
 module_sha256="$(sha256sum "$artifact_dir/hyperpixel2r_kms.ko" | awk '{print $1}')"
 overlay_sha256="$(sha256sum "$artifact_dir/$overlay_file" | awk '{print $1}')"
 applied_dtb_sha256="$(sha256sum "$artifact_dir/hyperpixel2r-kms-applied.dtb" | awk '{print $1}')"
+backlight_rule_sha256="$(sha256sum "$artifact_dir/70-planeradar-backlight.rules" | awk '{print $1}')"
 host_fixdep_sha256="$(sha256sum "$artifact_dir/host-fixdep" | awk '{print $1}')"
 host_modpost_sha256="$(sha256sum "$artifact_dir/host-modpost" | awk '{print $1}')"
 host_genksyms_sha256="$(sha256sum "$artifact_dir/host-genksyms" | awk '{print $1}')"
 source_deb_sha256='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 base_dtb_sha256='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 {
-  printf 'schema_version\t1\n'
+  printf 'schema_version\t2\n'
   printf 'driver_version\t0.1.1\n'
   printf 'source_revision\t%s\n' "$source_revision"
   printf 'source_tree\t%s\n' "$source_tree"
   printf 'kernel_release\t%s\n' "$release"
   printf 'architecture\taarch64\n'
   printf 'base_dtb_sha256\t%s\n' "$base_dtb_sha256"
+  printf 'capability\tpwm-backlight-v1\n'
   printf 'module_file\thyperpixel2r_kms.ko\n'
   printf 'module_sha256\t%s\n' "$module_sha256"
   printf 'module_vermagic\t%s SMP preempt mod_unload modversions aarch64\n' "$release"
@@ -516,6 +538,8 @@ base_dtb_sha256='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   printf 'overlay_sha256\t%s\n' "$overlay_sha256"
   printf 'applied_dtb_file\thyperpixel2r-kms-applied.dtb\n'
   printf 'applied_dtb_sha256\t%s\n' "$applied_dtb_sha256"
+  printf 'backlight_rule_file\t%s\n' "$allowed_backlight_rule"
+  printf 'backlight_rule_sha256\t%s\n' "$backlight_rule_sha256"
 } > "$artifact_dir/manifest.txt"
 printf '%s  hyperpixel2r_kms.ko\n' "$module_sha256" > "$artifact_dir/module.sha256"
 printf '%s  %s\n' "$overlay_sha256" "$overlay_file" > "$artifact_dir/overlay.sha256"
@@ -605,7 +629,8 @@ manifest = json.loads((output / "driver-manifest.json").read_text())
 schema = json.loads((output.parent / "fixture" / "release" / "driver-manifest.schema.json").read_text())
 
 assert schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
-assert manifest["schema_version"] == 1
+assert manifest["schema_version"] == 2
+assert manifest["capabilities"] == ["pwm-backlight-v1"]
 assert manifest["driver_version"] == "0.1.1"
 assert manifest["source"]["commit"] == commit
 assert manifest["source"]["tree"] == tree
@@ -667,6 +692,8 @@ def reject(name, mutate):
 reject("unknown-field", lambda value: value.__setitem__("unexpected", True))
 reject("missing-source-tree", lambda value: value["source"].pop("tree"))
 reject("bad-supported-constant", lambda value: value["supported"].__setitem__("board", "other"))
+reject("wrong-capability", lambda value: value.__setitem__("capabilities", ["gpio-backlight-v1"]))
+reject("missing-capability", lambda value: value.pop("capabilities"))
 reject("bad-digest", lambda value: value["artifacts"][0].__setitem__("sha256", "bad"))
 reject("exact-without-architecture", lambda value: value["artifacts"].append({
     "name": "hyperpixel2r-kms-test-aarch64.tar.zst",

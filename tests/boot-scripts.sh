@@ -52,9 +52,11 @@ mkdir -p "$artifact_dir" "$target_dir"
 module_file='hyperpixel2r_kms.ko'
 overlay_file="hyperpixel2r-kms-${source_revision:0:12}.dtbo"
 applied_dtb_file='hyperpixel2r-kms-applied.dtb'
+backlight_rule_file='70-planeradar-backlight.rules'
 printf 'synthetic module fixture\n' > "$artifact_dir/$module_file"
 printf 'synthetic overlay fixture\n' > "$artifact_dir/$overlay_file"
 printf 'synthetic applied dtb fixture\n' > "$artifact_dir/$applied_dtb_file"
+printf '%s\n' 'SUBSYSTEM=="backlight", KERNEL=="planeradar-backlight", RUN+="/usr/bin/chgrp video /sys%p/brightness", RUN+="/usr/bin/chmod 0660 /sys%p/brightness"' > "$artifact_dir/$backlight_rule_file"
 for helper in host-fixdep host-modpost host-genksyms; do
   printf 'synthetic %s fixture\n' "$helper" > "$artifact_dir/$helper"
 done
@@ -62,6 +64,7 @@ done
 module_sha256="$(sha256sum "$artifact_dir/$module_file" | awk '{print $1}')"
 overlay_sha256="$(sha256sum "$artifact_dir/$overlay_file" | awk '{print $1}')"
 applied_dtb_sha256="$(sha256sum "$artifact_dir/$applied_dtb_file" | awk '{print $1}')"
+backlight_rule_sha256="$(sha256sum "$artifact_dir/$backlight_rule_file" | awk '{print $1}')"
 host_fixdep_sha256="$(sha256sum "$artifact_dir/host-fixdep" | awk '{print $1}')"
 host_modpost_sha256="$(sha256sum "$artifact_dir/host-modpost" | awk '{print $1}')"
 host_genksyms_sha256="$(sha256sum "$artifact_dir/host-genksyms" | awk '{print $1}')"
@@ -69,13 +72,14 @@ source_deb_sha256='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 base_dtb_sha256='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 
 {
-  printf 'schema_version\t1\n'
+  printf 'schema_version\t2\n'
   printf 'driver_version\t0.1.1\n'
   printf 'source_revision\t%s\n' "$source_revision"
   printf 'source_tree\t%s\n' "$source_tree"
   printf 'kernel_release\t%s\n' "$release"
   printf 'architecture\taarch64\n'
   printf 'base_dtb_sha256\t%s\n' "$base_dtb_sha256"
+  printf 'capability\tpwm-backlight-v1\n'
   printf 'module_file\t%s\n' "$module_file"
   printf 'module_sha256\t%s\n' "$module_sha256"
   printf 'module_vermagic\t%s fixture\n' "$release"
@@ -83,6 +87,8 @@ base_dtb_sha256='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   printf 'overlay_sha256\t%s\n' "$overlay_sha256"
   printf 'applied_dtb_file\t%s\n' "$applied_dtb_file"
   printf 'applied_dtb_sha256\t%s\n' "$applied_dtb_sha256"
+  printf 'backlight_rule_file\t%s\n' "$backlight_rule_file"
+  printf 'backlight_rule_sha256\t%s\n' "$backlight_rule_sha256"
 } > "$artifact_dir/manifest.txt"
 {
   printf 'host_arch\tx86_64\n'

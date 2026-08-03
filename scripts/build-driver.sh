@@ -123,6 +123,7 @@ for source_path in \
   kernel/Kbuild \
   kernel/hyperpixel2r_kms_main.c \
   overlays/hyperpixel2r-kms-overlay.dts \
+  packaging/70-planeradar-backlight.rules \
   scripts/common.sh \
   scripts/prepare-kbuild-host-tools.sh
 do
@@ -135,6 +136,12 @@ do
     }
   fi
 done
+if "$release_source"; then
+  backlight_rule_source="$(hp2r_release_source_file "$release_source_root" "packaging/$HP2R_BACKLIGHT_RULE_FILE")"
+else
+  backlight_rule_source="$repo_root/packaging/$HP2R_BACKLIGHT_RULE_FILE"
+fi
+hp2r_validate_backlight_rule "$backlight_rule_source"
 
 target_parent="$kernel_target_parent"
 test -d "$target_parent" || {
@@ -365,6 +372,7 @@ cp \
   "$build_dir/kernel/module.sha256" \
   "$build_dir/out/$overlay_file" \
   "$build_dir/out/$applied_dtb_file" \
+  "$backlight_rule_source" \
   "$host_tools_file" \
   "$staging_dir/"
 install -m 0755 \
@@ -380,12 +388,14 @@ install -m 0755 \
 module="$staging_dir/hyperpixel2r_kms.ko"
 overlay="$staging_dir/$overlay_file"
 applied_dtb="$staging_dir/$applied_dtb_file"
+backlight_rule="$staging_dir/$HP2R_BACKLIGHT_RULE_FILE"
 hp2r_validate_checksum_file "$staging_dir/module.sha256" "$module"
 hp2r_write_checksum "$overlay" "$staging_dir/overlay.sha256"
 hp2r_write_checksum "$applied_dtb" "$staging_dir/applied-dtb.sha256"
 module_sha256="$(hp2r_sha256 "$module")"
 overlay_sha256="$(hp2r_sha256 "$overlay")"
 applied_dtb_sha256="$(hp2r_sha256 "$applied_dtb")"
+backlight_rule_sha256="$(hp2r_sha256 "$backlight_rule")"
 module_vermagic="$(
   awk -F ': *' '$1 == "vermagic" { sub(/^vermagic: */, ""); print; exit }' \
     "$staging_dir/module.modinfo.txt"
@@ -400,13 +410,14 @@ test "$module_license" = GPL || {
 }
 
 {
-  printf 'schema_version\t1\n'
+  printf 'schema_version\t2\n'
   printf 'driver_version\t%s\n' "$HP2R_DRIVER_VERSION"
   printf 'source_revision\t%s\n' "$source_revision"
   printf 'source_tree\t%s\n' "$source_tree"
   printf 'kernel_release\t%s\n' "$release"
   printf 'architecture\taarch64\n'
   printf 'base_dtb_sha256\t%s\n' "$base_dtb_sha256"
+  printf 'capability\t%s\n' "$HP2R_BACKLIGHT_CAPABILITY"
   printf 'module_file\thyperpixel2r_kms.ko\n'
   printf 'module_sha256\t%s\n' "$module_sha256"
   printf 'module_vermagic\t%s\n' "$module_vermagic"
@@ -414,6 +425,8 @@ test "$module_license" = GPL || {
   printf 'overlay_sha256\t%s\n' "$overlay_sha256"
   printf 'applied_dtb_file\t%s\n' "$applied_dtb_file"
   printf 'applied_dtb_sha256\t%s\n' "$applied_dtb_sha256"
+  printf 'backlight_rule_file\t%s\n' "$HP2R_BACKLIGHT_RULE_FILE"
+  printf 'backlight_rule_sha256\t%s\n' "$backlight_rule_sha256"
 } > "$staging_dir/manifest.txt"
 
 hp2r_validate_artifact_provenance \

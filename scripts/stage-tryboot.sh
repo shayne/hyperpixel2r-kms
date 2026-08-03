@@ -57,6 +57,7 @@ driver_version="$(hp2r_manifest_value "$manifest" driver_version)"
 module_file="$(hp2r_manifest_value "$manifest" module_file)"
 overlay_file="$(hp2r_manifest_value "$manifest" overlay_file)"
 applied_dtb_file="$(hp2r_manifest_value "$manifest" applied_dtb_file)"
+backlight_rule_file="$(hp2r_manifest_value "$manifest" backlight_rule_file)"
 [[ "$source_revision" =~ ^[0-9a-f]{40}$ && "$source_tree" =~ ^[0-9a-f]{40}$ ]]
 release_source_root="${HP2R_RELEASE_SOURCE_ROOT:-$repo_root}"
 if hp2r_release_source_available "$release_source_root"; then
@@ -71,10 +72,12 @@ test "$(hp2r_manifest_value "$manifest" kernel_release)" = "$release"
 require_regular() {
   test ! -L "$1" && test -f "$1" || { echo "required regular file is missing: $1" >&2; exit 1; }
 }
-for artifact in "$manifest" "$artifact_dir/$module_file" "$artifact_dir/$overlay_file" "$artifact_dir/$applied_dtb_file"; do require_regular "$artifact"; done
+for artifact in "$manifest" "$artifact_dir/$module_file" "$artifact_dir/$overlay_file" "$artifact_dir/$applied_dtb_file" "$artifact_dir/$backlight_rule_file"; do require_regular "$artifact"; done
 hp2r_verify_sha256 "$artifact_dir/$module_file" "$(hp2r_manifest_value "$manifest" module_sha256)" 'driver module'
 hp2r_verify_sha256 "$artifact_dir/$overlay_file" "$(hp2r_manifest_value "$manifest" overlay_sha256)" 'driver overlay'
 hp2r_verify_sha256 "$artifact_dir/$applied_dtb_file" "$(hp2r_manifest_value "$manifest" applied_dtb_sha256)" 'applied DTB'
+hp2r_validate_backlight_rule "$artifact_dir/$backlight_rule_file"
+hp2r_verify_sha256 "$artifact_dir/$backlight_rule_file" "$(hp2r_manifest_value "$manifest" backlight_rule_sha256)" 'backlight rule'
 
 payload="$(mktemp -d "${TMPDIR:-/tmp}/hp2r-tryboot-payload.XXXXXX")"
 remote_stage=''
@@ -86,7 +89,7 @@ cleanup() {
 }
 trap cleanup EXIT
 mkdir -p "$payload/dkms-source"
-for artifact in "$manifest" "$artifact_dir/$module_file" "$artifact_dir/$overlay_file" "$artifact_dir/$applied_dtb_file"; do install -m 0644 "$artifact" "$payload/$(basename "$artifact")"; done
+for artifact in "$manifest" "$artifact_dir/$module_file" "$artifact_dir/$overlay_file" "$artifact_dir/$applied_dtb_file" "$artifact_dir/$backlight_rule_file"; do install -m 0644 "$artifact" "$payload/$(basename "$artifact")"; done
 install -m 0644 "$repo_root/scripts/lifecycle-remote.sh" "$payload/lifecycle-remote.sh"
 
 # Source is materialized from the artifact's committed revision, never from a
@@ -109,7 +112,7 @@ remote_stage="$(ssh "${ssh_options[@]}" "$target" mktemp -d /tmp/hp2r-tryboot-st
 scp "${ssh_options[@]}" -rp "$payload/." "$target:$remote_stage/"
 ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" stage \
   "$remote_stage" "$driver_version" "$source_revision" "$source_tree" "$release" \
-  "$module_file" "$overlay_file" "$applied_dtb_file" "$replace_overlay"
+  "$module_file" "$overlay_file" "$applied_dtb_file" "$backlight_rule_file" "$replace_overlay"
 
 # Delete the validated incoming payload before the reboot is requested.  The
 # transaction is fully published on target at this point; keeping /tmp input

@@ -214,6 +214,8 @@ if test -d "$artifact_parent"; then
     hp2r_validate_checksum_file \
       "$artifact_dir/applied-dtb.sha256" \
       "$artifact_dir/$(hp2r_manifest_value "$artifact_manifest" applied_dtb_file)"
+    hp2r_validate_backlight_rule \
+      "$artifact_dir/$(hp2r_manifest_value "$artifact_manifest" backlight_rule_file)"
     printf '%s\t%s\n' "$release" "$artifact_dir" >> "$exact_entries_file"
   done
 fi
@@ -392,8 +394,9 @@ for line in exact_entries:
         bundle_manifest_sha256=hashlib.sha256(bundle_manifest.read_bytes()).hexdigest(),
     ))
 document = {
-    "schema_version": 1,
+    "schema_version": 2,
     "driver_version": version,
+    "capabilities": ["pwm-backlight-v1"],
     "source": {
         "repository": "https://github.com/shayne/hyperpixel2r-kms",
         "commit": commit,

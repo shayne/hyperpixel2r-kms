@@ -87,14 +87,17 @@ hp2r_validate_artifact_manifest "$manifest"
 module_file="$(hp2r_manifest_value "$manifest" module_file)"
 overlay_file="$(hp2r_manifest_value "$manifest" overlay_file)"
 applied_dtb_file="$(hp2r_manifest_value "$manifest" applied_dtb_file)"
+backlight_rule_file="$(hp2r_manifest_value "$manifest" backlight_rule_file)"
 module="$artifact_dir/$module_file"
 overlay="$artifact_dir/$overlay_file"
 applied_dtb="$artifact_dir/$applied_dtb_file"
+backlight_rule="$artifact_dir/$backlight_rule_file"
 
 for artifact in \
   "$module" \
   "$overlay" \
   "$applied_dtb" \
+  "$backlight_rule" \
   "$artifact_dir/module.file.txt" \
   "$artifact_dir/module.readelf.txt" \
   "$artifact_dir/module.modinfo.txt" \
@@ -166,6 +169,12 @@ test "$(hp2r_sha256 "$overlay")" = \
 test "$(hp2r_sha256 "$applied_dtb")" = \
   "$(hp2r_manifest_value "$manifest" applied_dtb_sha256)" || {
   echo "driver applied DTB checksum does not match manifest" >&2
+  exit 1
+}
+hp2r_validate_backlight_rule "$backlight_rule"
+test "$(hp2r_sha256 "$backlight_rule")" = \
+  "$(hp2r_manifest_value "$manifest" backlight_rule_sha256)" || {
+  echo "driver backlight rule checksum does not match manifest" >&2
   exit 1
 }
 hp2r_validate_checksum_file "$artifact_dir/module.sha256" "$module"

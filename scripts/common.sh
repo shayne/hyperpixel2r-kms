@@ -2,6 +2,8 @@
 
 HP2R_DRIVER_VERSION="0.1.1"
 HP2R_DEFAULT_BUILD_IMAGE="hyperpixel2r-kms-kernel-builder:debian-trixie-gcc14"
+HP2R_BACKLIGHT_CAPABILITY="pwm-backlight-v1"
+HP2R_BACKLIGHT_RULE_FILE="70-planeradar-backlight.rules"
 
 hp2r_validate_target() {
   local target="${1-}"
@@ -127,6 +129,18 @@ hp2r_write_checksum() {
   local output="$2"
 
   printf '%s  %s\n' "$(hp2r_sha256 "$file")" "$(basename "$file")" > "$output"
+}
+
+hp2r_validate_backlight_rule() {
+  local rule="$1"
+
+  hp2r_require_regular "$rule" || return
+  cmp -s "$rule" <(
+    printf '%s\n' 'SUBSYSTEM=="backlight", KERNEL=="planeradar-backlight", RUN+="/usr/bin/chgrp video /sys%p/brightness", RUN+="/usr/bin/chmod 0660 /sys%p/brightness"'
+  ) || {
+    echo "backlight rule is not the exact narrow permission contract" >&2
+    return 1
+  }
 }
 
 hp2r_validate_checksum_file() {
@@ -385,6 +399,7 @@ hp2r_validate_artifact_manifest() {
     kernel_release
     architecture
     base_dtb_sha256
+    capability
     module_file
     module_sha256
     module_vermagic
@@ -392,6 +407,8 @@ hp2r_validate_artifact_manifest() {
     overlay_sha256
     applied_dtb_file
     applied_dtb_sha256
+    backlight_rule_file
+    backlight_rule_sha256
   )
   local key
   local value
@@ -399,7 +416,7 @@ hp2r_validate_artifact_manifest() {
   local source_revision
 
   hp2r_validate_exact_manifest_rows "$manifest" "${required_keys[@]}" || return
-  test "$(hp2r_manifest_value "$manifest" schema_version)" = 1 || {
+  test "$(hp2r_manifest_value "$manifest" schema_version)" = 2 || {
     echo "unsupported artifact manifest schema version" >&2
     return 1
   }
@@ -424,11 +441,17 @@ hp2r_validate_artifact_manifest() {
     echo "artifact architecture must be aarch64" >&2
     return 1
   }
+  test "$(hp2r_manifest_value "$manifest" capability)" = \
+    "$HP2R_BACKLIGHT_CAPABILITY" || {
+    echo "artifact capability is unsupported" >&2
+    return 1
+  }
   for key in \
     base_dtb_sha256 \
     module_sha256 \
     overlay_sha256 \
-    applied_dtb_sha256
+    applied_dtb_sha256 \
+    backlight_rule_sha256
   do
     value="$(hp2r_manifest_value "$manifest" "$key")"
     [[ "$value" =~ ^[0-9a-f]{64}$ ]] || {
@@ -436,7 +459,7 @@ hp2r_validate_artifact_manifest() {
       return 1
     }
   done
-  for key in module_file overlay_file applied_dtb_file; do
+  for key in module_file overlay_file applied_dtb_file backlight_rule_file; do
     hp2r_validate_artifact_name \
       "$(hp2r_manifest_value "$manifest" "$key")" || return
   done
@@ -453,6 +476,11 @@ hp2r_validate_artifact_manifest() {
   test "$(hp2r_manifest_value "$manifest" applied_dtb_file)" = \
     hyperpixel2r-kms-applied.dtb || {
     echo "artifact applied DTB filename is invalid" >&2
+    return 1
+  }
+  test "$(hp2r_manifest_value "$manifest" backlight_rule_file)" = \
+    "$HP2R_BACKLIGHT_RULE_FILE" || {
+    echo "artifact backlight rule filename is invalid" >&2
     return 1
   }
   value="$(hp2r_manifest_value "$manifest" module_vermagic)"
@@ -599,10 +627,16 @@ hp2r_validate_artifact_provenance() {
   local key
   local helper
   local checksum_key
+  local backlight_rule
 
   hp2r_validate_artifact_manifest "$manifest" || return
   hp2r_validate_target_manifest "$target_manifest" || return
   hp2r_validate_host_tools_manifest "$host_manifest" || return
+  backlight_rule="$artifact_dir/$(hp2r_manifest_value "$manifest" backlight_rule_file)"
+  hp2r_validate_backlight_rule "$backlight_rule" || return
+  hp2r_verify_sha256 "$backlight_rule" \
+    "$(hp2r_manifest_value "$manifest" backlight_rule_sha256)" \
+    'backlight rule' || return
   test "$(hp2r_manifest_value "$manifest" kernel_release)" = \
     "$(hp2r_manifest_value "$target_manifest" kernel_release)" || {
     echo "artifact kernel release does not match target export" >&2

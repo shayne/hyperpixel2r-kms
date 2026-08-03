@@ -17,6 +17,8 @@ module_file=''
 module_sha256=''
 overlay_file=''
 overlay_sha256=''
+backlight_rule_file=''
+backlight_rule_sha256=''
 while test "$#" -gt 0; do
   case "$1" in
     --target) test "$#" -ge 2 || exit 64; target="$2"; shift 2 ;;
@@ -29,6 +31,8 @@ while test "$#" -gt 0; do
     --module-sha256) test "$#" -ge 2 || exit 64; module_sha256="$2"; shift 2 ;;
     --overlay-file) test "$#" -ge 2 || exit 64; overlay_file="$2"; shift 2 ;;
     --overlay-sha256) test "$#" -ge 2 || exit 64; overlay_sha256="$2"; shift 2 ;;
+    --backlight-rule-file) test "$#" -ge 2 || exit 64; backlight_rule_file="$2"; shift 2 ;;
+    --backlight-rule-sha256) test "$#" -ge 2 || exit 64; backlight_rule_sha256="$2"; shift 2 ;;
     -h|--help)
       echo 'Usage: accepted-lifecycle.sh --target TARGET --action ACTION [exact identity]'
       exit 0
@@ -55,8 +59,10 @@ if test "$action" = prepare-new; then
   [[ "$module_sha256" =~ ^[0-9a-f]{64}$ ]] || exit 64
   test "$overlay_file" = "hyperpixel2r-kms-${source_revision:0:12}.dtbo" || exit 64
   [[ "$overlay_sha256" =~ ^[0-9a-f]{64}$ ]] || exit 64
+  test "$backlight_rule_file" = 70-planeradar-backlight.rules || exit 64
+  [[ "$backlight_rule_sha256" =~ ^[0-9a-f]{64}$ ]] || exit 64
 else
-  test -z "$manifest_sha256$module_file$module_sha256$overlay_file$overlay_sha256" || exit 64
+  test -z "$manifest_sha256$module_file$module_sha256$overlay_file$overlay_sha256$backlight_rule_file$backlight_rule_sha256" || exit 64
 fi
 
 ssh_options=(-o BatchMode=yes -o ConnectTimeout=8 -o ConnectionAttempts=1)
@@ -90,7 +96,8 @@ case "$action" in
   prepare-new)
     ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" \
       prepare-new-accepted "$driver_version" "$source_revision" "$kernel_release" \
-      "$manifest_sha256" "$module_file" "$module_sha256" "$overlay_file" "$overlay_sha256"
+      "$manifest_sha256" "$module_file" "$module_sha256" "$overlay_file" "$overlay_sha256" \
+      "$backlight_rule_file" "$backlight_rule_sha256"
     ;;
   stage-retained)
     ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" \

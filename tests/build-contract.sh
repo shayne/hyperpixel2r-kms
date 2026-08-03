@@ -64,14 +64,18 @@ done
 temporary_dir="$(mktemp -d "${TMPDIR:-/tmp}/hp2r-build-contract.XXXXXX")"
 trap 'rm -rf "$temporary_dir"' EXIT
 valid_manifest="$temporary_dir/manifest.txt"
+backlight_rule="$temporary_dir/70-planeradar-backlight.rules"
+printf '%s\n' 'SUBSYSTEM=="backlight", KERNEL=="planeradar-backlight", RUN+="/usr/bin/chgrp video /sys%p/brightness", RUN+="/usr/bin/chmod 0660 /sys%p/brightness"' > "$backlight_rule"
+backlight_rule_sha256="$(sha256sum "$backlight_rule" | awk '{ print $1 }')"
 cat > "$valid_manifest" <<'MANIFEST'
-schema_version	1
+schema_version	2
 driver_version	0.1.1
 source_revision	0000000000000000000000000000000000000000
 source_tree	1111111111111111111111111111111111111111
 kernel_release	6.18.34+rpt-rpi-v8
 architecture	aarch64
 base_dtb_sha256	2222222222222222222222222222222222222222222222222222222222222222
+capability	pwm-backlight-v1
 module_file	hyperpixel2r_kms.ko
 module_sha256	3333333333333333333333333333333333333333333333333333333333333333
 module_vermagic	6.18.34+rpt-rpi-v8 SMP preempt mod_unload aarch64
@@ -79,7 +83,11 @@ overlay_file	hyperpixel2r-kms-000000000000.dtbo
 overlay_sha256	4444444444444444444444444444444444444444444444444444444444444444
 applied_dtb_file	hyperpixel2r-kms-applied.dtb
 applied_dtb_sha256	5555555555555555555555555555555555555555555555555555555555555555
+backlight_rule_file	70-planeradar-backlight.rules
+backlight_rule_sha256	BACKLIGHT_RULE_SHA256
 MANIFEST
+sed -i.bak "s/BACKLIGHT_RULE_SHA256/$backlight_rule_sha256/" "$valid_manifest"
+rm -f "$valid_manifest.bak"
 
 validate_manifest() {
   bash -eu -c \
@@ -90,7 +98,7 @@ validate_manifest() {
 }
 
 validate_manifest "$valid_manifest"
-for mutation in duplicate missing unknown absolute traversal trailing; do
+for mutation in duplicate missing unknown absolute traversal trailing wrong-capability renamed-rule; do
   invalid_manifest="$temporary_dir/$mutation.txt"
   case "$mutation" in
     duplicate)
@@ -118,9 +126,48 @@ for mutation in duplicate missing unknown absolute traversal trailing; do
       sed 's/^module_file	.*$/module_file	hyperpixel2r_kms.ko	extra/' \
         "$valid_manifest" > "$invalid_manifest"
       ;;
+    wrong-capability)
+      sed 's/^capability	.*$/capability	gpio-backlight-v1/' \
+        "$valid_manifest" > "$invalid_manifest"
+      ;;
+    renamed-rule)
+      sed 's/^backlight_rule_file	.*$/backlight_rule_file	99-display.rules/' \
+        "$valid_manifest" > "$invalid_manifest"
+      ;;
   esac
   if validate_manifest "$invalid_manifest" >/dev/null 2>&1; then
     printf 'artifact manifest accepted %s data\n' "$mutation" >&2
+    exit 1
+  fi
+done
+
+validate_rule() {
+  bash -eu -c \
+    'source "$1"; hp2r_validate_backlight_rule "$2"' \
+    bash \
+    "$repo_root/scripts/common.sh" \
+    "$1"
+}
+
+validate_rule "$backlight_rule"
+for mutation in broad tampered extra; do
+  invalid_rule="$temporary_dir/$mutation.rules"
+  case "$mutation" in
+    broad)
+      printf '%s\n' 'SUBSYSTEM=="backlight", RUN+="/usr/bin/chgrp video /sys%p/brightness", RUN+="/usr/bin/chmod 0660 /sys%p/brightness"' > "$invalid_rule"
+      ;;
+    tampered)
+      printf '%s\n' 'SUBSYSTEM=="backlight", KERNEL=="planeradar-backlight", RUN+="/usr/bin/chgrp video /sys%p/actual_brightness", RUN+="/usr/bin/chmod 0660 /sys%p/actual_brightness"' > "$invalid_rule"
+      ;;
+    extra)
+      {
+        cat "$backlight_rule"
+        printf '%s\n' 'SUBSYSTEM=="backlight", MODE="0666"'
+      } > "$invalid_rule"
+      ;;
+  esac
+  if validate_rule "$invalid_rule" >/dev/null 2>&1; then
+    printf 'backlight rule validator accepted %s permissions\n' "$mutation" >&2
     exit 1
   fi
 done
