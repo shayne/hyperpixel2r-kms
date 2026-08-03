@@ -79,7 +79,7 @@
 			status = "okay";
 			pinctrl-names = "default";
 			pinctrl-0 = <&planeradar_backlight_pins>;
-			clock-frequency = <1000000>;
+			assigned-clock-rates = <1000000>;
 		};
 	};
 

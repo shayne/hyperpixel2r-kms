@@ -364,7 +364,11 @@ test "$(fdt_hex "$pwm_pinctrl_path" brcm,function)" = 2
 test "$(fdt_string "$pwm_path" status)" = okay
 test "$(fdt_string "$pwm_path" pinctrl-names)" = default
 test "$(fdt_hex "$pwm_path" pinctrl-0)" = "$pwm_pinctrl_phandle"
-test "$(fdt_hex "$pwm_path" clock-frequency)" = f4240
+test "$(fdt_hex "$pwm_path" assigned-clock-rates)" = f4240
+if fdtget "$applied_dtb" "$pwm_path" clock-frequency >/dev/null 2>&1; then
+  echo "applied PWM node contains inert clock-frequency property" >&2
+  exit 1
+fi
 
 test "$(fdt_string "$touch_path" compatible)" = edt,edt-ft5406
 test "$(fdt_hex "$touch_path" reg)" = 15

@@ -805,7 +805,7 @@ phandle" \
         "PWM fragment shape is invalid"
       require_node_shape \
         /fragment@3/__overlay__ \
-        "clock-frequency
+        "assigned-clock-rates
 pinctrl-0
 pinctrl-names
 status" \
@@ -1019,8 +1019,14 @@ fragment@3" || fail "compiled overlay fragment set is invalid"
         default || fail "PWM pinctrl name is invalid"
       test "$(fdtget -t x "$overlay" /fragment@3/__overlay__ pinctrl-0)" = 4 ||
         fail "PWM pinctrl phandle is invalid"
-      test "$(fdtget -t x "$overlay" /fragment@3/__overlay__ clock-frequency)" = \
-        f4240 || fail "PWM clock frequency is invalid"
+      test "$(
+        fdtget -t x "$overlay" /fragment@3/__overlay__ assigned-clock-rates
+      )" = f4240 || fail "PWM assigned clock rate is invalid"
+      if fdtget "$overlay" /fragment@3/__overlay__ clock-frequency \
+        >/dev/null 2>&1
+      then
+        fail "PWM overlay contains inert clock-frequency property"
+      fi
       test "$(
         fdtget -t x "$overlay" "$panel_path/port/endpoint" phandle
       )" = 3 || fail "panel endpoint phandle is invalid"

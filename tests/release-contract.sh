@@ -280,54 +280,145 @@ legacy_host_marker="${legacy_user}@"
 legacy_password_marker="${legacy_user}s!"
 legacy_migration_path="release/legacy-${legacy_identity}-migration-v1.tsv"
 allowed_hyphen_interface="${legacy_identity}-backlight"
+allowed_hyphen_pins="${allowed_hyphen_interface}-pins"
 allowed_underscore_interface="${legacy_identity}_backlight"
 allowed_underscore_pins="${allowed_underscore_interface}_pins"
-identity_matches="$(
-  git -C "$repo_root" grep -niF "$legacy_identity" -- \
-    ':!.env' \
-    ":!$legacy_migration_path" \
-    ':!scripts/lifecycle-remote.sh' \
-    ':!scripts/uninstall.sh' \
-    ':!tests/boot-fixtures.sh' || true
-)"
-invalid_identity_matches=""
-if test -n "$identity_matches"; then
-  while IFS=: read -r match_path match_line match_text; do
-    case "$match_path" in
-      overlays/hyperpixel2r-kms-overlay.dts|\
-      scripts/check-artifacts.sh|\
-      scripts/common.sh|\
-      tests/backlight-contract.sh) ;;
-      *)
-        invalid_identity_matches+="$match_path:$match_line:$match_text"$'\n'
-        continue
-        ;;
-    esac
-    match_text="${match_text//$allowed_underscore_pins/}"
-    match_text="${match_text//$allowed_underscore_interface/}"
-    match_text="${match_text//$allowed_hyphen_interface/}"
-    if printf '%s\n' "$match_text" | grep -qiF "$legacy_identity"; then
-      invalid_identity_matches+="$match_path:$match_line:$match_text"$'\n'
-    fi
-  done <<< "$identity_matches"
-fi
-credential_matches="$(
-  git -C "$repo_root" grep -niE "$legacy_host_marker|$legacy_password_marker" -- \
-    ':!.env' \
-    ":!$legacy_migration_path" \
-    ':!scripts/lifecycle-remote.sh' \
-    ':!scripts/uninstall.sh' \
-    ':!tests/boot-fixtures.sh' || true
-)"
-if test -n "$invalid_identity_matches" || test -n "$credential_matches"; then
-  printf '%s' "$invalid_identity_matches" >&2
-  printf '%s\n' "$credential_matches" >&2
-  printf 'release source contains a deployment-specific identity or credential\n' >&2
-  exit 1
-fi
-
 temporary_dir="$(mktemp -d "${TMPDIR:-/tmp}/hp2r-release-contract.XXXXXX")"
 trap 'rm -rf "$temporary_dir"' EXIT
+
+check_release_identity() {
+  local guard_root="$1"
+  local identity_matches=""
+  local invalid_identity_matches=""
+  local credential_matches=""
+  local match_path=""
+  local match_line=""
+  local match_text=""
+  local identity_token=""
+
+  identity_matches="$(
+    git -C "$guard_root" grep -niF "$legacy_identity" -- \
+      ':!.env' \
+      ":!$legacy_migration_path" \
+      ':!scripts/lifecycle-remote.sh' \
+      ':!scripts/uninstall.sh' \
+      ':!tests/boot-fixtures.sh' || true
+  )"
+  if test -n "$identity_matches"; then
+    while IFS=: read -r match_path match_line match_text; do
+      while IFS= read -r identity_token; do
+        if ! release_identity_token_allowed "$match_path" "$identity_token"; then
+          invalid_identity_matches+="$match_path:$match_line:$match_text"$'\n'
+          break
+        fi
+      done < <(
+        printf '%s\n' "$match_text" |
+          grep -oEi "[[:alnum:]_.-]*${legacy_identity}[[:alnum:]_.-]*" || true
+      )
+    done <<< "$identity_matches"
+  fi
+  credential_matches="$(
+    git -C "$guard_root" grep -niE \
+      "$legacy_host_marker|$legacy_password_marker" -- \
+      ':!.env' \
+      ":!$legacy_migration_path" \
+      ':!scripts/lifecycle-remote.sh' \
+      ':!scripts/uninstall.sh' \
+      ':!tests/boot-fixtures.sh' || true
+  )"
+  if test -n "$invalid_identity_matches" || test -n "$credential_matches"; then
+    printf '%s' "$invalid_identity_matches" >&2
+    printf '%s\n' "$credential_matches" >&2
+    printf 'release source contains a deployment-specific identity or credential\n' >&2
+    return 1
+  fi
+}
+
+release_identity_token_allowed() {
+  local match_path="$1"
+  local identity_token="$2"
+
+  case "$match_path" in
+    overlays/hyperpixel2r-kms-overlay.dts)
+      case "$identity_token" in
+        "$allowed_hyphen_interface"|\
+        "$allowed_hyphen_pins"|\
+        "$allowed_underscore_interface"|\
+        "$allowed_underscore_pins") return 0 ;;
+      esac
+      ;;
+    scripts/check-artifacts.sh)
+      case "$identity_token" in
+        "$allowed_hyphen_interface"|"$allowed_hyphen_pins") return 0 ;;
+      esac
+      ;;
+    scripts/common.sh)
+      case "$identity_token" in
+        "$allowed_hyphen_interface"|\
+        "$allowed_hyphen_pins"|\
+        "$allowed_underscore_interface"|\
+        "$allowed_underscore_pins") return 0 ;;
+      esac
+      ;;
+    tests/backlight-contract.sh)
+      case "$identity_token" in
+        "$allowed_hyphen_interface"|\
+        "$allowed_hyphen_pins"|\
+        "$allowed_underscore_interface") return 0 ;;
+      esac
+      ;;
+  esac
+  return 1
+}
+
+check_release_identity "$repo_root"
+
+identity_fixture() {
+  local fixture_name="$1"
+  local fixture_path="$2"
+  local fixture_text="$3"
+  local fixture_root="$temporary_dir/identity-$fixture_name"
+
+  mkdir -p "$fixture_root/$(dirname "$fixture_path")"
+  printf '%s\n' "$fixture_text" > "$fixture_root/$fixture_path"
+  git -C "$fixture_root" init -q
+  git -C "$fixture_root" add "$fixture_path"
+  printf '%s\n' "$fixture_root"
+}
+
+legitimate_identity_root="$(
+  identity_fixture legitimate overlays/hyperpixel2r-kms-overlay.dts \
+    "$allowed_underscore_interface: $allowed_hyphen_interface { $allowed_underscore_pins: $allowed_hyphen_pins { }"
+)"
+check_release_identity "$legitimate_identity_root" || {
+  printf 'release identity guard rejected exact public interface tokens\n' >&2
+  exit 1
+}
+
+for hostile_fixture in \
+  'hyphen-suffix|overlays/hyperpixel2r-kms-overlay.dts' \
+  'underscore-suffix|scripts/common.sh' \
+  'hyphen-prefix|scripts/check-artifacts.sh' \
+  'underscore-prefix|tests/backlight-contract.sh'
+do
+  IFS='|' read -r fixture_name fixture_path <<< "$hostile_fixture"
+  case "$fixture_name" in
+    hyphen-suffix) fixture_text="$allowed_hyphen_interface-secret" ;;
+    underscore-suffix) fixture_text="${allowed_underscore_pins}_private" ;;
+    hyphen-prefix) fixture_text="secret-$allowed_hyphen_interface" ;;
+    underscore-prefix) fixture_text="private_$allowed_underscore_pins" ;;
+  esac
+  hostile_identity_root="$(
+    identity_fixture "$fixture_name" "$fixture_path" "$fixture_text"
+  )"
+  if check_release_identity "$hostile_identity_root" >/dev/null 2>&1; then
+    printf 'release identity guard accepted hostile compound: %s\n' \
+      "$fixture_text" >&2
+    exit 1
+  fi
+done
+printf 'release identity hostile compound simulations passed\n'
+
 fixture="$temporary_dir/fixture"
 mkdir "$fixture"
 

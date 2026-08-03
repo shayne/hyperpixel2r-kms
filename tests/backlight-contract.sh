@@ -92,8 +92,11 @@ test "$(fdtget -t x "$pinctrl_path" brcm,pins)" = 13 ||
   fail "PWM pinctrl does not own GPIO19"
 test "$(fdtget -t x "$pinctrl_path" brcm,function)" = 2 ||
   fail "GPIO19 is not configured for Alt5"
-test "$(fdtget -t x "$pwm_path" clock-frequency)" = f4240 ||
-  fail "PWM clock is not 1 MHz"
+test "$(fdtget -t x "$pwm_path" assigned-clock-rates)" = f4240 ||
+  fail "PWM assigned clock rate is not 1 MHz"
+if fdtget "$pwm_path" clock-frequency >/dev/null 2>&1; then
+  fail "PWM overlay contains inert clock-frequency property"
+fi
 test "$(fdtget -t s "$pwm_path" status)" = okay ||
   fail "PWM controller is not enabled"
 
