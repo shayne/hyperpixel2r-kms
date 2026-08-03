@@ -313,6 +313,25 @@ fdt_string() {
     fdtget -t s "/artifacts/$applied_dtb_file" "$1" "$2"
 }
 
+require_applied_property_absent() {
+  local node="$1"
+  local property="$2"
+  local present_error="$3"
+  local status=0
+
+  hp2r_fdt_property_absent \
+    "$applied_dtb" \
+    "$image" \
+    "$node" \
+    "$property" || status="$?"
+  case "$status" in
+    0) return 0 ;;
+    1) echo "$present_error" >&2 ;;
+    *) echo "failed to inspect applied DT property: $node:$property" >&2 ;;
+  esac
+  return 1
+}
+
 base_symbol_path() {
   hp2r_docker run --rm \
     --volume "$target_root:/target-root:ro" \
@@ -347,10 +366,10 @@ test "$(fdt_hex "$panel_path" sda-gpios)" = "$gpio_phandle a 0"
 test "$(fdt_hex "$panel_path" scl-gpios)" = "$gpio_phandle b 0"
 test "$(fdt_hex "$panel_path" cs-gpios)" = "$gpio_phandle 12 1"
 test "$(fdt_hex "$panel_path" backlight)" = "$backlight_phandle"
-if fdt_hex "$panel_path" backlight-gpios >/dev/null 2>&1; then
-  echo "applied panel must not contain a backlight GPIO" >&2
-  exit 1
-fi
+require_applied_property_absent \
+  "$panel_path" \
+  backlight-gpios \
+  "applied panel must not contain a backlight GPIO"
 test "$(fdt_hex "$panel_path" rotation)" = 0
 
 test "$(fdt_string "$backlight_path" compatible)" = pwm-backlight
@@ -365,10 +384,10 @@ test "$(fdt_string "$pwm_path" status)" = okay
 test "$(fdt_string "$pwm_path" pinctrl-names)" = default
 test "$(fdt_hex "$pwm_path" pinctrl-0)" = "$pwm_pinctrl_phandle"
 test "$(fdt_hex "$pwm_path" assigned-clock-rates)" = f4240
-if fdtget "$applied_dtb" "$pwm_path" clock-frequency >/dev/null 2>&1; then
-  echo "applied PWM node contains inert clock-frequency property" >&2
-  exit 1
-fi
+require_applied_property_absent \
+  "$pwm_path" \
+  clock-frequency \
+  "applied PWM node contains inert clock-frequency property"
 
 test "$(fdt_string "$touch_path" compatible)" = edt,edt-ft5406
 test "$(fdt_hex "$touch_path" reg)" = 15

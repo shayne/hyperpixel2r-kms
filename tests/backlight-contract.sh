@@ -7,6 +7,7 @@ temporary_dir="$(mktemp -d "${TMPDIR:-/tmp}/hp2r-backlight-contract.XXXXXX")"
 trap 'rm -rf "$temporary_dir"' EXIT
 
 mkdir -p \
+  "$temporary_dir/host-bin" \
   "$temporary_dir/include/dt-bindings/gpio" \
   "$temporary_dir/include/dt-bindings/interrupt-controller" \
   "$temporary_dir/include/dt-bindings/pinctrl"
@@ -46,6 +47,23 @@ docker run --rm \
       > /work/hyperpixel2r-kms.fdtdump \
       2>/dev/null
   '
+
+cp "$temporary_dir/hyperpixel2r-kms.dtbo" \
+  "$temporary_dir/hyperpixel2r-kms-inert-clock.dtbo"
+docker run --rm \
+  --volume "$temporary_dir:/work" \
+  "$image" \
+  fdtput -t x \
+    /work/hyperpixel2r-kms-inert-clock.dtbo \
+    /fragment@3/__overlay__ \
+    clock-frequency \
+    1000000
+
+cat > "$temporary_dir/host-bin/fdtget" <<'HOST_TOOL'
+#!/bin/sh
+exit 86
+HOST_TOOL
+chmod +x "$temporary_dir/host-bin/fdtget"
 
 fdtget() {
   local type=""
@@ -123,6 +141,54 @@ if grep -Fq 'backlight-gpios' "$temporary_dir/hyperpixel2r-kms.fdtdump"; then
 fi
 
 source "$repo_root/scripts/common.sh"
+
+property_absence_status() {
+  local compiled_dtb="$1"
+  local node="$2"
+  local property="$3"
+  local status=0
+
+  set +e
+  PATH="$temporary_dir/host-bin:$PATH" bash -c '
+    source "$1"
+    hp2r_fdt_property_absent "$2" "$3" "$4" "$5"
+  ' bash \
+    "$repo_root/scripts/common.sh" \
+    "$compiled_dtb" \
+    "$image" \
+    "$node" \
+    "$property" \
+    >/dev/null 2>&1
+  status="$?"
+  set -e
+  printf '%s\n' "$status"
+}
+
+absent_status="$(
+  property_absence_status \
+    "$temporary_dir/hyperpixel2r-kms.dtbo" \
+    "$pwm_path" \
+    clock-frequency
+)"
+test "$absent_status" = 0 ||
+  fail "Docker-backed property inspector could not prove absence: status $absent_status"
+present_status="$(
+  property_absence_status \
+    "$temporary_dir/hyperpixel2r-kms-inert-clock.dtbo" \
+    "$pwm_path" \
+    clock-frequency
+)"
+test "$present_status" = 1 ||
+  fail "property inspector accepted inert clock-frequency: status $present_status"
+failure_status="$(
+  property_absence_status \
+    "$temporary_dir/hyperpixel2r-kms.dtbo" \
+    /missing-node \
+    clock-frequency
+)"
+test "$failure_status" = 2 ||
+  fail "property inspector treated inspection failure as absence: status $failure_status"
+
 hp2r_validate_overlay "$temporary_dir/hyperpixel2r-kms.dtbo" "$image"
 
 printf 'PWM backlight compiled-overlay contract passed\n'

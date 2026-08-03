@@ -289,6 +289,9 @@ trap 'rm -rf "$temporary_dir"' EXIT
 check_release_identity() {
   local guard_root="$1"
   local identity_matches=""
+  local all_identity_paths=""
+  local text_identity_paths=""
+  local binary_identity_matches=""
   local invalid_identity_matches=""
   local credential_matches=""
   local match_path=""
@@ -296,8 +299,34 @@ check_release_identity() {
   local match_text=""
   local identity_token=""
 
+  all_identity_paths="$(
+    git -C "$guard_root" grep -ilF "$legacy_identity" -- \
+      ':!.env' \
+      ":!$legacy_migration_path" \
+      ':!scripts/lifecycle-remote.sh' \
+      ':!scripts/uninstall.sh' \
+      ':!tests/boot-fixtures.sh' || true
+  )"
+  text_identity_paths="$(
+    git -C "$guard_root" grep -ilIF "$legacy_identity" -- \
+      ':!.env' \
+      ":!$legacy_migration_path" \
+      ':!scripts/lifecycle-remote.sh' \
+      ':!scripts/uninstall.sh' \
+      ':!tests/boot-fixtures.sh' || true
+  )"
+  binary_identity_matches="$(
+    comm -23 \
+      <(printf '%s\n' "$all_identity_paths" | sed '/^$/d' | LC_ALL=C sort -u) \
+      <(printf '%s\n' "$text_identity_paths" | sed '/^$/d' | LC_ALL=C sort -u)
+  )"
+  if test -n "$binary_identity_matches"; then
+    while IFS= read -r match_path; do
+      invalid_identity_matches+="binary identity match: $match_path"$'\n'
+    done <<< "$binary_identity_matches"
+  fi
   identity_matches="$(
-    git -C "$guard_root" grep -niF "$legacy_identity" -- \
+    git -C "$guard_root" grep -niIF "$legacy_identity" -- \
       ':!.env' \
       ":!$legacy_migration_path" \
       ':!scripts/lifecycle-remote.sh' \
@@ -395,6 +424,18 @@ check_release_identity "$legitimate_identity_root" || {
   exit 1
 }
 
+binary_identity_root="$temporary_dir/identity-binary"
+binary_identity_path=overlays/hyperpixel2r-kms-overlay.dts
+mkdir -p "$binary_identity_root/$(dirname "$binary_identity_path")"
+printf 'prefix\0%s-private\0suffix\n' "$legacy_identity" \
+  > "$binary_identity_root/$binary_identity_path"
+git -C "$binary_identity_root" init -q
+git -C "$binary_identity_root" add "$binary_identity_path"
+if check_release_identity "$binary_identity_root" >/dev/null 2>&1; then
+  printf 'release identity guard accepted hostile tracked binary\n' >&2
+  exit 1
+fi
+
 for hostile_fixture in \
   'hyphen-suffix|overlays/hyperpixel2r-kms-overlay.dts' \
   'underscore-suffix|scripts/common.sh' \
@@ -417,7 +458,7 @@ do
     exit 1
   fi
 done
-printf 'release identity hostile compound simulations passed\n'
+printf 'release identity binary and compound simulations passed\n'
 
 fixture="$temporary_dir/fixture"
 mkdir "$fixture"

@@ -663,6 +663,31 @@ hp2r_docker() {
   "${command[@]}" "$@"
 }
 
+hp2r_fdt_property_absent() {
+  local dtb_path="$1"
+  local image="$2"
+  local node="$3"
+  local property="$4"
+  local dtb_dir
+  local dtb_file
+  local properties
+
+  hp2r_require_regular "$dtb_path" >/dev/null || return 2
+  dtb_dir="$(cd "$(dirname "$dtb_path")" && pwd -P)" || return 2
+  dtb_file="$(basename "$dtb_path")"
+  hp2r_validate_artifact_name "$dtb_file" >/dev/null || return 2
+  properties="$(
+    hp2r_docker run --rm \
+      --volume "$dtb_dir:/device-tree:ro" \
+      "$image" \
+      fdtget -p "/device-tree/$dtb_file" "$node"
+  )" || return 2
+  if printf '%s\n' "$properties" | grep -Fxq -- "$property"; then
+    return 1
+  fi
+  return 0
+}
+
 hp2r_validate_overlay() {
   local overlay_path="$1"
   local image="$2"
