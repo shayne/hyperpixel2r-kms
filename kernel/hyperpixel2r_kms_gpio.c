@@ -64,9 +64,6 @@ int hp2r_gpio_quiesce(const struct hp2r_gpio_ops *ops, int first_error)
 	if (ops->release_scl)
 		hp2r_record_first_error(
 			&first_error, ops->release_scl(ops->context));
-	if (ops->disable_backlight)
-		hp2r_record_first_error(
-			&first_error, ops->disable_backlight(ops->context));
 
 	return first_error;
 }

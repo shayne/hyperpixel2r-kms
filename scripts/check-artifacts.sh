@@ -327,21 +327,44 @@ test "$(grep -Fc 'compatible = "shayne,hyperpixel2r-kms";' "$applied_dts")" \
 test "$(grep -Fc 'compatible = "edt,edt-ft5406";' "$applied_dts")" -eq 1
 
 panel_path=/hyperpixel2r-kms
+backlight_path=/planeradar-backlight
 touch_path="$panel_path/touchscreen@15"
 panel_endpoint_path="$panel_path/port/endpoint"
 gpio_path="$(base_symbol_path gpio)"
+pwm_path="$(base_symbol_path pwm)"
 dpi_path="$(base_symbol_path dpi)"
 dpi_endpoint_path="$dpi_path/port/endpoint"
 dpi_pinctrl_path="$(base_symbol_path dpi_18bit_cpadhi_gpio0)"
+pwm_pinctrl_path="$gpio_path/planeradar-backlight-pins"
 
 gpio_phandle="$(fdt_hex "$gpio_path" phandle)"
+pwm_phandle="$(fdt_hex "$pwm_path" phandle)"
 dpi_pinctrl_phandle="$(fdt_hex "$dpi_pinctrl_path" phandle)"
+pwm_pinctrl_phandle="$(fdt_hex "$pwm_pinctrl_path" phandle)"
+backlight_phandle="$(fdt_hex "$backlight_path" phandle)"
 test "$(fdt_string "$panel_path" compatible)" = shayne,hyperpixel2r-kms
 test "$(fdt_hex "$panel_path" sda-gpios)" = "$gpio_phandle a 0"
 test "$(fdt_hex "$panel_path" scl-gpios)" = "$gpio_phandle b 0"
 test "$(fdt_hex "$panel_path" cs-gpios)" = "$gpio_phandle 12 1"
-test "$(fdt_hex "$panel_path" backlight-gpios)" = "$gpio_phandle 13 0"
+test "$(fdt_hex "$panel_path" backlight)" = "$backlight_phandle"
+if fdt_hex "$panel_path" backlight-gpios >/dev/null 2>&1; then
+  echo "applied panel must not contain a backlight GPIO" >&2
+  exit 1
+fi
 test "$(fdt_hex "$panel_path" rotation)" = 0
+
+test "$(fdt_string "$backlight_path" compatible)" = pwm-backlight
+test "$(fdt_hex "$backlight_path" pwms)" = "$pwm_phandle 1 30d40 0"
+test "$(fdt_hex "$backlight_path" brightness-levels)" = "0 ff"
+test "$(fdt_hex "$backlight_path" num-interpolated-steps)" = ff
+test "$(fdt_hex "$backlight_path" default-brightness-level)" = d
+
+test "$(fdt_hex "$pwm_pinctrl_path" brcm,pins)" = 13
+test "$(fdt_hex "$pwm_pinctrl_path" brcm,function)" = 2
+test "$(fdt_string "$pwm_path" status)" = okay
+test "$(fdt_string "$pwm_path" pinctrl-names)" = default
+test "$(fdt_hex "$pwm_path" pinctrl-0)" = "$pwm_pinctrl_phandle"
+test "$(fdt_hex "$pwm_path" clock-frequency)" = f4240
 
 test "$(fdt_string "$touch_path" compatible)" = edt,edt-ft5406
 test "$(fdt_hex "$touch_path" reg)" = 15

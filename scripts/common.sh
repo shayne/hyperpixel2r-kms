@@ -711,20 +711,28 @@ __local_fixups__
 __overrides__
 __symbols__
 fragment@0
-fragment@1" \
+fragment@1
+fragment@2
+fragment@3" \
         "compiled overlay root shape is invalid"
       require_node_shape /fragment@0 target-path __overlay__ \
         "root fragment shape is invalid"
-      require_node_shape /fragment@0/__overlay__ "" hyperpixel2r-kms \
+      require_node_shape \
+        /fragment@0/__overlay__ \
+        "" \
+        "hyperpixel2r-kms
+planeradar-backlight" \
         "root fragment overlay shape is invalid"
 
       panel_path=/fragment@0/__overlay__/hyperpixel2r-kms
+      backlight_path=/fragment@0/__overlay__/planeradar-backlight
       touch_path="$panel_path/touchscreen@15"
+      pinctrl_path=/fragment@2/__overlay__/planeradar-backlight-pins
       require_node_shape \
         "$panel_path" \
         "#address-cells
 #size-cells
-backlight-gpios
+backlight
 compatible
 cs-gpios
 phandle
@@ -745,6 +753,16 @@ touchscreen-size-x
 touchscreen-size-y" \
         "" \
         "touchscreen subtree shape is invalid"
+      require_node_shape \
+        "$backlight_path" \
+        "brightness-levels
+compatible
+default-brightness-level
+num-interpolated-steps
+phandle
+pwms" \
+        "" \
+        "PWM backlight subtree shape is invalid"
       require_node_shape "$panel_path/port" "" endpoint \
         "panel port shape is invalid"
       require_node_shape \
@@ -771,6 +789,28 @@ status" \
 remote-endpoint" \
         "" \
         "DPI endpoint shape is invalid"
+      require_node_shape /fragment@2 target __overlay__ \
+        "GPIO pinctrl fragment shape is invalid"
+      require_node_shape /fragment@2/__overlay__ "" \
+        planeradar-backlight-pins \
+        "GPIO pinctrl overlay shape is invalid"
+      require_node_shape \
+        "$pinctrl_path" \
+        "brcm,function
+brcm,pins
+phandle" \
+        "" \
+        "PWM pinctrl shape is invalid"
+      require_node_shape /fragment@3 target __overlay__ \
+        "PWM fragment shape is invalid"
+      require_node_shape \
+        /fragment@3/__overlay__ \
+        "clock-frequency
+pinctrl-0
+pinctrl-names
+status" \
+        "" \
+        "PWM overlay shape is invalid"
 
       require_node_shape \
         /__overrides__ \
@@ -785,6 +825,8 @@ touchscreen-swapped-x-y" \
         "dpi_out
 hyperpixel2r_panel
 panel_in
+planeradar_backlight
+planeradar_backlight_pins
 polytouch" \
         "" \
         "overlay symbol shape is invalid"
@@ -792,7 +834,8 @@ polytouch" \
         /__fixups__ \
         "dpi
 dpi_18bit_cpadhi_gpio0
-gpio" \
+gpio
+pwm" \
         "" \
         "overlay fixup shape is invalid"
       require_node_shape \
@@ -800,7 +843,8 @@ gpio" \
         "" \
         "__overrides__
 fragment@0
-fragment@1" \
+fragment@1
+fragment@3" \
         "overlay local-fixup shape is invalid"
       require_node_shape /__local_fixups__/fragment@0 "" __overlay__ \
         "root local-fixup shape is invalid"
@@ -811,7 +855,7 @@ fragment@1" \
         "root overlay local-fixup shape is invalid"
       require_node_shape \
         /__local_fixups__/fragment@0/__overlay__/hyperpixel2r-kms \
-        "" \
+        backlight \
         port \
         "panel local-fixup shape is invalid"
       require_node_shape \
@@ -841,6 +885,13 @@ fragment@1" \
         remote-endpoint \
         "" \
         "DPI endpoint local-fixup shape is invalid"
+      require_node_shape /__local_fixups__/fragment@3 "" __overlay__ \
+        "PWM local-fixup shape is invalid"
+      require_node_shape \
+        /__local_fixups__/fragment@3/__overlay__ \
+        pinctrl-0 \
+        "" \
+        "PWM overlay local-fixup shape is invalid"
       require_node_shape \
         /__local_fixups__/__overrides__ \
         "rotate
@@ -851,27 +902,27 @@ touchscreen-swapped-x-y" \
         "override local-fixup shape is invalid"
 
       test "$(fdtget -t bx "$overlay" /__overrides__ rotate)" = \
-        "0 0 0 3 72 6f 74 61 74 69 6f 6e 3a 30 0" ||
+        "0 0 0 5 72 6f 74 61 74 69 6f 6e 3a 30 0" ||
         fail "invalid rotate override encoding"
       test "$(
         fdtget -t bx "$overlay" /__overrides__ touchscreen-inverted-x
       )" = \
-        "0 0 0 4 74 6f 75 63 68 73 63 72 65 65 6e 2d 69 6e 76 65 72 74 65 64 2d 78 3f 0" ||
+        "0 0 0 6 74 6f 75 63 68 73 63 72 65 65 6e 2d 69 6e 76 65 72 74 65 64 2d 78 3f 0" ||
         fail "invalid touchscreen-inverted-x override encoding"
       test "$(
         fdtget -t bx "$overlay" /__overrides__ touchscreen-inverted-y
       )" = \
-        "0 0 0 4 74 6f 75 63 68 73 63 72 65 65 6e 2d 69 6e 76 65 72 74 65 64 2d 79 3f 0" ||
+        "0 0 0 6 74 6f 75 63 68 73 63 72 65 65 6e 2d 69 6e 76 65 72 74 65 64 2d 79 3f 0" ||
         fail "invalid touchscreen-inverted-y override encoding"
       test "$(
         fdtget -t bx "$overlay" /__overrides__ touchscreen-swapped-x-y
       )" = \
-        "0 0 0 4 74 6f 75 63 68 73 63 72 65 65 6e 2d 73 77 61 70 70 65 64 2d 78 2d 79 3f 0" ||
+        "0 0 0 6 74 6f 75 63 68 73 63 72 65 65 6e 2d 73 77 61 70 70 65 64 2d 78 2d 79 3f 0" ||
         fail "invalid touchscreen-swapped-x-y override encoding"
 
-      test "$(fdtget -t x "$overlay" "$panel_path" phandle)" = 3 ||
+      test "$(fdtget -t x "$overlay" "$panel_path" phandle)" = 5 ||
         fail "rotate override target phandle is invalid"
-      test "$(fdtget -t x "$overlay" "$touch_path" phandle)" = 4 ||
+      test "$(fdtget -t x "$overlay" "$touch_path" phandle)" = 6 ||
         fail "touchscreen override target phandle is invalid"
       for parameter in \
         rotate \
@@ -891,12 +942,17 @@ touchscreen-swapped-x-y" \
       )" = "/fragment@1/__overlay__:pinctrl-0:0" ||
         fail "DPI pinctrl fixup is invalid"
       test "$(fdtget -t s "$overlay" /__fixups__ gpio)" = \
-        "/fragment@0/__overlay__/hyperpixel2r-kms:sda-gpios:0 /fragment@0/__overlay__/hyperpixel2r-kms:scl-gpios:0 /fragment@0/__overlay__/hyperpixel2r-kms:cs-gpios:0 /fragment@0/__overlay__/hyperpixel2r-kms:backlight-gpios:0 /fragment@0/__overlay__/hyperpixel2r-kms/touchscreen@15:interrupt-parent:0" ||
+        "/fragment@0/__overlay__/hyperpixel2r-kms:sda-gpios:0 /fragment@0/__overlay__/hyperpixel2r-kms:scl-gpios:0 /fragment@0/__overlay__/hyperpixel2r-kms:cs-gpios:0 /fragment@0/__overlay__/hyperpixel2r-kms/touchscreen@15:interrupt-parent:0 /fragment@2:target:0" ||
         fail "GPIO fixups are invalid"
+      test "$(fdtget -t s "$overlay" /__fixups__ pwm)" = \
+        "/fragment@0/__overlay__/planeradar-backlight:pwms:0 /fragment@3:target:0" ||
+        fail "PWM fixups are invalid"
 
       fragments="$(fdtget -l "$overlay" / | grep "^fragment@" | sort)"
       test "$fragments" = "fragment@0
-fragment@1" || fail "compiled overlay fragment set is invalid"
+fragment@1
+fragment@2
+fragment@3" || fail "compiled overlay fragment set is invalid"
       test "$(fdtget -t s "$overlay" /fragment@0 target-path)" = / ||
         fail "root fragment target-path is invalid"
       if fdtget "$overlay" /fragment@0 target >/dev/null 2>&1; then
@@ -907,6 +963,10 @@ fragment@1" || fail "compiled overlay fragment set is invalid"
       if fdtget "$overlay" /fragment@1 target-path >/dev/null 2>&1; then
         fail "DPI fragment must not contain target-path"
       fi
+      test "$(fdtget -t x "$overlay" /fragment@2 target)" = ffffffff ||
+        fail "GPIO pinctrl fragment target placeholder is invalid"
+      test "$(fdtget -t x "$overlay" /fragment@3 target)" = ffffffff ||
+        fail "PWM fragment target placeholder is invalid"
 
       test "$(fdtget -t s "$overlay" "$panel_path" compatible)" = \
         shayne,hyperpixel2r-kms || fail "panel compatible is invalid"
@@ -916,8 +976,11 @@ fragment@1" || fail "compiled overlay fragment set is invalid"
         "ffffffff b 0" || fail "panel SCL GPIO payload is invalid"
       test "$(fdtget -t x "$overlay" "$panel_path" cs-gpios)" = \
         "ffffffff 12 1" || fail "panel CS GPIO payload is invalid"
-      test "$(fdtget -t x "$overlay" "$panel_path" backlight-gpios)" = \
-        "ffffffff 13 0" || fail "panel backlight GPIO payload is invalid"
+      test "$(fdtget -t x "$overlay" "$panel_path" backlight)" = 1 ||
+        fail "panel backlight phandle is invalid"
+      if fdtget "$overlay" "$panel_path" backlight-gpios >/dev/null 2>&1; then
+        fail "panel must not contain a backlight GPIO"
+      fi
       test "$(fdtget -t x "$overlay" "$panel_path" rotation)" = 0 ||
         fail "panel default rotation is invalid"
       test "$(fdtget -t x "$overlay" "$panel_path" "#address-cells")" = 1 ||
@@ -936,12 +999,34 @@ fragment@1" || fail "compiled overlay fragment set is invalid"
         fail "touchscreen X size is invalid"
       test "$(fdtget -t x "$overlay" "$touch_path" touchscreen-size-y)" = 1e0 ||
         fail "touchscreen Y size is invalid"
+      test "$(fdtget -t s "$overlay" "$backlight_path" compatible)" = \
+        pwm-backlight || fail "PWM backlight compatible is invalid"
+      test "$(fdtget -t x "$overlay" "$backlight_path" pwms)" = \
+        "ffffffff 1 30d40 0" || fail "PWM backlight payload is invalid"
+      test "$(fdtget -t x "$overlay" "$backlight_path" brightness-levels)" = \
+        "0 ff" || fail "PWM backlight levels are invalid"
+      test "$(fdtget -t x "$overlay" "$backlight_path" num-interpolated-steps)" = \
+        ff || fail "PWM backlight interpolation is invalid"
+      test "$(fdtget -t x "$overlay" "$backlight_path" default-brightness-level)" = \
+        d || fail "PWM backlight default is invalid"
+      test "$(fdtget -t x "$overlay" "$pinctrl_path" brcm,pins)" = 13 ||
+        fail "PWM pinctrl GPIO is invalid"
+      test "$(fdtget -t x "$overlay" "$pinctrl_path" brcm,function)" = 2 ||
+        fail "PWM pinctrl function is invalid"
+      test "$(fdtget -t s "$overlay" /fragment@3/__overlay__ status)" = okay ||
+        fail "PWM status is invalid"
+      test "$(fdtget -t s "$overlay" /fragment@3/__overlay__ pinctrl-names)" = \
+        default || fail "PWM pinctrl name is invalid"
+      test "$(fdtget -t x "$overlay" /fragment@3/__overlay__ pinctrl-0)" = 4 ||
+        fail "PWM pinctrl phandle is invalid"
+      test "$(fdtget -t x "$overlay" /fragment@3/__overlay__ clock-frequency)" = \
+        f4240 || fail "PWM clock frequency is invalid"
       test "$(
         fdtget -t x "$overlay" "$panel_path/port/endpoint" phandle
-      )" = 2 || fail "panel endpoint phandle is invalid"
+      )" = 3 || fail "panel endpoint phandle is invalid"
       test "$(
         fdtget -t x "$overlay" "$panel_path/port/endpoint" remote-endpoint
-      )" = 1 || fail "panel endpoint link is invalid"
+      )" = 2 || fail "panel endpoint link is invalid"
       test "$(fdtget -t s "$overlay" /fragment@1/__overlay__ status)" = okay ||
         fail "DPI status is invalid"
       test "$(
@@ -952,23 +1037,32 @@ fragment@1" || fail "compiled overlay fragment set is invalid"
       )" = ffffffff || fail "DPI pinctrl payload is invalid"
       test "$(
         fdtget -t x "$overlay" /fragment@1/__overlay__/port/endpoint phandle
-      )" = 1 || fail "DPI endpoint phandle is invalid"
+      )" = 2 || fail "DPI endpoint phandle is invalid"
       test "$(
         fdtget -t x "$overlay" \
           /fragment@1/__overlay__/port/endpoint remote-endpoint
-      )" = 2 || fail "DPI endpoint link is invalid"
+      )" = 3 || fail "DPI endpoint link is invalid"
 
       test "$(
         fdtget -t s "$overlay" /__symbols__ hyperpixel2r_panel
       )" = "$panel_path" || fail "panel symbol is invalid"
       test "$(fdtget -t s "$overlay" /__symbols__ polytouch)" = \
         "$touch_path" || fail "touchscreen symbol is invalid"
+      test "$(fdtget -t s "$overlay" /__symbols__ planeradar_backlight)" = \
+        "$backlight_path" || fail "PWM backlight symbol is invalid"
+      test "$(fdtget -t s "$overlay" /__symbols__ planeradar_backlight_pins)" = \
+        "$pinctrl_path" || fail "PWM pinctrl symbol is invalid"
       test "$(fdtget -t s "$overlay" /__symbols__ panel_in)" = \
         "$panel_path/port/endpoint" || fail "panel endpoint symbol is invalid"
       test "$(fdtget -t s "$overlay" /__symbols__ dpi_out)" = \
         /fragment@1/__overlay__/port/endpoint ||
         fail "DPI endpoint symbol is invalid"
 
+      test "$(
+        fdtget -t x "$overlay" \
+          /__local_fixups__/fragment@0/__overlay__/hyperpixel2r-kms \
+          backlight
+      )" = 0 || fail "panel backlight local fixup is invalid"
       test "$(
         fdtget -t x "$overlay" \
           /__local_fixups__/fragment@0/__overlay__/hyperpixel2r-kms/port/endpoint \
@@ -979,5 +1073,10 @@ fragment@1" || fail "compiled overlay fragment set is invalid"
           /__local_fixups__/fragment@1/__overlay__/port/endpoint \
           remote-endpoint
       )" = 0 || fail "DPI endpoint local fixup is invalid"
+      test "$(
+        fdtget -t x "$overlay" \
+          /__local_fixups__/fragment@3/__overlay__ \
+          pinctrl-0
+      )" = 0 || fail "PWM pinctrl local fixup is invalid"
     ' sh "$overlay_file"
 }

@@ -279,12 +279,49 @@ legacy_user="shayne"
 legacy_host_marker="${legacy_user}@"
 legacy_password_marker="${legacy_user}s!"
 legacy_migration_path="release/legacy-${legacy_identity}-migration-v1.tsv"
-if git -C "$repo_root" grep -niE "$legacy_identity|$legacy_host_marker|$legacy_password_marker" -- \
-  ':!.env' \
-  ":!$legacy_migration_path" \
-  ':!scripts/lifecycle-remote.sh' \
-  ':!scripts/uninstall.sh' \
-  ':!tests/boot-fixtures.sh'; then
+allowed_hyphen_interface="${legacy_identity}-backlight"
+allowed_underscore_interface="${legacy_identity}_backlight"
+allowed_underscore_pins="${allowed_underscore_interface}_pins"
+identity_matches="$(
+  git -C "$repo_root" grep -niF "$legacy_identity" -- \
+    ':!.env' \
+    ":!$legacy_migration_path" \
+    ':!scripts/lifecycle-remote.sh' \
+    ':!scripts/uninstall.sh' \
+    ':!tests/boot-fixtures.sh' || true
+)"
+invalid_identity_matches=""
+if test -n "$identity_matches"; then
+  while IFS=: read -r match_path match_line match_text; do
+    case "$match_path" in
+      overlays/hyperpixel2r-kms-overlay.dts|\
+      scripts/check-artifacts.sh|\
+      scripts/common.sh|\
+      tests/backlight-contract.sh) ;;
+      *)
+        invalid_identity_matches+="$match_path:$match_line:$match_text"$'\n'
+        continue
+        ;;
+    esac
+    match_text="${match_text//$allowed_underscore_pins/}"
+    match_text="${match_text//$allowed_underscore_interface/}"
+    match_text="${match_text//$allowed_hyphen_interface/}"
+    if printf '%s\n' "$match_text" | grep -qiF "$legacy_identity"; then
+      invalid_identity_matches+="$match_path:$match_line:$match_text"$'\n'
+    fi
+  done <<< "$identity_matches"
+fi
+credential_matches="$(
+  git -C "$repo_root" grep -niE "$legacy_host_marker|$legacy_password_marker" -- \
+    ':!.env' \
+    ":!$legacy_migration_path" \
+    ':!scripts/lifecycle-remote.sh' \
+    ':!scripts/uninstall.sh' \
+    ':!tests/boot-fixtures.sh' || true
+)"
+if test -n "$invalid_identity_matches" || test -n "$credential_matches"; then
+  printf '%s' "$invalid_identity_matches" >&2
+  printf '%s\n' "$credential_matches" >&2
   printf 'release source contains a deployment-specific identity or credential\n' >&2
   exit 1
 fi

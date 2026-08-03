@@ -17,7 +17,6 @@ struct hp2r_gpio_ops {
 	int (*set_cs)(void *context, int value);
 	int (*release_sda)(void *context);
 	int (*release_scl)(void *context);
-	int (*disable_backlight)(void *context);
 	void (*delay_us)(void *context, unsigned int delay_us);
 };
 

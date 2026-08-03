@@ -12,12 +12,20 @@
 	fragment@0 {
 		target-path = "/";
 		__overlay__ {
+			planeradar_backlight: planeradar-backlight {
+				compatible = "pwm-backlight";
+				pwms = <&pwm 1 200000 0>;
+				brightness-levels = <0 255>;
+				num-interpolated-steps = <255>;
+				default-brightness-level = <13>;
+			};
+
 			hyperpixel2r_panel: hyperpixel2r-kms {
 				compatible = "shayne,hyperpixel2r-kms";
 				sda-gpios = <&gpio 10 GPIO_ACTIVE_HIGH>;
 				scl-gpios = <&gpio 11 GPIO_ACTIVE_HIGH>;
 				cs-gpios = <&gpio 18 GPIO_ACTIVE_LOW>;
-				backlight-gpios = <&gpio 19 GPIO_ACTIVE_HIGH>;
+				backlight = <&planeradar_backlight>;
 				rotation = <0>;
 				#address-cells = <1>;
 				#size-cells = <0>;
@@ -52,6 +60,26 @@
 					remote-endpoint = <&panel_in>;
 				};
 			};
+		};
+	};
+
+	fragment@2 {
+		target = <&gpio>;
+		__overlay__ {
+			planeradar_backlight_pins: planeradar-backlight-pins {
+				brcm,pins = <19>;
+				brcm,function = <BCM2835_FSEL_ALT5>;
+			};
+		};
+	};
+
+	fragment@3 {
+		target = <&pwm>;
+		__overlay__ {
+			status = "okay";
+			pinctrl-names = "default";
+			pinctrl-0 = <&planeradar_backlight_pins>;
+			clock-frequency = <1000000>;
 		};
 	};
 

@@ -22,6 +22,9 @@ cc -std=c11 -Wall -Wextra -Werror -pedantic \
 ./target/gpio-test
 """
 
+[tasks.test-backlight-contract]
+run = "bash tests/backlight-contract.sh"
+
 [tasks.test-build-contract]
 run = "bash tests/build-contract.sh"
 
@@ -92,4 +95,4 @@ HP2R_TARGET="${HP2R_TARGET:-}" \
 """
 
 [tasks.verify]
-depends = ["test-protocol", "test-gpio", "test-build-contract", "test-boot-scripts", "test-release-contract"]
+depends = ["test-protocol", "test-gpio", "test-backlight-contract", "test-build-contract", "test-boot-scripts", "test-release-contract"]

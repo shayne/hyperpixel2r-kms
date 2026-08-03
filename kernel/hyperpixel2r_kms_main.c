@@ -38,13 +38,11 @@ struct hyperpixel2r_kms {
 	struct gpio_desc *sda;
 	struct gpio_desc *scl;
 	struct gpio_desc *cs;
-	struct gpio_desc *backlight;
 	struct i2c_adapter adapter;
 	struct i2c_algo_bit_data bit;
 	struct mutex state_lock;
 	enum drm_panel_orientation orientation;
 	bool prepared;
-	bool enabled;
 };
 
 static inline struct hyperpixel2r_kms *
@@ -133,21 +131,13 @@ static int hp2r_release_scl(void *context)
 	return gpiod_direction_input(hp->scl);
 }
 
-static int hp2r_disable_backlight(void *context)
-{
-	struct hyperpixel2r_kms *hp = context;
-
-	return gpiod_direction_output(hp->backlight, 0);
-}
-
 static void hp2r_delay_us(void *context, unsigned int delay_us)
 {
 	(void)context;
 	udelay(delay_us);
 }
 
-static struct hp2r_gpio_ops
-hp2r_gpio_ops(struct hyperpixel2r_kms *hp, bool include_backlight)
+static struct hp2r_gpio_ops hp2r_gpio_ops(struct hyperpixel2r_kms *hp)
 {
 	return (struct hp2r_gpio_ops) {
 		.context = hp,
@@ -156,9 +146,6 @@ hp2r_gpio_ops(struct hyperpixel2r_kms *hp, bool include_backlight)
 		.set_cs = hp->cs ? hp2r_set_cs_value : NULL,
 		.release_sda = hp->sda ? hp2r_release_sda : NULL,
 		.release_scl = hp->scl ? hp2r_release_scl : NULL,
-		.disable_backlight =
-			include_backlight && hp->backlight ?
-				hp2r_disable_backlight : NULL,
 		.delay_us = hp2r_delay_us,
 	};
 }
@@ -166,7 +153,7 @@ hp2r_gpio_ops(struct hyperpixel2r_kms *hp, bool include_backlight)
 static int hp2r_write_word(void *context, hp2r_u16 word)
 {
 	struct hyperpixel2r_kms *hp = context;
-	struct hp2r_gpio_ops ops = hp2r_gpio_ops(hp, false);
+	struct hp2r_gpio_ops ops = hp2r_gpio_ops(hp);
 
 	return hp2r_gpio_write_word(&ops, word);
 }
@@ -175,7 +162,7 @@ static int
 hp2r_send_commands(struct hyperpixel2r_kms *hp,
 		   const struct hp2r_command *commands, size_t command_count)
 {
-	struct hp2r_gpio_ops ops = hp2r_gpio_ops(hp, false);
+	struct hp2r_gpio_ops ops = hp2r_gpio_ops(hp);
 	size_t index;
 	int ret = 0;
 
@@ -228,42 +215,6 @@ unlock:
 	return ret;
 }
 
-static int hp2r_panel_enable(struct drm_panel *panel)
-{
-	struct hyperpixel2r_kms *hp = panel_to_hyperpixel2r(panel);
-	int ret = 0;
-
-	mutex_lock(&hp->state_lock);
-	if (hp->enabled)
-		goto unlock;
-	if (!hp->prepared) {
-		ret = -EPERM;
-		goto unlock;
-	}
-
-	ret = gpiod_direction_output(hp->backlight, 1);
-	if (!ret)
-		hp->enabled = true;
-
-unlock:
-	mutex_unlock(&hp->state_lock);
-
-	return ret;
-}
-
-static int hp2r_panel_disable(struct drm_panel *panel)
-{
-	struct hyperpixel2r_kms *hp = panel_to_hyperpixel2r(panel);
-	int ret;
-
-	mutex_lock(&hp->state_lock);
-	ret = gpiod_direction_output(hp->backlight, 0);
-	hp->enabled = false;
-	mutex_unlock(&hp->state_lock);
-
-	return ret;
-}
-
 static int hp2r_panel_unprepare(struct drm_panel *panel)
 {
 	struct hyperpixel2r_kms *hp = panel_to_hyperpixel2r(panel);
@@ -271,19 +222,14 @@ static int hp2r_panel_unprepare(struct drm_panel *panel)
 		hp2r_display_off_command,
 		hp2r_sleep_command,
 	};
-	int backlight_ret;
 	int ret = 0;
 
 	mutex_lock(&hp->state_lock);
 	if (!hp->prepared)
 		goto unlock;
-	backlight_ret = gpiod_direction_output(hp->backlight, 0);
-	hp->enabled = false;
 	mutex_unlock(&hp->state_lock);
 
 	ret = hp2r_send_commands(hp, commands, ARRAY_SIZE(commands));
-	if (!ret)
-		ret = backlight_ret;
 
 	mutex_lock(&hp->state_lock);
 	hp->prepared = false;
@@ -346,8 +292,6 @@ hp2r_panel_get_orientation(struct drm_panel *panel)
 
 static const struct drm_panel_funcs hp2r_panel_funcs = {
 	.prepare = hp2r_panel_prepare,
-	.enable = hp2r_panel_enable,
-	.disable = hp2r_panel_disable,
 	.unprepare = hp2r_panel_unprepare,
 	.get_modes = hp2r_panel_get_modes,
 	.get_orientation = hp2r_panel_get_orientation,
@@ -399,15 +343,6 @@ static int hp2r_probe(struct platform_device *pdev)
 		goto quiesce_gpios;
 	}
 
-	hp->backlight =
-		devm_gpiod_get(dev, "backlight", GPIOD_OUT_INACTIVE);
-	if (IS_ERR(hp->backlight)) {
-		ret = dev_err_probe(dev, PTR_ERR(hp->backlight),
-				    "failed to acquire backlight GPIO\n");
-		hp->backlight = NULL;
-		goto quiesce_gpios;
-	}
-
 	if (gpiod_cansleep(hp->sda) || gpiod_cansleep(hp->scl) ||
 	    gpiod_cansleep(hp->cs)) {
 		ret = -EINVAL;
@@ -448,13 +383,19 @@ static int hp2r_probe(struct platform_device *pdev)
 		goto quiesce_gpios;
 
 	hp->panel.prepare_prev_first = true;
+	ret = drm_panel_of_backlight(&hp->panel);
+	if (ret) {
+		ret = dev_err_probe(hp->dev, ret,
+				    "failed to acquire panel backlight\n");
+		goto quiesce_gpios;
+	}
 	drm_panel_add(&hp->panel);
 	platform_set_drvdata(pdev, hp);
 
 	return 0;
 
 quiesce_gpios:
-	gpio_ops = hp2r_gpio_ops(hp, true);
+	gpio_ops = hp2r_gpio_ops(hp);
 	return hp2r_gpio_quiesce(&gpio_ops, ret);
 }
 
@@ -465,10 +406,10 @@ static void hp2r_remove(struct platform_device *pdev)
 
 	drm_panel_remove(&hp->panel);
 
-	ret = hp2r_panel_disable(&hp->panel);
+	ret = drm_panel_disable(&hp->panel);
 	if (ret)
 		dev_warn(hp->dev, "failed to disable panel: %d\n", ret);
-	ret = hp2r_panel_unprepare(&hp->panel);
+	ret = drm_panel_unprepare(&hp->panel);
 	if (ret)
 		dev_warn(hp->dev, "failed to unprepare panel: %d\n", ret);
 }

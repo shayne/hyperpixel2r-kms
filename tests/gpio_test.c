@@ -16,7 +16,6 @@ struct fake_gpio {
 	bool fail_cs_low;
 	bool fail_release_sda;
 	bool fail_release_scl;
-	bool fail_backlight;
 };
 
 static int record_event(struct fake_gpio *gpio, char signal, int value)
@@ -84,14 +83,6 @@ static int fake_release_scl(void *context)
 	return gpio->fail_release_scl ? -EBUSY : 0;
 }
 
-static int fake_disable_backlight(void *context)
-{
-	struct fake_gpio *gpio = context;
-
-	record_event(gpio, 'B', 0);
-	return gpio->fail_backlight ? -EACCES : 0;
-}
-
 static void fake_delay(void *context, unsigned int delay_us)
 {
 	struct fake_gpio *gpio = context;
@@ -109,7 +100,6 @@ static struct hp2r_gpio_ops fake_ops(struct fake_gpio *gpio)
 		.set_cs = fake_set_cs,
 		.release_sda = fake_release_sda,
 		.release_scl = fake_release_scl,
-		.disable_backlight = fake_disable_backlight,
 		.delay_us = fake_delay,
 	};
 }
@@ -143,12 +133,11 @@ static void quiesce_attempts_every_owned_line_and_preserves_first_error(void)
 		.fail_cs_low = true,
 		.fail_release_sda = true,
 		.fail_release_scl = true,
-		.fail_backlight = true,
 	};
 	struct hp2r_gpio_ops ops = fake_ops(&gpio);
 
 	assert(hp2r_gpio_quiesce(&ops, -ENOMEM) == -ENOMEM);
-	assert(strcmp(gpio.events, "C0S1K1B0") == 0);
+	assert(strcmp(gpio.events, "C0S1K1") == 0);
 }
 
 static void quiesce_returns_first_cleanup_error_without_skipping_later_lines(void)
@@ -160,7 +149,7 @@ static void quiesce_returns_first_cleanup_error_without_skipping_later_lines(voi
 	struct hp2r_gpio_ops ops = fake_ops(&gpio);
 
 	assert(hp2r_gpio_quiesce(&ops, 0) == -ENODEV);
-	assert(strcmp(gpio.events, "C0S1K1B0") == 0);
+	assert(strcmp(gpio.events, "C0S1K1") == 0);
 }
 
 static void quiesce_handles_partial_acquisition(void)
