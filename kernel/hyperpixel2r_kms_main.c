@@ -402,16 +402,10 @@ quiesce_gpios:
 static void hp2r_remove(struct platform_device *pdev)
 {
 	struct hyperpixel2r_kms *hp = platform_get_drvdata(pdev);
-	int ret;
 
 	drm_panel_remove(&hp->panel);
-
-	ret = drm_panel_disable(&hp->panel);
-	if (ret)
-		dev_warn(hp->dev, "failed to disable panel: %d\n", ret);
-	ret = drm_panel_unprepare(&hp->panel);
-	if (ret)
-		dev_warn(hp->dev, "failed to unprepare panel: %d\n", ret);
+	drm_panel_disable(&hp->panel);
+	drm_panel_unprepare(&hp->panel);
 }
 
 static const struct of_device_id hyperpixel2r_kms_of_match[] = {
