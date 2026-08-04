@@ -266,12 +266,16 @@ Before `set_accepted_transition_phase prepared staged`, require the published ge
     `prior_normal_config_sha256`;
   - after generic commit but before `mark-committed-accepted`, generic state
     absent, the live exact authorized prior or absence restored, and normal
-    config equal to the existing `candidate_normal_config_sha256`;
+    config byte-equal to an exact accepted-normal candidate derived in a private
+    workspace from `accepted-transition-prior-config.txt` by surgically removing
+    the prior accepted overlay declaration and appending the generic commit's
+    exact accepted-candidate comment plus candidate overlay declaration;
   mixed substates such as state absent plus prior normal config or state present
-  plus restored prior are rejected;
+  plus restored prior are rejected. `mark-committed-accepted` publishes the
+  derived live digest into `candidate_normal_config_sha256` while advancing;
 - later phases require exact restored prior/absence and no generic state.
 
-Add a deterministic fixture that changes the live file after `prepare-new` but before `stage`; require stage to reject before any candidate leaf appears. Repeat with symlink replacement and exact candidate bytes that are not the prior bytes.
+Add a deterministic fixture that changes the live file after `prepare-new` but before `stage`; require stage to reject before any candidate leaf appears. Repeat with symlink replacement and exact candidate bytes that are not the prior bytes. At the post-generic-commit boundary, prove the exact derived accepted-normal config passes while prior-normal bytes, foreign bytes, and comment drift all fail.
 
 Run:
 

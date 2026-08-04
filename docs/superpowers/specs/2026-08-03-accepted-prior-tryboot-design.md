@@ -146,9 +146,15 @@ handled by existing transaction compensation.
   authority, the live tryboot file must be the exact candidate, and normal config
   must still match `prior_normal_config_sha256`. After generic commit but before
   `mark-committed-accepted`, generic state must be absent, the live exact prior
-  file or absence must be restored, and normal config must match the existing
-  `candidate_normal_config_sha256`. Mixed states, including state absent with
-  prior normal config or state present with restored prior, are invalid.
+  file or absence must be restored, and normal config must byte-match an exact
+  accepted-normal candidate derived in a private workspace from
+  `accepted-transition-prior-config.txt`: surgically remove the prior accepted
+  overlay declaration, then append the generic commit's exact accepted-candidate
+  comment and candidate overlay declaration. `mark-committed-accepted` publishes
+  the derived live digest into `candidate_normal_config_sha256` while advancing
+  the phase. Mixed states, including state absent with prior normal config, state
+  present with restored prior, or any foreign/comment drift from the derived
+  normal candidate, are invalid.
 - `committed`, `verified`, `finalizing`, and `receipt_published`: generic commit
   must already have restored the exact authorized prior file (or exact
   absence), and every accepted operation revalidates that fact.
