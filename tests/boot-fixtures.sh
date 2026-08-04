@@ -1911,6 +1911,45 @@ assert_prior_tryboot_transition_rejected() {
   assert_absent "$root/usr/lib/hyperpixel2r-kms/0.1.1/$candidate_revision/$release"
 }
 
+assert_orphan_transition_proof_blocks_accepted_uninstall() {
+  local label="$1"
+  local receipt="$root/var/lib/hyperpixel2r-kms/accepted-state"
+  local module="$root/lib/modules/$release/extra/hyperpixel2r_kms.ko"
+  local overlay="$root/boot/firmware/overlays/$overlay_file"
+  local receipt_sha normal_sha tryboot_sha module_sha overlay_sha rule_sha manifest_sha
+
+  receipt_sha="$(sha256sum "$receipt" | awk '{ print $1 }')"
+  normal_sha="$(sha256sum "$root/boot/firmware/config.txt" | awk '{ print $1 }')"
+  tryboot_sha="$(sha256sum "$accepted_prior_tryboot" | awk '{ print $1 }')"
+  module_sha="$(sha256sum "$module" | awk '{ print $1 }')"
+  overlay_sha="$(sha256sum "$overlay" | awk '{ print $1 }')"
+  rule_sha="$(sha256sum "$backlight_rule_path" | awk '{ print $1 }')"
+  manifest_sha="$(sha256sum "$accepted_artifact/manifest.txt" | awk '{ print $1 }')"
+
+  if run_accepted_remote uninstall-accepted \
+    0.1.1 "$source_revision" "$release" \
+    >"$fixture/orphan-transition-uninstall-$label.out" 2>&1; then
+    fail "accepted uninstall ignored orphan transition authority: $label"
+  fi
+  test "$(sha256sum "$receipt" | awk '{ print $1 }')" = "$receipt_sha" ||
+    fail "rejected accepted uninstall changed its receipt: $label"
+  test "$(sha256sum "$root/boot/firmware/config.txt" | awk '{ print $1 }')" = \
+    "$normal_sha" || fail "rejected accepted uninstall changed normal config: $label"
+  test "$(sha256sum "$accepted_prior_tryboot" | awk '{ print $1 }')" = \
+    "$tryboot_sha" || fail "rejected accepted uninstall changed tryboot config: $label"
+  test "$(sha256sum "$module" | awk '{ print $1 }')" = "$module_sha" ||
+    fail "rejected accepted uninstall changed installed module: $label"
+  test "$(sha256sum "$overlay" | awk '{ print $1 }')" = "$overlay_sha" ||
+    fail "rejected accepted uninstall changed installed overlay: $label"
+  test "$(sha256sum "$backlight_rule_path" | awk '{ print $1 }')" = "$rule_sha" ||
+    fail "rejected accepted uninstall changed installed backlight rule: $label"
+  test "$(sha256sum "$accepted_artifact/manifest.txt" | awk '{ print $1 }')" = \
+    "$manifest_sha" || fail "rejected accepted uninstall changed accepted artifact: $label"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-uninstall"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-uninstall-stock.txt"
+  assert_absent "${accepted_artifact}.accepted-uninstall"
+}
+
 exercise_accepted_prior_committed_recovery() {
   prepare_prior_tryboot_postcommit_target
   if HP2R_FIXTURE_INTERRUPT_AFTER=accepted-committed-published \
@@ -1931,7 +1970,8 @@ exercise_accepted_prior_committed_recovery() {
 }
 
 exercise_accepted_prior_tryboot_authority() {
-  local transition transition_prior orphan_sha artifact_prior mutation_target
+  local transition transition_prior transition_prior_config orphan_sha artifact_prior mutation_target
+  local artifact_before dkms_before prior_config_sha prior_tryboot_sha
 
   prepare_accepted_prior_tryboot_target
   prepare_prior_tryboot_candidate_source
@@ -2207,18 +2247,97 @@ exercise_accepted_prior_tryboot_authority() {
   # before the journal is published.  Recovery may clear it only after proving
   # it against both the accepted artifact and the unchanged live file.
   prepare_accepted_prior_tryboot_target
+  transition_prior_config="$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-config.txt"
   transition_prior="$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-tryboot.txt"
   if HP2R_FIXTURE_INTERRUPT_AFTER=accepted-transition-prior-tryboot-published \
     run_prior_tryboot_candidate_prepare >/dev/null 2>&1; then
     fail 'accepted prior tryboot publication ignored its interruption boundary'
   fi
   assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  assert_file "$transition_prior_config"
   assert_file "$transition_prior"
+  prior_config_sha="$(sha256sum "$transition_prior_config" | awk '{ print $1 }')"
+  prior_tryboot_sha="$(sha256sum "$transition_prior" | awk '{ print $1 }')"
+  artifact_before="$fixture/orphan-transition-artifact-before"
+  dkms_before="$fixture/orphan-transition-dkms-before"
+  rm -rf -- "$artifact_before" "$dkms_before"
+  cp -a "$accepted_artifact" "$artifact_before"
+  cp -a "$root/usr/src/hyperpixel2r-kms-0.1.1" "$dkms_before"
+  assert_orphan_transition_proof_blocks_accepted_uninstall interrupted-prepare
+  test "$(sha256sum "$transition_prior_config" | awk '{ print $1 }')" = \
+    "$prior_config_sha" ||
+    fail 'rejected accepted uninstall changed orphan prior-config proof'
+  test "$(sha256sum "$transition_prior" | awk '{ print $1 }')" = \
+    "$prior_tryboot_sha" ||
+    fail 'rejected accepted uninstall changed orphan prior-tryboot proof'
+  diff -ru "$artifact_before" "$accepted_artifact" >/dev/null ||
+    fail 'rejected accepted uninstall changed the accepted artifact tree'
+  diff -ru "$dkms_before" "$root/usr/src/hyperpixel2r-kms-0.1.1" >/dev/null ||
+    fail 'rejected accepted uninstall changed the installed DKMS source'
   run_accepted_remote recover-accepted >/dev/null
+  assert_absent "$transition_prior_config"
   assert_absent "$transition_prior"
   test "$(sha256sum "$accepted_prior_tryboot" | awk '{ print $1 }')" = \
     "$accepted_prior_tryboot_sha" ||
     fail 'orphan companion recovery changed the accepted prior tryboot bytes'
+
+  # Each companion independently blocks uninstall.  Exact regular orphan
+  # authority is recoverable; hostile types remain intact and fail closed.
+  cp "$root/boot/firmware/config.txt" "$transition_prior_config"
+  chown root:root "$transition_prior_config"
+  chmod 0600 "$transition_prior_config"
+  prior_config_sha="$(sha256sum "$transition_prior_config" | awk '{ print $1 }')"
+  assert_orphan_transition_proof_blocks_accepted_uninstall lone-prior-config
+  test "$(sha256sum "$transition_prior_config" | awk '{ print $1 }')" = \
+    "$prior_config_sha" ||
+    fail 'rejected accepted uninstall changed lone prior-config proof'
+  run_accepted_remote recover-accepted >/dev/null
+  assert_absent "$transition_prior_config"
+
+  cp "$accepted_prior_tryboot" "$transition_prior"
+  chown root:root "$transition_prior"
+  chmod 0600 "$transition_prior"
+  prior_tryboot_sha="$(sha256sum "$transition_prior" | awk '{ print $1 }')"
+  assert_orphan_transition_proof_blocks_accepted_uninstall lone-prior-tryboot
+  test "$(sha256sum "$transition_prior" | awk '{ print $1 }')" = \
+    "$prior_tryboot_sha" ||
+    fail 'rejected accepted uninstall changed lone prior-tryboot proof'
+  run_accepted_remote recover-accepted >/dev/null
+  assert_absent "$transition_prior"
+
+  ln -s "$root/boot/firmware/config.txt" "$transition_prior_config"
+  assert_orphan_transition_proof_blocks_accepted_uninstall prior-config-symlink
+  test -L "$transition_prior_config" ||
+    fail 'rejected accepted uninstall changed prior-config symlink authority'
+  if run_accepted_remote recover-accepted >/dev/null 2>&1; then
+    fail 'accepted recovery trusted a symlinked lone prior-config proof'
+  fi
+  test -L "$transition_prior_config" ||
+    fail 'rejected accepted recovery changed prior-config symlink authority'
+
+  prepare_accepted_prior_tryboot_target
+  transition_prior_config="$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-config.txt"
+  mkdir "$transition_prior_config"
+  assert_orphan_transition_proof_blocks_accepted_uninstall prior-config-directory
+  test -d "$transition_prior_config" ||
+    fail 'rejected accepted uninstall changed prior-config directory authority'
+  if run_accepted_remote recover-accepted >/dev/null 2>&1; then
+    fail 'accepted recovery trusted a directory lone prior-config proof'
+  fi
+  test -d "$transition_prior_config" ||
+    fail 'rejected accepted recovery changed prior-config directory authority'
+
+  prepare_accepted_prior_tryboot_target
+  transition_prior="$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-tryboot.txt"
+  ln -s "$accepted_prior_tryboot" "$transition_prior"
+  assert_orphan_transition_proof_blocks_accepted_uninstall prior-tryboot-symlink
+  test -L "$transition_prior" ||
+    fail 'rejected accepted uninstall changed prior-tryboot symlink authority'
+  if run_accepted_remote recover-accepted >/dev/null 2>&1; then
+    fail 'accepted recovery trusted a symlinked lone prior-tryboot proof'
+  fi
+  test -L "$transition_prior" ||
+    fail 'rejected accepted recovery changed prior-tryboot symlink authority'
 
   # An orphan with unrelated bytes is not proof and must be rejected intact.
   prepare_accepted_prior_tryboot_target

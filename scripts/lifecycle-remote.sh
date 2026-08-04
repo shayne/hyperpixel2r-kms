@@ -5274,6 +5274,11 @@ uninstall_accepted() {
     die 'refusing accepted uninstall while a tryboot transaction is active'
   test ! -L "$accepted_transition" && test ! -e "$accepted_transition" ||
     die 'refusing accepted uninstall while a transition is active'
+  test ! -L "$accepted_transition_prior_config" && \
+    test ! -e "$accepted_transition_prior_config" && \
+    test ! -L "$accepted_transition_prior_tryboot" && \
+    test ! -e "$accepted_transition_prior_tryboot" ||
+    die 'refusing accepted uninstall while transition proof is present'
   if ! sudo test -e "$accepted_uninstall" && ! sudo test -L "$accepted_uninstall"; then
     assert_accepted_state || die 'accepted driver state is missing or unsafe'
     test "$(accepted_value driver_version)" = "$version" &&
