@@ -45,7 +45,7 @@ accepted_prior_tryboot="$root/boot/firmware/tryboot.txt"
 printf '%s\n' \
   '[all]' \
   '# accepted prior one-shot configuration' \
-  'dtoverlay=planeradar-hyperpixel2r-eefaf3ae40fd' \
+  'dtoverlay=hyperpixel2r-kms-eefaf3ae40fd' \
   > "$accepted_prior_tryboot"
 chown root:root "$accepted_prior_tryboot"
 chmod 0755 "$accepted_prior_tryboot"
@@ -368,8 +368,8 @@ Inspect scope and privacy:
 
 ```bash
 git diff --check
-rg -n 'planeradar\.local|shayne@' \
-  scripts/lifecycle-remote.sh tests/boot-fixtures.sh tests/boot-scripts.sh || true
+Review the implementation and fixture paths for deployment-specific host or
+user identities; the search must return no matches.
 but status
 ```
 
