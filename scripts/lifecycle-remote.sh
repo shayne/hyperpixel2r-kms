@@ -14,6 +14,7 @@ accepted_state="$state_dir/accepted-state"
 accepted_stock_config="$state_dir/accepted-stock-config.txt"
 accepted_transition="$state_dir/accepted-transition"
 accepted_transition_prior_config="$state_dir/accepted-transition-prior-config.txt"
+accepted_transition_prior_tryboot="$state_dir/accepted-transition-prior-tryboot.txt"
 accepted_uninstall="$state_dir/accepted-uninstall"
 accepted_uninstall_stock="$state_dir/accepted-uninstall-stock.txt"
 accepted_prior_backlight_rule="$state_dir/accepted-prior-backlight-rule"
@@ -92,6 +93,10 @@ accepted_transition_keys_v4=(
   "${accepted_transition_keys[@]}" candidate_backlight_rule_file
   candidate_backlight_rule_sha256 prior_backlight_rule_existed
   prior_backlight_rule_sha256
+)
+accepted_transition_keys_v5=(
+  "${accepted_transition_keys_v4[@]}" prior_tryboot_existed
+  prior_tryboot_sha256
 )
 accepted_uninstall_keys_v2=(
   schema_version phase driver_version source_revision kernel_release
@@ -1924,7 +1929,7 @@ stage() {
     if test "$status" -ne 0 && ! "$stage_complete"; then
       if "$published_state"; then sudo rm -f -- "$state_file" || true; fi
       if "$published_tryboot"; then
-        if "$prior_existed"; then atomic_copy "$prior_tryboot" "$tryboot_config" 600 "$prior_sha" true || true
+        if "$prior_existed"; then atomic_copy "$prior_tryboot" "$tryboot_config" 644 "$prior_sha" true || true
         else sudo rm -f -- "$tryboot_config" || true
         fi
       fi
@@ -2089,6 +2094,19 @@ stage() {
         *) die 'accepted candidate journal differs from staged preconditions' ;;
       esac
     fi
+    if test "$(accepted_transition_value schema_version)" = 5; then
+      validate_prepared_prior_tryboot ||
+        die 'accepted prior tryboot authority changed before generic stage mutation'
+      test "$prior_existed" = \
+        "$(accepted_transition_value prior_tryboot_existed)" ||
+        die 'captured prior tryboot existence differs from accepted transition'
+      test "$prior_sha" = "$(accepted_transition_value prior_tryboot_sha256)" ||
+        die 'captured prior tryboot checksum differs from accepted transition'
+      if "$prior_existed"; then
+        sudo cmp -s -- "$prior_tryboot" "$accepted_transition_prior_tryboot" ||
+          die 'captured prior tryboot bytes differ from accepted transition'
+      fi
+    fi
     accepted_bound=true
   else
     test ! -L "$accepted_transition" && test ! -e "$accepted_transition" ||
@@ -2248,6 +2266,10 @@ stage() {
   published_state=true
   fixture_interrupt_after candidate-tryboot-state-published
   if "$accepted_bound"; then
+    if test "$(accepted_transition_value schema_version)" = 5; then
+      validate_staged_prior_tryboot ||
+        die 'generic stage prior tryboot binding failed validation'
+    fi
     set_accepted_transition_phase prepared staged '' "$prior_dkms_inventory_sha" ||
       die 'failed to mark accepted candidate staged'
     fixture_interrupt_after candidate-staged-published
@@ -3504,6 +3526,7 @@ assert_recovery_authority_absent() {
     "$accepted_stock_config"
     "$accepted_transition"
     "$accepted_transition_prior_config"
+    "$accepted_transition_prior_tryboot"
     "$accepted_uninstall"
     "$accepted_uninstall_stock"
     "$accepted_prior_backlight_rule"
@@ -3724,6 +3747,245 @@ accepted_transition_value() {
   sudo awk -F= -v wanted="$key" '$1 == wanted { print $2 }' "$accepted_transition"
 }
 
+accepted_prior_artifact_path() {
+  assert_accepted_state || return
+  printf '%s/%s/%s/%s\n' \
+    "$artifact_root" \
+    "$(accepted_value driver_version)" \
+    "$(accepted_value source_revision)" \
+    "$(accepted_value kernel_release)"
+}
+
+validate_accepted_prior_tryboot() {
+  local expected_existed="$1"
+  local expected_sha="$2"
+  local prior_artifact
+
+  prior_artifact="$(accepted_prior_artifact_path)" || return
+  case "$expected_existed" in
+    true)
+      [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || return
+      assert_artifact_tree "$prior_artifact" true || return
+      assert_owned_regular "$accepted_transition_prior_tryboot" 600 || return
+      assert_owned_regular "$prior_artifact/prior-tryboot.txt" 600 || return
+      test "$(sha "$accepted_transition_prior_tryboot")" = "$expected_sha" || return
+      test "$(sha "$prior_artifact/prior-tryboot.txt")" = "$expected_sha" || return
+      sudo cmp -s -- "$prior_artifact/prior-tryboot.txt" \
+        "$accepted_transition_prior_tryboot" || return
+      assert_owned_regular "$tryboot_config" boot || return
+      test "$(sha "$tryboot_config")" = "$expected_sha" || return
+      sudo cmp -s -- "$tryboot_config" "$accepted_transition_prior_tryboot" || return
+      ;;
+    false)
+      test "$expected_sha" = none || return
+      assert_artifact_tree "$prior_artifact" false || return
+      test ! -L "$tryboot_config" && test ! -e "$tryboot_config" || return
+      test ! -L "$accepted_transition_prior_tryboot" && \
+        test ! -e "$accepted_transition_prior_tryboot" || return
+      test ! -L "$prior_artifact/prior-tryboot.txt" && \
+        test ! -e "$prior_artifact/prior-tryboot.txt" || return
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+validate_accepted_prior_tryboot_proof() {
+  local expected_existed="$1"
+  local expected_sha="$2"
+  local prior_artifact
+
+  prior_artifact="$(accepted_prior_artifact_path)" || return
+  case "$expected_existed" in
+    true)
+      [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || return
+      assert_artifact_tree "$prior_artifact" true || return
+      assert_owned_regular "$accepted_transition_prior_tryboot" 600 || return
+      test "$(sha "$accepted_transition_prior_tryboot")" = "$expected_sha" || return
+      test "$(sha "$prior_artifact/prior-tryboot.txt")" = "$expected_sha" || return
+      sudo cmp -s -- "$prior_artifact/prior-tryboot.txt" \
+        "$accepted_transition_prior_tryboot" || return
+      ;;
+    false)
+      test "$expected_sha" = none || return
+      assert_artifact_tree "$prior_artifact" false || return
+      test ! -L "$accepted_transition_prior_tryboot" && \
+        test ! -e "$accepted_transition_prior_tryboot" || return
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+validate_candidate_prior_tryboot_backup() {
+  local expected_existed="$1"
+  local expected_sha="$2"
+  local candidate_artifact candidate_manifest
+
+  candidate_artifact="$artifact_root/$(accepted_transition_value candidate_driver_version)/$(accepted_transition_value candidate_source_revision)/$(accepted_transition_value candidate_kernel_release)"
+  assert_artifact_tree "$candidate_artifact" "$expected_existed" || return
+  candidate_manifest="$candidate_artifact/manifest.txt"
+  test "$(sha "$candidate_manifest")" = \
+    "$(accepted_transition_value candidate_manifest_sha256)" || return
+  test "$(manifest_value "$candidate_manifest" source_revision)" = \
+    "$(accepted_transition_value candidate_source_revision)" || return
+  case "$expected_existed" in
+    true)
+      test "$(sha "$candidate_artifact/prior-tryboot.txt")" = "$expected_sha" || return
+      sudo cmp -s -- "$candidate_artifact/prior-tryboot.txt" \
+        "$accepted_transition_prior_tryboot" || return
+      ;;
+    false)
+      test "$expected_sha" = none || return
+      test ! -L "$candidate_artifact/prior-tryboot.txt" && \
+        test ! -e "$candidate_artifact/prior-tryboot.txt" || return
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+validate_generic_prior_tryboot_binding() {
+  local expected_existed expected_sha
+
+  expected_existed="$(accepted_transition_value prior_tryboot_existed)"
+  expected_sha="$(accepted_transition_value prior_tryboot_sha256)"
+  assert_transaction_state >/dev/null || return
+  test "$(state_value tryboot_existed)" = "$expected_existed" || return
+  test "$(state_value prior_tryboot_sha256)" = "$expected_sha" || return
+  validate_accepted_prior_tryboot_proof "$expected_existed" "$expected_sha" || return
+  validate_candidate_prior_tryboot_backup "$expected_existed" "$expected_sha"
+}
+
+validate_prepared_prior_tryboot() {
+  local expected_existed expected_sha candidate_sha
+
+  expected_existed="$(accepted_transition_value prior_tryboot_existed)"
+  expected_sha="$(accepted_transition_value prior_tryboot_sha256)"
+  assert_owned_regular "$normal_config" boot || return
+  test "$(sha "$normal_config")" = \
+    "$(accepted_transition_value prior_normal_config_sha256)" || return
+  if sudo test -L "$state_file"; then
+    return 1
+  elif sudo test -e "$state_file"; then
+    validate_generic_prior_tryboot_binding
+    return
+  fi
+  if validate_accepted_prior_tryboot "$expected_existed" "$expected_sha"; then
+    return 0
+  fi
+  validate_accepted_prior_tryboot_proof "$expected_existed" "$expected_sha" || return
+  validate_candidate_prior_tryboot_backup "$expected_existed" "$expected_sha" || return
+  candidate_sha="$(accepted_transition_value tryboot_config_sha256)"
+  assert_owned_regular "$tryboot_config" boot || return
+  test "$(sha "$tryboot_config")" = "$candidate_sha"
+}
+
+derive_accepted_normal_candidate() {
+  local output="$1"
+  local workspace="$2"
+
+  write_surgical_stock_config \
+    "$accepted_transition_prior_config" \
+    "$(accepted_value overlay_file)" \
+    "$output" "$workspace" || return
+  printf '\n# hyperpixel2r-kms accepted candidate\ndtoverlay=%s\n' \
+    "$(accepted_transition_value candidate_overlay_file)" |
+    sudo tee -a "$output" >/dev/null || return
+  assert_owned_regular "$output" 600 || return
+  LC_ALL=C sudo awk '{ line=$0; sub(/\r$/, "", line); if (length(line) > 98) exit 1 }' \
+    "$output"
+}
+
+validate_committed_normal_candidate() {
+  local workspace candidate result=1
+
+  workspace="$(new_transaction_workspace)" || return
+  candidate="$(private_file "$workspace" accepted-normal-candidate)" || {
+    remove_transaction_workspace "$workspace" || true
+    return 1
+  }
+  if derive_accepted_normal_candidate "$candidate" "$workspace" &&
+    assert_owned_regular "$normal_config" boot &&
+    sudo cmp -s -- "$candidate" "$normal_config"; then
+    result=0
+  fi
+  remove_transaction_workspace "$workspace" || return
+  return "$result"
+}
+
+validate_staged_prior_tryboot() {
+  local expected_existed expected_sha
+
+  expected_existed="$(accepted_transition_value prior_tryboot_existed)"
+  expected_sha="$(accepted_transition_value prior_tryboot_sha256)"
+  assert_owned_regular "$normal_config" boot || return
+  if sudo test -L "$state_file"; then
+    return 1
+  elif sudo test -e "$state_file"; then
+    test "$(sha "$normal_config")" = \
+      "$(accepted_transition_value prior_normal_config_sha256)" || return
+    validate_generic_prior_tryboot_binding
+  else
+    validate_committed_normal_candidate || return
+    validate_accepted_prior_tryboot "$expected_existed" "$expected_sha"
+  fi
+}
+
+validate_later_prior_tryboot() {
+  test ! -L "$state_file" && test ! -e "$state_file" || return
+  assert_owned_regular "$normal_config" boot || return
+  test "$(sha "$normal_config")" = \
+    "$(accepted_transition_value candidate_normal_config_sha256)" || return
+  validate_accepted_prior_tryboot \
+    "$(accepted_transition_value prior_tryboot_existed)" \
+    "$(accepted_transition_value prior_tryboot_sha256)"
+}
+
+clear_accepted_prior_tryboot_proof() {
+  local expected_existed="$1"
+  local expected_sha="$2"
+
+  validate_accepted_prior_tryboot "$expected_existed" "$expected_sha" || return
+  if test "$expected_existed" = true; then
+    sudo rm -- "$accepted_transition_prior_tryboot" || return
+  else
+    test ! -L "$accepted_transition_prior_tryboot" && \
+      test ! -e "$accepted_transition_prior_tryboot" || return
+  fi
+}
+
+restore_accepted_prior_tryboot() {
+  local schema expected_existed expected_sha live_sha candidate_sha
+
+  schema="$(accepted_transition_value schema_version)" || return
+  if test "$schema" != 5; then
+    sudo rm -f -- "$tryboot_config"
+    return
+  fi
+  expected_existed="$(accepted_transition_value prior_tryboot_existed)"
+  expected_sha="$(accepted_transition_value prior_tryboot_sha256)"
+  candidate_sha="$(accepted_transition_value tryboot_config_sha256)"
+  validate_accepted_prior_tryboot_proof "$expected_existed" "$expected_sha" || return
+  if sudo test -L "$tryboot_config"; then
+    return 1
+  elif sudo test -e "$tryboot_config"; then
+    assert_owned_regular "$tryboot_config" boot || return
+    live_sha="$(sha "$tryboot_config")" || return
+    if test "$live_sha" = "$expected_sha" && test "$expected_existed" = true; then
+      sudo cmp -s -- "$tryboot_config" "$accepted_transition_prior_tryboot" || return
+    else
+      test "$live_sha" = "$candidate_sha" || return
+    fi
+  elif test "$expected_existed" = true; then
+    return 1
+  fi
+  if test "$expected_existed" = true; then
+    atomic_copy "$accepted_transition_prior_tryboot" "$tryboot_config" 644 \
+      "$expected_sha" true || return
+  else
+    sudo rm -f -- "$tryboot_config" || return
+  fi
+  validate_accepted_prior_tryboot "$expected_existed" "$expected_sha"
+}
+
 publish_accepted_transition() {
   local kind="$1"
   local candidate_version="$2"
@@ -3740,14 +4002,32 @@ publish_accepted_transition() {
   local candidate_snapshot="${13}"
   local prior_status="${14}"
   local workspace="${15}"
+  local prior_tryboot_existed="${16:-false}"
+  local prior_tryboot_sha="${17:-none}"
+  local prior_tryboot_snapshot="${18:-}"
   local prior_sha candidate_sha state_tmp state_sha candidate_artifact candidate_inventory_sha
-  local accepted_schema prior_backlight_rule_existed prior_backlight_rule_sha prior_rule_snapshot=''
+  local accepted_schema transition_schema prior_backlight_rule_existed prior_backlight_rule_sha prior_rule_snapshot=''
 
   prior_sha="$(sha "$prior_snapshot")" || return
   candidate_sha="$(sha "$candidate_snapshot")" || return
   if test "$kind" = new; then
     candidate_inventory_sha=pending
+    transition_schema=5
+    case "$prior_tryboot_existed" in
+      true)
+        [[ "$prior_tryboot_sha" =~ ^[0-9a-f]{64}$ ]] || return
+        assert_owned_regular "$prior_tryboot_snapshot" 600 || return
+        test "$(sha "$prior_tryboot_snapshot")" = "$prior_tryboot_sha" || return
+        ;;
+      false)
+        test "$prior_tryboot_sha" = none && test -z "$prior_tryboot_snapshot" || return
+        test ! -L "$accepted_transition_prior_tryboot" && \
+          test ! -e "$accepted_transition_prior_tryboot" || return
+        ;;
+      *) return 1 ;;
+    esac
   else
+    transition_schema=4
     candidate_artifact="$artifact_root/$candidate_version/$candidate_revision/$candidate_release"
     assert_dkms_inventory_file "$candidate_artifact/dkms-prior-state" || return
     candidate_inventory_sha="$(sha "$candidate_artifact/dkms-prior-state")" || return
@@ -3780,7 +4060,7 @@ publish_accepted_transition() {
   esac
   state_tmp="$(private_file "$workspace" accepted-transition)" || return
   {
-    printf 'schema_version=4\n'
+    printf 'schema_version=%s\n' "$transition_schema"
     printf 'kind=%s\n' "$kind"
     printf 'phase=prepared\n'
     printf 'prior_driver_version=%s\n' "$(accepted_value driver_version)"
@@ -3803,9 +4083,18 @@ publish_accepted_transition() {
     printf 'candidate_backlight_rule_sha256=%s\n' "$candidate_backlight_rule_sha"
     printf 'prior_backlight_rule_existed=%s\n' "$prior_backlight_rule_existed"
     printf 'prior_backlight_rule_sha256=%s\n' "$prior_backlight_rule_sha"
+    if test "$transition_schema" = 5; then
+      printf 'prior_tryboot_existed=%s\n' "$prior_tryboot_existed"
+      printf 'prior_tryboot_sha256=%s\n' "$prior_tryboot_sha"
+    fi
   } | sudo tee "$state_tmp" >/dev/null || return
   state_sha="$(sha "$state_tmp")" || return
   atomic_copy "$prior_snapshot" "$accepted_transition_prior_config" 600 "$prior_sha" || return
+  if test "$transition_schema" = 5 && test "$prior_tryboot_existed" = true; then
+    atomic_copy "$prior_tryboot_snapshot" "$accepted_transition_prior_tryboot" 600 \
+      "$prior_tryboot_sha" || return
+    fixture_interrupt_after accepted-transition-prior-tryboot-published
+  fi
   atomic_copy "$state_tmp" "$accepted_transition" 600 "$state_sha" || return
   assert_accepted_transition || return
   accepted_prior_published=false
@@ -3822,12 +4111,12 @@ set_accepted_transition_phase() {
   assert_accepted_transition || return
   test "$(accepted_transition_value phase)" = "$expected" || return
   schema="$(accepted_transition_value schema_version)"
-  if { test "$schema" = 3 || test "$schema" = 4; } &&
+  if { test "$schema" = 3 || test "$schema" = 4 || test "$schema" = 5; } &&
     test "$(accepted_transition_value candidate_dkms_inventory_sha256)" = pending; then
     test "$expected:$next" = prepared:staged || return
     [[ "$inventory_sha" =~ ^[0-9a-f]{64}$ ]] || return
   elif test -n "$inventory_sha"; then
-    { test "$schema" = 3 || test "$schema" = 4; } || return
+    { test "$schema" = 3 || test "$schema" = 4 || test "$schema" = 5; } || return
     test "$(accepted_transition_value candidate_dkms_inventory_sha256)" = \
       "$inventory_sha" || return
     inventory_sha=''
@@ -3874,16 +4163,18 @@ prepare_new_accepted() {
   local backlight_rule_file="$9"
   local backlight_rule_sha="${10}"
   local prior_version prior_status workspace prior_snapshot stock candidate stock_sha
+  local prior_artifact prior_tryboot_existed prior_tryboot_sha prior_tryboot_snapshot=''
 
   assert_accepted_state || die 'accepted driver state is missing or unsafe'
   test ! -L "$accepted_transition" && test ! -e "$accepted_transition" ||
     die 'an accepted driver transition is already active'
   test ! -L "$accepted_transition_prior_config" && test ! -e "$accepted_transition_prior_config" ||
     die 'orphan accepted transition config exists'
+  test ! -L "$accepted_transition_prior_tryboot" && \
+    test ! -e "$accepted_transition_prior_tryboot" ||
+    die 'orphan accepted transition prior tryboot exists'
   test ! -L "$state_file" && test ! -e "$state_file" ||
     die 'a legacy tryboot transaction is active'
-  test ! -L "$tryboot_config" && test ! -e "$tryboot_config" ||
-    die 'accepted transition requires an unused tryboot config'
   [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'unsafe candidate driver version'
   [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || die 'unsafe candidate source revision'
   [[ "$release" =~ ^[A-Za-z0-9._+-]+$ ]] || die 'unsafe candidate kernel release'
@@ -3906,8 +4197,35 @@ prepare_new_accepted() {
   case "$prior_status" in absent|unregistered|registered) ;; *) die 'accepted prior DKMS status is invalid';; esac
   test "$(sha "$normal_config")" = "$(accepted_value normal_config_sha256)" ||
     die 'accepted normal config drifted before transition'
+  prior_artifact="$(accepted_prior_artifact_path)" ||
+    die 'accepted prior artifact is unsafe'
+  if sudo test -L "$tryboot_config"; then
+    die 'accepted prior tryboot config is unsafe'
+  elif sudo test -e "$tryboot_config"; then
+    assert_owned_regular "$tryboot_config" boot ||
+      die 'accepted prior tryboot config is unsafe'
+    assert_artifact_tree "$prior_artifact" true ||
+      die 'accepted prior tryboot artifact is unsafe'
+    sudo cmp -s -- "$tryboot_config" "$prior_artifact/prior-tryboot.txt" ||
+      die 'accepted prior tryboot config differs from retained proof'
+    prior_tryboot_existed=true
+  else
+    assert_artifact_tree "$prior_artifact" false ||
+      die 'accepted prior tryboot absence differs from retained proof'
+    prior_tryboot_existed=false
+    prior_tryboot_sha=none
+  fi
   workspace="$(new_transaction_workspace)" || die 'failed to create accepted transition workspace'
   accepted_workspace="$workspace"
+  if "$prior_tryboot_existed"; then
+    prior_tryboot_snapshot="$(privileged_snapshot \
+      "$tryboot_config" "$workspace" accepted-prior-tryboot)" ||
+      die 'failed to snapshot accepted prior tryboot config'
+    prior_tryboot_sha="$(sha "$prior_tryboot_snapshot")" ||
+      die 'failed to hash accepted prior tryboot config'
+    sudo cmp -s -- "$prior_tryboot_snapshot" "$prior_artifact/prior-tryboot.txt" ||
+      die 'accepted prior tryboot config changed during transition preparation'
+  fi
   prior_snapshot="$(privileged_snapshot "$normal_config" "$workspace" accepted-prior)" ||
     die 'failed to snapshot accepted normal config'
   stock="$(private_file "$workspace" accepted-stock)" || die 'failed to allocate accepted stock'
@@ -3922,7 +4240,8 @@ prepare_new_accepted() {
   publish_accepted_transition new "$version" "$revision" "$release" "$manifest_sha" \
     "$module_file" "$module_sha" "$overlay_file" "$overlay_sha" \
     "$backlight_rule_file" "$backlight_rule_sha" \
-    "$prior_snapshot" "$candidate" "$prior_status" "$workspace" ||
+    "$prior_snapshot" "$candidate" "$prior_status" "$workspace" \
+    "$prior_tryboot_existed" "$prior_tryboot_sha" "$prior_tryboot_snapshot" ||
     die 'failed to publish accepted candidate journal'
   remove_transaction_workspace "$workspace" || die 'failed to remove accepted transition workspace'
   accepted_workspace=''
@@ -3958,6 +4277,7 @@ assert_accepted_transition() {
     2) keys=("${accepted_transition_keys_v2[@]}") ;;
     3) keys=("${accepted_transition_keys[@]}") ;;
     4) keys=("${accepted_transition_keys_v4[@]}") ;;
+    5) keys=("${accepted_transition_keys_v5[@]}") ;;
     *) return 1 ;;
   esac
   test "$(sudo awk 'END { print NR }' "$accepted_transition")" = "${#keys[@]}" || return
@@ -3968,6 +4288,7 @@ assert_accepted_transition() {
   done
   kind="$(accepted_transition_value kind)"
   case "$kind" in new|retained) ;; *) return 1;; esac
+  if test "$schema" = 5; then test "$kind" = new || return; fi
   phase="$(accepted_transition_value phase)"
   case "$phase" in prepared|staged|committed|verified|finalizing|receipt_published) ;; *) return 1;; esac
   prior_version="$(accepted_transition_value prior_driver_version)"
@@ -3993,7 +4314,7 @@ assert_accepted_transition() {
   case "$(accepted_transition_value prior_dkms_status)" in absent|unregistered|registered) ;; *) return 1;; esac
   candidate_artifact="$artifact_root/$candidate_version/$candidate_revision/$candidate_release"
   marker="$candidate_artifact/dkms-prior-state"
-  if test "$schema" = 3 || test "$schema" = 4; then
+  if test "$schema" = 3 || test "$schema" = 4 || test "$schema" = 5; then
     if test "$(accepted_transition_value candidate_dkms_inventory_sha256)" = pending; then
       test "$kind:$phase" = new:prepared || return
     else
@@ -4007,7 +4328,7 @@ assert_accepted_transition() {
     assert_dkms_inventory_file "$marker" || return
     test "$(sudo sed -n '1p' "$marker")" != schema_version=2 || return
   fi
-  if test "$schema" = 4; then
+  if test "$schema" = 4 || test "$schema" = 5; then
     test "$(accepted_transition_value candidate_backlight_rule_file)" = \
       70-planeradar-backlight.rules || return
     [[ "$(accepted_transition_value candidate_backlight_rule_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
@@ -4042,6 +4363,25 @@ assert_accepted_transition() {
   fi
   test "$(sha "$accepted_transition_prior_config")" = \
     "$(accepted_transition_value prior_normal_config_sha256)" || return
+  if test "$schema" = 5; then
+    case "$(accepted_transition_value prior_tryboot_existed)" in
+      true)
+        [[ "$(accepted_transition_value prior_tryboot_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
+        ;;
+      false)
+        test "$(accepted_transition_value prior_tryboot_sha256)" = none || return
+        ;;
+      *) return 1 ;;
+    esac
+    case "$phase" in
+      prepared) validate_prepared_prior_tryboot || return ;;
+      staged) validate_staged_prior_tryboot || return ;;
+      committed|verified|finalizing|receipt_published)
+        validate_later_prior_tryboot || return
+        ;;
+      *) return 1 ;;
+    esac
+  fi
   if test "$phase" = receipt_published; then
     test "$(accepted_value driver_version)" = "$candidate_version" || return
     test "$(accepted_value source_revision)" = "$candidate_revision" || return
@@ -4249,10 +4589,28 @@ restore_prior_from_accepted_transition() {
   local prior_version prior_revision prior_release candidate_version candidate_revision candidate_release
   local prior_artifact candidate_artifact prior_manifest candidate_manifest prior_module prior_module_sha prior_overlay prior_overlay_sha
   local candidate_overlay module_path prior_overlay_path candidate_overlay_path prior_status candidate_status prior_dir candidate_dir
-  local prior_backlight_rule_file prior_backlight_rule_sha accepted_schema
+  local prior_backlight_rule_file prior_backlight_rule_sha accepted_schema transition_schema
+  local prior_tryboot_existed prior_tryboot_sha transition_sha
+  local bound_candidate_version bound_candidate_revision bound_candidate_release
+  local bound_candidate_manifest_sha bound_candidate_module_file bound_candidate_module_sha
+  local bound_candidate_overlay_file bound_candidate_overlay_sha
 
   assert_accepted_transition || return
+  transition_sha="$(sha "$accepted_transition")" || return
+  bound_candidate_version="$(accepted_transition_value candidate_driver_version)"
+  bound_candidate_revision="$(accepted_transition_value candidate_source_revision)"
+  bound_candidate_release="$(accepted_transition_value candidate_kernel_release)"
+  bound_candidate_manifest_sha="$(accepted_transition_value candidate_manifest_sha256)"
+  bound_candidate_module_file="$(accepted_transition_value candidate_module_file)"
+  bound_candidate_module_sha="$(accepted_transition_value candidate_module_sha256)"
+  bound_candidate_overlay_file="$(accepted_transition_value candidate_overlay_file)"
+  bound_candidate_overlay_sha="$(accepted_transition_value candidate_overlay_sha256)"
   accepted_schema="$(accepted_value schema_version)" || return
+  transition_schema="$(accepted_transition_value schema_version)" || return
+  if test "$transition_schema" = 5; then
+    prior_tryboot_existed="$(accepted_transition_value prior_tryboot_existed)"
+    prior_tryboot_sha="$(accepted_transition_value prior_tryboot_sha256)"
+  fi
   prior_version="$(accepted_transition_value prior_driver_version)"
   prior_revision="$(accepted_transition_value prior_source_revision)"
   prior_release="$(accepted_transition_value prior_kernel_release)"
@@ -4285,7 +4643,8 @@ restore_prior_from_accepted_transition() {
     test "$(sha "$prior_overlay_path")" = "$prior_overlay_sha" || return
     if test -n "${prior_backlight_rule_file:-}"; then
       test "$(sha "$backlight_rule_path")" = "$prior_backlight_rule_sha" || return
-    elif test "$(accepted_transition_value schema_version)" = 4; then
+    elif test "$(accepted_transition_value schema_version)" = 4 ||
+      test "$(accepted_transition_value schema_version)" = 5; then
       if test "$(accepted_transition_value prior_backlight_rule_existed)" = true; then
         assert_owned_regular "$backlight_rule_path" 644 || return
         test "$(sha "$backlight_rule_path")" = \
@@ -4297,9 +4656,13 @@ restore_prior_from_accepted_transition() {
     fi
     test "$(sha "$normal_config")" = \
       "$(accepted_transition_value prior_normal_config_sha256)" || return
-    sudo rm -f -- "$tryboot_config"
+    restore_accepted_prior_tryboot || return
     sudo rm -- "$accepted_transition" || return
     sudo rm -- "$accepted_transition_prior_config" || return
+    if test "$transition_schema" = 5; then
+      clear_accepted_prior_tryboot_proof \
+        "$prior_tryboot_existed" "$prior_tryboot_sha" || return
+    fi
     if test "$accepted_schema" != 3; then
       sudo rm -f -- "$accepted_prior_backlight_rule" || return
     fi
@@ -4343,7 +4706,8 @@ restore_prior_from_accepted_transition() {
     atomic_copy "$prior_artifact/$prior_backlight_rule_file" "$backlight_rule_path" 644 \
       "$prior_backlight_rule_sha" || return
     reload_backlight_permissions true || return
-  elif test "$(accepted_transition_value schema_version)" = 4; then
+  elif test "$(accepted_transition_value schema_version)" = 4 ||
+    test "$(accepted_transition_value schema_version)" = 5; then
     if test "$(accepted_transition_value prior_backlight_rule_existed)" = true; then
       atomic_copy "$accepted_prior_backlight_rule" "$backlight_rule_path" 644 \
         "$(accepted_transition_value prior_backlight_rule_sha256)" || return
@@ -4352,10 +4716,19 @@ restore_prior_from_accepted_transition() {
     fi
     reload_backlight_permissions false || return
   fi
-  sudo rm -f -- "$tryboot_config"
-  retire_unaccepted_transition_artifact || return
+  restore_accepted_prior_tryboot || return
+  test "$(sha "$accepted_transition")" = "$transition_sha" || return
+  retire_unaccepted_transition_artifact_bound \
+    "$bound_candidate_version" "$bound_candidate_revision" "$bound_candidate_release" \
+    "$bound_candidate_manifest_sha" "$bound_candidate_module_file" \
+    "$bound_candidate_module_sha" "$bound_candidate_overlay_file" \
+    "$bound_candidate_overlay_sha" || return
   sudo rm -- "$accepted_transition" || return
   sudo rm -- "$accepted_transition_prior_config" || return
+  if test "$transition_schema" = 5; then
+    clear_accepted_prior_tryboot_proof \
+      "$prior_tryboot_existed" "$prior_tryboot_sha" || return
+  fi
   if test "$accepted_schema" != 3; then
     sudo rm -f -- "$accepted_prior_backlight_rule" || return
   fi
@@ -4364,13 +4737,43 @@ restore_prior_from_accepted_transition() {
 }
 
 retire_unaccepted_transition_artifact() {
-  local version revision release artifact manifest prior=false
-
   assert_accepted_transition || return
+  retire_unaccepted_transition_artifact_bound
+}
+
+retire_unaccepted_transition_artifact_bound() {
+  local version="${1:-}"
+  local revision="${2:-}"
+  local release="${3:-}"
+  local expected_manifest_sha="${4:-}"
+  local expected_module_file="${5:-}"
+  local expected_module_sha="${6:-}"
+  local expected_overlay_file="${7:-}"
+  local expected_overlay_sha="${8:-}"
+  local artifact manifest prior=false
+
   test "$(accepted_transition_value kind)" = new || return 0
-  version="$(accepted_transition_value candidate_driver_version)"
-  revision="$(accepted_transition_value candidate_source_revision)"
-  release="$(accepted_transition_value candidate_kernel_release)"
+  if test -z "$version"; then
+    test "$#" = 0 || return
+    version="$(accepted_transition_value candidate_driver_version)"
+    revision="$(accepted_transition_value candidate_source_revision)"
+    release="$(accepted_transition_value candidate_kernel_release)"
+    expected_manifest_sha="$(accepted_transition_value candidate_manifest_sha256)"
+    expected_module_file="$(accepted_transition_value candidate_module_file)"
+    expected_module_sha="$(accepted_transition_value candidate_module_sha256)"
+    expected_overlay_file="$(accepted_transition_value candidate_overlay_file)"
+    expected_overlay_sha="$(accepted_transition_value candidate_overlay_sha256)"
+  else
+    test "$#" = 8 || return
+  fi
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return
+  [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || return
+  [[ "$release" =~ ^[A-Za-z0-9._+-]+$ ]] || return
+  [[ "$expected_manifest_sha" =~ ^[0-9a-f]{64}$ ]] || return
+  test "$expected_module_file" = hyperpixel2r_kms.ko || return
+  [[ "$expected_module_sha" =~ ^[0-9a-f]{64}$ ]] || return
+  test "$expected_overlay_file" = "hyperpixel2r-kms-${revision:0:12}.dtbo" || return
+  [[ "$expected_overlay_sha" =~ ^[0-9a-f]{64}$ ]] || return
   artifact="$artifact_root/$version/$revision/$release"
   if ! sudo test -e "$artifact" && ! sudo test -L "$artifact"; then
     return 0
@@ -4380,30 +4783,45 @@ retire_unaccepted_transition_artifact() {
   fi
   assert_artifact_tree "$artifact" "$prior" || return
   manifest="$artifact/manifest.txt"
-  test "$(sha "$manifest")" = \
-    "$(accepted_transition_value candidate_manifest_sha256)" || return
+  test "$(sha "$manifest")" = "$expected_manifest_sha" || return
   test "$(manifest_value "$manifest" driver_version)" = "$version" || return
   test "$(manifest_value "$manifest" source_revision)" = "$revision" || return
   test "$(manifest_value "$manifest" kernel_release)" = "$release" || return
-  test "$(manifest_value "$manifest" module_file)" = \
-    "$(accepted_transition_value candidate_module_file)" || return
-  test "$(manifest_value "$manifest" module_sha256)" = \
-    "$(accepted_transition_value candidate_module_sha256)" || return
-  test "$(manifest_value "$manifest" overlay_file)" = \
-    "$(accepted_transition_value candidate_overlay_file)" || return
-  test "$(manifest_value "$manifest" overlay_sha256)" = \
-    "$(accepted_transition_value candidate_overlay_sha256)" || return
+  test "$(manifest_value "$manifest" module_file)" = "$expected_module_file" || return
+  test "$(manifest_value "$manifest" module_sha256)" = "$expected_module_sha" || return
+  test "$(manifest_value "$manifest" overlay_file)" = "$expected_overlay_file" || return
+  test "$(manifest_value "$manifest" overlay_sha256)" = "$expected_overlay_sha" || return
   remove_artifact_tree "$artifact" "$prior"
 }
 
 recover_accepted() {
+  local orphan_prior_tryboot=false orphan_prior_tryboot_sha
+  local transition_schema transition_sha prior_tryboot_existed prior_tryboot_sha
+  local bound_candidate_version bound_candidate_revision bound_candidate_release
+  local bound_candidate_manifest_sha bound_candidate_module_file bound_candidate_module_sha
+  local bound_candidate_overlay_file bound_candidate_overlay_sha
+
   if ! sudo test -e "$accepted_transition" && ! sudo test -L "$accepted_transition"; then
     assert_accepted_state || die 'accepted driver receipt is missing or unsafe'
+    if sudo test -e "$accepted_transition_prior_tryboot" || \
+      sudo test -L "$accepted_transition_prior_tryboot"; then
+      assert_owned_regular "$accepted_transition_prior_tryboot" 600 ||
+        die 'orphan accepted prior tryboot proof is unsafe'
+      orphan_prior_tryboot_sha="$(sha "$accepted_transition_prior_tryboot")" ||
+        die 'orphan accepted prior tryboot proof is unsafe'
+      validate_accepted_prior_tryboot true "$orphan_prior_tryboot_sha" ||
+        die 'orphan accepted prior tryboot proof differs from accepted authority'
+      orphan_prior_tryboot=true
+    fi
     if sudo test -e "$accepted_transition_prior_config" || sudo test -L "$accepted_transition_prior_config"; then
       assert_owned_regular "$accepted_transition_prior_config" 600 ||
         die 'orphan accepted recovery config is unsafe'
       sudo rm -- "$accepted_transition_prior_config" ||
         die 'failed to clear orphan accepted recovery config'
+    fi
+    if "$orphan_prior_tryboot"; then
+      sudo rm -- "$accepted_transition_prior_tryboot" ||
+        die 'failed to clear orphan accepted prior tryboot proof'
     fi
     if test "$(accepted_value schema_version)" != 3 && \
       { sudo test -e "$accepted_prior_backlight_rule" || \
@@ -4422,6 +4840,21 @@ recover_accepted() {
     return
   fi
   assert_accepted_transition || die 'accepted driver transition is missing or unsafe'
+  transition_schema="$(accepted_transition_value schema_version)"
+  transition_sha="$(sha "$accepted_transition")" ||
+    die 'accepted driver transition is missing or unsafe'
+  bound_candidate_version="$(accepted_transition_value candidate_driver_version)"
+  bound_candidate_revision="$(accepted_transition_value candidate_source_revision)"
+  bound_candidate_release="$(accepted_transition_value candidate_kernel_release)"
+  bound_candidate_manifest_sha="$(accepted_transition_value candidate_manifest_sha256)"
+  bound_candidate_module_file="$(accepted_transition_value candidate_module_file)"
+  bound_candidate_module_sha="$(accepted_transition_value candidate_module_sha256)"
+  bound_candidate_overlay_file="$(accepted_transition_value candidate_overlay_file)"
+  bound_candidate_overlay_sha="$(accepted_transition_value candidate_overlay_sha256)"
+  if test "$transition_schema" = 5; then
+    prior_tryboot_existed="$(accepted_transition_value prior_tryboot_existed)"
+    prior_tryboot_sha="$(accepted_transition_value prior_tryboot_sha256)"
+  fi
   case "$(accepted_transition_value phase)" in
     prepared|staged|committed|verified) ;;
     *) die 'accepted transition is already finalizing'
@@ -4429,10 +4862,32 @@ recover_accepted() {
   esac
   if sudo test -e "$state_file"; then
     rollback
-    retire_unaccepted_transition_artifact ||
+    test "$(sha "$accepted_transition")" = "$transition_sha" ||
+      die 'accepted transition changed during generic rollback'
+    if test "$transition_schema" = 5; then
+      test ! -L "$state_file" && test ! -e "$state_file" ||
+        die 'generic tryboot state survived accepted recovery'
+      assert_owned_regular "$normal_config" boot ||
+        die 'generic rollback restored an unsafe normal config'
+      test "$(sha "$normal_config")" = \
+        "$(accepted_transition_value prior_normal_config_sha256)" ||
+        die 'generic rollback restored different normal config bytes'
+      validate_accepted_prior_tryboot "$prior_tryboot_existed" "$prior_tryboot_sha" ||
+        die 'generic rollback restored different prior tryboot authority'
+    fi
+    retire_unaccepted_transition_artifact_bound \
+      "$bound_candidate_version" "$bound_candidate_revision" "$bound_candidate_release" \
+      "$bound_candidate_manifest_sha" "$bound_candidate_module_file" \
+      "$bound_candidate_module_sha" "$bound_candidate_overlay_file" \
+      "$bound_candidate_overlay_sha" ||
       die 'failed to retire recovered unaccepted driver artifact'
     sudo rm -- "$accepted_transition" "$accepted_transition_prior_config" ||
       die 'failed to clear recovered accepted binding'
+    if test "$transition_schema" = 5; then
+      clear_accepted_prior_tryboot_proof \
+        "$prior_tryboot_existed" "$prior_tryboot_sha" ||
+        die 'failed to clear recovered accepted prior tryboot proof'
+    fi
     assert_accepted_state || die 'restored accepted driver receipt is unsafe'
     printf 'recovered accepted %s\n' "$(accepted_value source_revision)"
     return
@@ -4457,20 +4912,40 @@ finalize_accepted() {
   local workspace receipt receipt_sha normal_sha prior_version prior_revision prior_release
   local prior_artifact prior_manifest prior_overlay prior_overlay_sha prior_overlay_path stock_sha phase
   local candidate_inventory_sha backlight_rule_file backlight_rule_sha
+  local transition_schema prior_tryboot_existed prior_tryboot_sha orphan_prior_tryboot=false
 
   if ! sudo test -e "$accepted_transition" && ! sudo test -L "$accepted_transition"; then
     assert_accepted_state || die 'accepted driver receipt is missing or unsafe'
+    if sudo test -e "$accepted_transition_prior_tryboot" || \
+      sudo test -L "$accepted_transition_prior_tryboot"; then
+      assert_owned_regular "$accepted_transition_prior_tryboot" 600 ||
+        die 'orphan accepted transition prior tryboot proof is unsafe'
+      prior_tryboot_sha="$(sha "$accepted_transition_prior_tryboot")" ||
+        die 'orphan accepted transition prior tryboot proof is unsafe'
+      validate_accepted_prior_tryboot true "$prior_tryboot_sha" ||
+        die 'orphan accepted transition prior tryboot proof differs from accepted authority'
+      orphan_prior_tryboot=true
+    fi
     if sudo test -e "$accepted_transition_prior_config" || sudo test -L "$accepted_transition_prior_config"; then
       assert_owned_regular "$accepted_transition_prior_config" 600 ||
         die 'orphan accepted transition config is unsafe'
       sudo rm -- "$accepted_transition_prior_config" ||
         die 'failed to clear orphan accepted transition config'
     fi
+    if "$orphan_prior_tryboot"; then
+      sudo rm -- "$accepted_transition_prior_tryboot" ||
+        die 'failed to clear orphan accepted transition prior tryboot proof'
+    fi
     printf 'accepted transition already finalized\n'
     return
   fi
 
   assert_accepted_transition || die 'accepted transition is missing or unsafe'
+  transition_schema="$(accepted_transition_value schema_version)"
+  if test "$transition_schema" = 5; then
+    prior_tryboot_existed="$(accepted_transition_value prior_tryboot_existed)"
+    prior_tryboot_sha="$(accepted_transition_value prior_tryboot_sha256)"
+  fi
   phase="$(accepted_transition_value phase)"
   case "$phase" in verified|finalizing|receipt_published) ;; *)
     die 'accepted transition is not verified'
@@ -4483,7 +4958,8 @@ finalize_accepted() {
   candidate_inventory_sha="$(sha "$artifact/dkms-prior-state")" ||
     die 'candidate DKMS inventory is unsafe'
   if test "$(accepted_transition_value schema_version)" = 3 ||
-    test "$(accepted_transition_value schema_version)" = 4; then
+    test "$(accepted_transition_value schema_version)" = 4 ||
+    test "$(accepted_transition_value schema_version)" = 5; then
     test "$candidate_inventory_sha" = \
       "$(accepted_transition_value candidate_dkms_inventory_sha256)" ||
       die 'candidate DKMS inventory differs from accepted transition'
@@ -4507,7 +4983,8 @@ finalize_accepted() {
     test "$overlay_file" = "$(accepted_transition_value candidate_overlay_file)" &&
     test "$overlay_sha" = "$(accepted_transition_value candidate_overlay_sha256)" ||
     die 'candidate artifacts differ from accepted transition'
-  if test "$(accepted_transition_value schema_version)" = 4; then
+  if test "$(accepted_transition_value schema_version)" = 4 ||
+    test "$(accepted_transition_value schema_version)" = 5; then
     test "$backlight_rule_file" = \
       "$(accepted_transition_value candidate_backlight_rule_file)" &&
       test "$backlight_rule_sha" = \
@@ -4605,10 +5082,18 @@ finalize_accepted() {
     fi
   fi
   fixture_interrupt_after accepted-prior-retired
+  if test "$transition_schema" = 5; then
+    validate_accepted_prior_tryboot "$prior_tryboot_existed" "$prior_tryboot_sha" ||
+      die 'accepted prior tryboot proof drifted before transition retirement'
+  fi
   sudo rm -- "$accepted_transition" || die 'failed to clear accepted transition journal'
   fixture_interrupt_after accepted-journal-cleared
   sudo rm -- "$accepted_transition_prior_config" ||
     die 'failed to clear accepted transition config'
+  if test "$transition_schema" = 5; then
+    clear_accepted_prior_tryboot_proof "$prior_tryboot_existed" "$prior_tryboot_sha" ||
+      die 'failed to clear accepted transition prior tryboot proof'
+  fi
   sudo sync
   assert_accepted_state || die 'accepted receipt failed validation'
   printf 'accepted %s\n' "$revision"

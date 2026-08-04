@@ -1763,6 +1763,661 @@ exercise_prior_absent_accepted_uninstall_proof_guard() {
     fail 'rejected prior-absent finalizer changed its journal phase'
 }
 
+prepare_accepted_prior_tryboot_target() {
+  new_target
+  accepted_prior_tryboot="$root/boot/firmware/tryboot.txt"
+  printf '%s\n' \
+    '[all]' \
+    '# accepted prior one-shot configuration' \
+    'dtoverlay=hyperpixel2r-kms-eefaf3ae40fd' \
+    > "$accepted_prior_tryboot"
+  chown root:root "$accepted_prior_tryboot"
+  chmod 0755 "$accepted_prior_tryboot"
+  accepted_prior_tryboot_sha="$(sha256sum "$accepted_prior_tryboot" | awk '{ print $1 }')"
+  run_stage >/dev/null
+  install_live_hardware
+  run_controller commit-boot.sh >/dev/null
+  run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" >/dev/null
+  accepted_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
+  cmp -s "$accepted_prior_tryboot" "$accepted_artifact/prior-tryboot.txt" ||
+    fail 'fixture did not establish a real accepted prior tryboot backup'
+
+  candidate_revision='cccccccccccccccccccccccccccccccccccccccc'
+  candidate_overlay='hyperpixel2r-kms-cccccccccccc.dtbo'
+  candidate_manifest_sha="$(printf d%.0s {1..64})"
+  candidate_module_sha="$(printf e%.0s {1..64})"
+  candidate_overlay_sha="$(printf f%.0s {1..64})"
+  candidate_rule_sha="$(printf a%.0s {1..64})"
+}
+
+run_prior_tryboot_candidate_prepare() {
+  run_accepted_remote prepare-new-accepted \
+    0.1.1 "$candidate_revision" "$release" "$candidate_manifest_sha" \
+    hyperpixel2r_kms.ko "$candidate_module_sha" \
+    "$candidate_overlay" "$candidate_overlay_sha" \
+    "$backlight_rule_file" "$candidate_rule_sha"
+}
+
+prepare_prior_tryboot_candidate_source() {
+  candidate_source="$fixture/accepted-prior-candidate-source"
+  candidate_artifact="$candidate_source/dist/artifacts/$release"
+  rm -rf -- "$candidate_source"
+  mkdir -p "$(dirname "$candidate_artifact")"
+  cp -a "$repo_root/dist/artifacts/$release" "$candidate_artifact"
+  mv "$candidate_artifact/$overlay_file" "$candidate_artifact/$candidate_overlay"
+  printf 'accepted prior candidate overlay\n' >> "$candidate_artifact/$candidate_overlay"
+  candidate_module_sha="$(sha256sum "$candidate_artifact/hyperpixel2r_kms.ko" | awk '{ print $1 }')"
+  candidate_overlay_sha="$(sha256sum "$candidate_artifact/$candidate_overlay" | awk '{ print $1 }')"
+  sed -i \
+    -e "s/^source_revision\t.*/source_revision\t$candidate_revision/" \
+    -e "s/^module_sha256\t.*/module_sha256\t$candidate_module_sha/" \
+    -e "s/^overlay_file\t.*/overlay_file\t$candidate_overlay/" \
+    -e "s/^overlay_sha256\t.*/overlay_sha256\t$candidate_overlay_sha/" \
+    "$candidate_artifact/manifest.txt"
+  printf '%s  %s\n' "$candidate_module_sha" hyperpixel2r_kms.ko \
+    > "$candidate_artifact/module.sha256"
+  printf '%s  %s\n' "$candidate_overlay_sha" "$candidate_overlay" \
+    > "$candidate_artifact/overlay.sha256"
+  candidate_manifest_sha="$(sha256sum "$candidate_artifact/manifest.txt" | awk '{ print $1 }')"
+  candidate_rule_sha="$(awk -F '\t' '$1 == "backlight_rule_sha256" { print $2 }' \
+    "$candidate_artifact/manifest.txt")"
+}
+
+run_prior_tryboot_candidate_stage() {
+  HP2R_FIXTURE_ARTIFACT_DIR_OVERRIDE="$candidate_artifact" \
+    HP2R_FIXTURE_SOURCE_ROOT_OVERRIDE="$candidate_source" \
+    HP2R_FIXTURE_REPLACE_OVERLAY="$overlay_file" \
+    run_stage
+}
+
+prepare_prior_tryboot_postcommit_target() {
+  prepare_accepted_prior_tryboot_target
+  prepare_prior_tryboot_candidate_source
+  run_prior_tryboot_candidate_prepare >/dev/null
+  run_prior_tryboot_candidate_stage >/dev/null
+  run_controller commit-boot.sh >/dev/null
+}
+
+assert_prior_tryboot_mark_committed_rejected() {
+  local label="$1"
+  local transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  local transition_sha normal_sha live_sha
+
+  transition_sha="$(sha256sum "$transition" | awk '{ print $1 }')"
+  normal_sha="$(sha256sum "$root/boot/firmware/config.txt" | awk '{ print $1 }')"
+  live_sha="$(sha256sum "$accepted_prior_tryboot" | awk '{ print $1 }')"
+  if run_accepted_remote mark-committed-accepted \
+    >"$fixture/prior-mark-committed-$label.out" 2>&1; then
+    fail "accepted mark-committed trusted normal config drift: $label"
+  fi
+  test "$(sha256sum "$transition" | awk '{ print $1 }')" = "$transition_sha" ||
+    fail "rejected mark-committed changed transition authority: $label"
+  test "$(sha256sum "$root/boot/firmware/config.txt" | awk '{ print $1 }')" = "$normal_sha" ||
+    fail "rejected mark-committed changed normal config drift: $label"
+  test "$(sha256sum "$accepted_prior_tryboot" | awk '{ print $1 }')" = "$live_sha" ||
+    fail "rejected mark-committed changed accepted prior bytes: $label"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+}
+
+assert_prior_tryboot_prepare_rejected() {
+  local label="$1"
+  local receipt="$root/var/lib/hyperpixel2r-kms/accepted-state"
+  local receipt_sha normal_sha live_sha=''
+
+  receipt_sha="$(sha256sum "$receipt" | awk '{ print $1 }')"
+  normal_sha="$(sha256sum "$root/boot/firmware/config.txt" | awk '{ print $1 }')"
+  if test -f "$root/boot/firmware/tryboot.txt" && \
+    test ! -L "$root/boot/firmware/tryboot.txt"; then
+    live_sha="$(sha256sum "$root/boot/firmware/tryboot.txt" | awk '{ print $1 }')"
+  fi
+  if run_prior_tryboot_candidate_prepare >"$fixture/prior-prepare-$label.out" 2>&1; then
+    fail "accepted prior tryboot preparation accepted unsafe authority: $label"
+  fi
+  test "$(sha256sum "$receipt" | awk '{ print $1 }')" = "$receipt_sha" ||
+    fail "rejected prior tryboot preparation changed the accepted receipt: $label"
+  test "$(sha256sum "$root/boot/firmware/config.txt" | awk '{ print $1 }')" = "$normal_sha" ||
+    fail "rejected prior tryboot preparation changed the normal config: $label"
+  if test -n "$live_sha"; then
+    test "$(sha256sum "$root/boot/firmware/tryboot.txt" | awk '{ print $1 }')" = "$live_sha" ||
+      fail "rejected prior tryboot preparation changed live bytes: $label"
+  fi
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+  assert_absent "$root/usr/lib/hyperpixel2r-kms/0.1.1/$candidate_revision/$release"
+}
+
+assert_prior_tryboot_transition_rejected() {
+  local label="$1"
+  local transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  local receipt="$root/var/lib/hyperpixel2r-kms/accepted-state"
+  local transition_sha receipt_sha normal_sha live_sha
+
+  transition_sha="$(sha256sum "$transition" | awk '{ print $1 }')"
+  receipt_sha="$(sha256sum "$receipt" | awk '{ print $1 }')"
+  normal_sha="$(sha256sum "$root/boot/firmware/config.txt" | awk '{ print $1 }')"
+  live_sha="$(sha256sum "$accepted_prior_tryboot" | awk '{ print $1 }')"
+  if run_accepted_remote recover-accepted >"$fixture/prior-transition-$label.out" 2>&1; then
+    fail "accepted recovery trusted unsafe prior tryboot transition authority: $label"
+  fi
+  test "$(sha256sum "$transition" | awk '{ print $1 }')" = "$transition_sha" ||
+    fail "rejected transition validation changed the journal: $label"
+  test "$(sha256sum "$receipt" | awk '{ print $1 }')" = "$receipt_sha" ||
+    fail "rejected transition validation changed the receipt: $label"
+  test "$(sha256sum "$root/boot/firmware/config.txt" | awk '{ print $1 }')" = "$normal_sha" ||
+    fail "rejected transition validation changed normal config: $label"
+  test "$(sha256sum "$accepted_prior_tryboot" | awk '{ print $1 }')" = "$live_sha" ||
+    fail "rejected transition validation changed live prior bytes: $label"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+  assert_absent "$root/usr/lib/hyperpixel2r-kms/0.1.1/$candidate_revision/$release"
+}
+
+exercise_accepted_prior_committed_recovery() {
+  prepare_prior_tryboot_postcommit_target
+  if HP2R_FIXTURE_INTERRUPT_AFTER=accepted-committed-published \
+    run_accepted_remote mark-committed-accepted >/dev/null 2>&1; then
+    fail 'accepted prior lifecycle ignored committed publication interruption'
+  fi
+  run_accepted_remote recover-accepted >/dev/null
+  test "$(sha256sum "$accepted_prior_tryboot" | awk '{ print $1 }')" = \
+    "$accepted_prior_tryboot_sha" ||
+    fail 'committed recovery changed exact accepted prior bytes'
+  cmp -s "$accepted_prior_tryboot" "$accepted_artifact/prior-tryboot.txt" ||
+    fail 'committed recovery diverged from retained accepted prior proof'
+  assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-config.txt"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-tryboot.txt"
+  assert_absent "$root/usr/lib/hyperpixel2r-kms/0.1.1/$candidate_revision/$release"
+}
+
+exercise_accepted_prior_tryboot_authority() {
+  local transition transition_prior orphan_sha artifact_prior mutation_target
+
+  prepare_accepted_prior_tryboot_target
+  prepare_prior_tryboot_candidate_source
+  run_prior_tryboot_candidate_prepare >/dev/null
+  transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  transition_prior="$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-tryboot.txt"
+  grep -Fxq 'schema_version=5' "$transition"
+  grep -Fxq 'prior_tryboot_existed=true' "$transition"
+  grep -Fxq "prior_tryboot_sha256=$accepted_prior_tryboot_sha" "$transition"
+  test "$(stat -c '%U:%G:%a' "$transition_prior")" = root:root:600
+  cmp -s "$transition_prior" "$accepted_prior_tryboot"
+  run_prior_tryboot_candidate_stage >/dev/null
+  grep -Fxq 'phase=staged' "$transition" ||
+    fail 'accepted prior tryboot stage did not publish its staged phase'
+  grep -Fxq 'tryboot_existed=true' \
+    "$root/var/lib/hyperpixel2r-kms/tryboot-state" ||
+    fail 'generic stage did not bind prior tryboot existence'
+  grep -Fxq "prior_tryboot_sha256=$accepted_prior_tryboot_sha" \
+    "$root/var/lib/hyperpixel2r-kms/tryboot-state" ||
+    fail 'generic stage did not bind prior tryboot digest'
+  cmp -s "$transition_prior" \
+    "$root/usr/lib/hyperpixel2r-kms/0.1.1/$candidate_revision/$release/prior-tryboot.txt" ||
+    fail 'generic stage artifact backup differs from accepted transition proof'
+  run_controller commit-boot.sh >/dev/null
+  assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+  test "$(sha256sum "$accepted_prior_tryboot" | awk '{ print $1 }')" = \
+    "$accepted_prior_tryboot_sha" ||
+    fail 'generic commit did not restore exact accepted prior tryboot bytes'
+  run_accepted_remote mark-committed-accepted >/dev/null
+  run_accepted_remote mark-verified-accepted >/dev/null
+  run_accepted_remote finalize-accepted >/dev/null
+  grep -Fxq 'schema_version=3' \
+    "$root/var/lib/hyperpixel2r-kms/accepted-state" ||
+    fail 'new acceptance changed the accepted receipt schema'
+  grep -Fxq "source_revision=$candidate_revision" \
+    "$root/var/lib/hyperpixel2r-kms/accepted-state" ||
+    fail 'new acceptance did not publish the candidate receipt'
+  test "$(sha256sum "$accepted_prior_tryboot" | awk '{ print $1 }')" = \
+    "$accepted_prior_tryboot_sha" ||
+    fail 'accepted finalization changed exact prior tryboot bytes'
+  cmp -s "$accepted_prior_tryboot" \
+    "$root/usr/lib/hyperpixel2r-kms/0.1.1/$candidate_revision/$release/prior-tryboot.txt" ||
+    fail 'final accepted artifact lost exact prior tryboot authority'
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-config.txt"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-tryboot.txt"
+
+  prepare_accepted_prior_tryboot_target
+  prepare_prior_tryboot_candidate_source
+  if HP2R_FIXTURE_INTERRUPT_AFTER=accepted-transition-published \
+    run_prior_tryboot_candidate_prepare >/dev/null 2>&1; then
+    fail 'accepted prior preparation ignored transition publication interruption'
+  fi
+  run_accepted_remote recover-accepted >/dev/null
+  test "$(sha256sum "$accepted_prior_tryboot" | awk '{ print $1 }')" = \
+    "$accepted_prior_tryboot_sha" ||
+    fail 'transition publication recovery changed accepted prior bytes'
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-config.txt"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-tryboot.txt"
+
+  for boundary in \
+    candidate-artifact-published candidate-module-installed \
+    candidate-overlay-installed candidate-dkms-activated \
+    candidate-tryboot-published candidate-tryboot-state-published \
+    candidate-staged-published
+  do
+    prepare_accepted_prior_tryboot_target
+    prepare_prior_tryboot_candidate_source
+    run_prior_tryboot_candidate_prepare >/dev/null
+    if HP2R_FIXTURE_INTERRUPT_AFTER="$boundary" \
+      HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
+      run_prior_tryboot_candidate_stage >/dev/null 2>&1; then
+      fail "accepted prior stage ignored interruption at $boundary"
+    fi
+    if ! run_accepted_remote recover-accepted \
+      >"$fixture/prior-recover-$boundary.out" 2>&1; then
+      sed -n '1,20p' "$fixture/prior-recover-$boundary.out" >&2
+      fail "accepted prior recovery failed after $boundary"
+    fi
+    assert_file "$accepted_prior_tryboot"
+    test "$(sha256sum "$accepted_prior_tryboot" | awk '{ print $1 }')" = \
+      "$accepted_prior_tryboot_sha" ||
+      fail "accepted recovery changed prior tryboot bytes after $boundary"
+    cmp -s "$accepted_prior_tryboot" "$accepted_artifact/prior-tryboot.txt" ||
+      fail "accepted recovery diverged from retained prior proof after $boundary"
+    assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+    assert_absent "$root/var/lib/hyperpixel2r-kms/rollback-state"
+    assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+    assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-config.txt"
+    assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-tryboot.txt"
+    assert_absent "$root/usr/lib/hyperpixel2r-kms/0.1.1/$candidate_revision/$release"
+    find "$root/var/lib/hyperpixel2r-kms" -mindepth 1 -maxdepth 1 \
+      -type d -name '.hp2r-transaction.*' -exec rm -rf -- {} +
+    assert_no_private_workspaces
+  done
+
+  for boundary in accepted-committed-published accepted-verified-published
+  do
+    prepare_prior_tryboot_postcommit_target
+    if test "$boundary" = accepted-committed-published; then
+      if HP2R_FIXTURE_INTERRUPT_AFTER="$boundary" \
+        run_accepted_remote mark-committed-accepted >/dev/null 2>&1; then
+        fail "accepted prior lifecycle ignored interruption at $boundary"
+      fi
+    else
+      run_accepted_remote mark-committed-accepted >/dev/null
+      if HP2R_FIXTURE_INTERRUPT_AFTER="$boundary" \
+        run_accepted_remote mark-verified-accepted >/dev/null 2>&1; then
+        fail "accepted prior lifecycle ignored interruption at $boundary"
+      fi
+    fi
+    if ! run_accepted_remote recover-accepted \
+      >"$fixture/prior-phase-recover-$boundary.out" 2>&1; then
+      sed -n '1,20p' "$fixture/prior-phase-recover-$boundary.out" >&2
+      fail "accepted phase recovery failed after $boundary"
+    fi
+    test "$(sha256sum "$accepted_prior_tryboot" | awk '{ print $1 }')" = \
+      "$accepted_prior_tryboot_sha" ||
+      fail "accepted phase recovery changed prior bytes after $boundary"
+    assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+    assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-tryboot.txt"
+  done
+
+  for boundary in \
+    accepted-finalizing-published accepted-receipt-published \
+    accepted-receipt-phase-published accepted-prior-retired \
+    accepted-journal-cleared
+  do
+    prepare_prior_tryboot_postcommit_target
+    run_accepted_remote mark-committed-accepted >/dev/null
+    run_accepted_remote mark-verified-accepted >/dev/null
+    if HP2R_FIXTURE_INTERRUPT_AFTER="$boundary" \
+      run_accepted_remote finalize-accepted >/dev/null 2>&1; then
+      fail "accepted prior finalizer ignored interruption at $boundary"
+    fi
+    test "$(sha256sum "$accepted_prior_tryboot" | awk '{ print $1 }')" = \
+      "$accepted_prior_tryboot_sha" ||
+      fail "accepted finalizer changed prior bytes at $boundary"
+    run_accepted_remote finalize-accepted >/dev/null
+    run_accepted_remote finalize-accepted >/dev/null
+    test "$(sha256sum "$accepted_prior_tryboot" | awk '{ print $1 }')" = \
+      "$accepted_prior_tryboot_sha" ||
+      fail "accepted finalizer retry changed prior bytes after $boundary"
+    assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+    assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-config.txt"
+    assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-tryboot.txt"
+  done
+
+  prepare_prior_tryboot_postcommit_target
+  run_accepted_remote mark-committed-accepted >/dev/null
+  run_accepted_remote mark-verified-accepted >/dev/null
+  if HP2R_FIXTURE_INTERRUPT_AFTER=accepted-journal-cleared \
+    run_accepted_remote finalize-accepted >/dev/null 2>&1; then
+    fail 'accepted prior finalization ignored journal-cleared interruption'
+  fi
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  assert_file "$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-config.txt"
+  assert_file "$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-tryboot.txt"
+  run_accepted_remote finalize-accepted >/dev/null
+  run_accepted_remote finalize-accepted >/dev/null
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-config.txt"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-tryboot.txt"
+  test "$(sha256sum "$accepted_prior_tryboot" | awk '{ print $1 }')" = \
+    "$accepted_prior_tryboot_sha" ||
+    fail 'journal-cleared finalization retry changed accepted prior bytes'
+
+  # Recovery from a prepared journal must preserve the accepted prior rather
+  # than applying the historical accepted-new assumption of absence.
+  prepare_accepted_prior_tryboot_target
+  prepare_prior_tryboot_candidate_source
+  run_prior_tryboot_candidate_prepare >/dev/null
+  run_accepted_remote recover-accepted >/dev/null
+  assert_file "$accepted_prior_tryboot"
+  test "$(sha256sum "$accepted_prior_tryboot" | awk '{ print $1 }')" = \
+    "$accepted_prior_tryboot_sha" ||
+    fail 'prepared recovery did not preserve exact accepted prior tryboot bytes'
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-config.txt"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-tryboot.txt"
+
+  # Crash-style staged recovery follows generic rollback, then must revalidate
+  # the restored prior before clearing accepted-transition authority.
+  prepare_accepted_prior_tryboot_target
+  prepare_prior_tryboot_candidate_source
+  run_prior_tryboot_candidate_prepare >/dev/null
+  run_prior_tryboot_candidate_stage >/dev/null
+  run_accepted_remote recover-accepted >/dev/null
+  assert_file "$accepted_prior_tryboot"
+  test "$(sha256sum "$accepted_prior_tryboot" | awk '{ print $1 }')" = \
+    "$accepted_prior_tryboot_sha" ||
+    fail 'staged recovery did not preserve exact accepted prior tryboot bytes'
+  assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-config.txt"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-tryboot.txt"
+
+  prepare_prior_tryboot_postcommit_target
+  cp "$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-config.txt" \
+    "$root/boot/firmware/config.txt"
+  chown root:root "$root/boot/firmware/config.txt"
+  chmod 0644 "$root/boot/firmware/config.txt"
+  assert_prior_tryboot_mark_committed_rejected prior-normal
+
+  prepare_prior_tryboot_postcommit_target
+  printf '# foreign post-commit drift\n' >> "$root/boot/firmware/config.txt"
+  assert_prior_tryboot_mark_committed_rejected foreign-bytes
+
+  prepare_prior_tryboot_postcommit_target
+  sed -i 's/# hyperpixel2r-kms accepted candidate/# accepted candidate comment drift/' \
+    "$root/boot/firmware/config.txt"
+  assert_prior_tryboot_mark_committed_rejected comment-drift
+
+  # Normal stage compensation must restore a preexisting accepted prior after
+  # any post-publication failure, using a boot-file mode the validator accepts.
+  prepare_accepted_prior_tryboot_target
+  prepare_prior_tryboot_candidate_source
+  run_prior_tryboot_candidate_prepare >/dev/null
+  if HP2R_FIXTURE_INTERRUPT_AFTER=candidate-tryboot-published \
+    run_prior_tryboot_candidate_stage >/dev/null 2>&1; then
+    fail 'accepted prior stage ignored its tryboot publication interruption'
+  fi
+  assert_file "$accepted_prior_tryboot"
+  test "$(sha256sum "$accepted_prior_tryboot" | awk '{ print $1 }')" = \
+    "$accepted_prior_tryboot_sha" ||
+    fail 'stage compensation did not restore exact accepted prior tryboot bytes'
+  cmp -s "$accepted_prior_tryboot" "$accepted_artifact/prior-tryboot.txt" ||
+    fail 'stage compensation restored different bytes than accepted authority'
+  assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+
+  prepare_accepted_prior_tryboot_target
+  prepare_prior_tryboot_candidate_source
+  run_prior_tryboot_candidate_prepare >/dev/null
+  printf 'drift after accepted preparation\n' >> "$accepted_prior_tryboot"
+  if run_prior_tryboot_candidate_stage >/dev/null 2>&1; then
+    fail 'accepted candidate stage trusted live drift after preparation'
+  fi
+  assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+  assert_absent "$root/usr/lib/hyperpixel2r-kms/0.1.1/$candidate_revision/$release"
+
+  prepare_accepted_prior_tryboot_target
+  prepare_prior_tryboot_candidate_source
+  run_prior_tryboot_candidate_prepare >/dev/null
+  mutation_target="$fixture/prior-stage-symlink-target"
+  cp "$accepted_prior_tryboot" "$mutation_target"
+  rm -- "$accepted_prior_tryboot"
+  ln -s "$mutation_target" "$accepted_prior_tryboot"
+  if run_prior_tryboot_candidate_stage >/dev/null 2>&1; then
+    fail 'accepted candidate stage trusted a live symlink replacement'
+  fi
+  assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+  assert_absent "$root/usr/lib/hyperpixel2r-kms/0.1.1/$candidate_revision/$release"
+
+  prepare_accepted_prior_tryboot_target
+  prepare_prior_tryboot_candidate_source
+  run_prior_tryboot_candidate_prepare >/dev/null
+  cp "$root/var/lib/hyperpixel2r-kms/accepted-stock-config.txt" "$accepted_prior_tryboot"
+  printf '\n# hyperpixel2r-kms one-shot candidate\ndtoverlay=%s\n' "$candidate_overlay" \
+    >> "$accepted_prior_tryboot"
+  chown root:root "$accepted_prior_tryboot"
+  chmod 0644 "$accepted_prior_tryboot"
+  test "$(sha256sum "$accepted_prior_tryboot" | awk '{ print $1 }')" = \
+    "$(awk -F= '$1 == "tryboot_config_sha256" { print $2 }' \
+      "$root/var/lib/hyperpixel2r-kms/accepted-transition")" ||
+    fail 'candidate-byte hostile fixture did not reproduce the exact candidate'
+  if run_prior_tryboot_candidate_stage >/dev/null 2>&1; then
+    fail 'accepted candidate stage confused exact candidate bytes with prior authority'
+  fi
+  assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+  assert_absent "$root/usr/lib/hyperpixel2r-kms/0.1.1/$candidate_revision/$release"
+
+  # The optional companion is durable authority even when interruption occurs
+  # before the journal is published.  Recovery may clear it only after proving
+  # it against both the accepted artifact and the unchanged live file.
+  prepare_accepted_prior_tryboot_target
+  transition_prior="$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-tryboot.txt"
+  if HP2R_FIXTURE_INTERRUPT_AFTER=accepted-transition-prior-tryboot-published \
+    run_prior_tryboot_candidate_prepare >/dev/null 2>&1; then
+    fail 'accepted prior tryboot publication ignored its interruption boundary'
+  fi
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  assert_file "$transition_prior"
+  run_accepted_remote recover-accepted >/dev/null
+  assert_absent "$transition_prior"
+  test "$(sha256sum "$accepted_prior_tryboot" | awk '{ print $1 }')" = \
+    "$accepted_prior_tryboot_sha" ||
+    fail 'orphan companion recovery changed the accepted prior tryboot bytes'
+
+  # An orphan with unrelated bytes is not proof and must be rejected intact.
+  prepare_accepted_prior_tryboot_target
+  transition_prior="$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-tryboot.txt"
+  printf 'unrelated orphan prior tryboot proof\n' > "$transition_prior"
+  chown root:root "$transition_prior"
+  chmod 0600 "$transition_prior"
+  orphan_sha="$(sha256sum "$transition_prior" | awk '{ print $1 }')"
+  if run_accepted_remote recover-accepted >/dev/null 2>&1; then
+    fail 'accepted recovery trusted an unrelated orphan prior tryboot companion'
+  fi
+  assert_file "$transition_prior"
+  test "$(sha256sum "$transition_prior" | awk '{ print $1 }')" = "$orphan_sha" ||
+    fail 'rejected orphan prior tryboot recovery changed unrelated bytes'
+
+  prepare_accepted_prior_tryboot_target
+  transition_prior="$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-tryboot.txt"
+  mutation_target="$fixture/orphan-prior-symlink-target"
+  cp "$accepted_prior_tryboot" "$mutation_target"
+  ln -s "$mutation_target" "$transition_prior"
+  if run_accepted_remote recover-accepted >/dev/null 2>&1; then
+    fail 'accepted recovery trusted a symlinked orphan prior tryboot companion'
+  fi
+  test -L "$transition_prior" ||
+    fail 'rejected orphan recovery changed its symlinked proof'
+
+  # Preparation trusts only the exact prior already retained by accepted-state.
+  prepare_accepted_prior_tryboot_target
+  printf 'live prior drift\n' >> "$accepted_prior_tryboot"
+  assert_prior_tryboot_prepare_rejected live-byte-drift
+
+  prepare_accepted_prior_tryboot_target
+  mutation_target="$fixture/prior-live-symlink-target"
+  cp "$accepted_prior_tryboot" "$mutation_target"
+  rm -- "$accepted_prior_tryboot"
+  ln -s "$mutation_target" "$accepted_prior_tryboot"
+  assert_prior_tryboot_prepare_rejected live-symlink
+
+  prepare_accepted_prior_tryboot_target
+  chmod 0666 "$accepted_prior_tryboot"
+  assert_prior_tryboot_prepare_rejected live-mode
+
+  prepare_accepted_prior_tryboot_target
+  chown 65534:65534 "$accepted_prior_tryboot"
+  assert_prior_tryboot_prepare_rejected live-owner
+
+  prepare_accepted_prior_tryboot_target
+  rm -- "$accepted_prior_tryboot"
+  mkdir "$accepted_prior_tryboot"
+  assert_prior_tryboot_prepare_rejected live-directory
+
+  prepare_accepted_prior_tryboot_target
+  rm -- "$accepted_prior_tryboot"
+  mkfifo "$accepted_prior_tryboot"
+  assert_prior_tryboot_prepare_rejected live-fifo
+
+  prepare_accepted_prior_tryboot_target
+  artifact_prior="$accepted_artifact/prior-tryboot.txt"
+  rm -- "$artifact_prior"
+  assert_prior_tryboot_prepare_rejected artifact-prior-missing
+
+  prepare_accepted_prior_tryboot_target
+  artifact_prior="$accepted_artifact/prior-tryboot.txt"
+  printf 'retained proof drift\n' >> "$artifact_prior"
+  assert_prior_tryboot_prepare_rejected artifact-prior-byte-drift
+
+  prepare_accepted_prior_tryboot_target
+  artifact_prior="$accepted_artifact/prior-tryboot.txt"
+  chmod 0644 "$artifact_prior"
+  assert_prior_tryboot_prepare_rejected artifact-prior-mode
+
+  prepare_accepted_prior_tryboot_target
+  artifact_prior="$accepted_artifact/prior-tryboot.txt"
+  chown 65534:65534 "$artifact_prior"
+  assert_prior_tryboot_prepare_rejected artifact-prior-owner
+
+  prepare_accepted_prior_tryboot_target
+  artifact_prior="$accepted_artifact/prior-tryboot.txt"
+  mutation_target="$fixture/artifact-prior-symlink-target"
+  cp "$artifact_prior" "$mutation_target"
+  rm -- "$artifact_prior"
+  ln -s "$mutation_target" "$artifact_prior"
+  assert_prior_tryboot_prepare_rejected artifact-prior-symlink
+
+  prepare_accepted_prior_tryboot_target
+  artifact_prior="$accepted_artifact/prior-tryboot.txt"
+  rm -- "$artifact_prior"
+  mkdir "$artifact_prior"
+  assert_prior_tryboot_prepare_rejected artifact-prior-directory
+
+  # A receipt whose retained artifact proves absence cannot adopt an unrelated
+  # ambient one-shot file merely because that file is otherwise safe.
+  new_target
+  run_stage >/dev/null
+  install_live_hardware
+  run_controller commit-boot.sh >/dev/null
+  run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" >/dev/null
+  candidate_revision='cccccccccccccccccccccccccccccccccccccccc'
+  candidate_overlay='hyperpixel2r-kms-cccccccccccc.dtbo'
+  candidate_manifest_sha="$(printf d%.0s {1..64})"
+  candidate_module_sha="$(printf e%.0s {1..64})"
+  candidate_overlay_sha="$(printf f%.0s {1..64})"
+  candidate_rule_sha="$(printf a%.0s {1..64})"
+  printf 'unrelated ambient one-shot config\n' > "$root/boot/firmware/tryboot.txt"
+  chown root:root "$root/boot/firmware/tryboot.txt"
+  chmod 0644 "$root/boot/firmware/tryboot.txt"
+  assert_prior_tryboot_prepare_rejected unrelated-ambient-live
+
+  # Every schema leaf and companion is fail-closed after publication.
+  prepare_accepted_prior_tryboot_target
+  run_prior_tryboot_candidate_prepare >/dev/null
+  transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  transition_prior="$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-tryboot.txt"
+  rm -- "$transition_prior"
+  assert_prior_tryboot_transition_rejected companion-missing
+
+  prepare_accepted_prior_tryboot_target
+  run_prior_tryboot_candidate_prepare >/dev/null
+  transition_prior="$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-tryboot.txt"
+  printf 'companion drift\n' >> "$transition_prior"
+  assert_prior_tryboot_transition_rejected companion-drift
+
+  prepare_accepted_prior_tryboot_target
+  run_prior_tryboot_candidate_prepare >/dev/null
+  transition_prior="$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-tryboot.txt"
+  mutation_target="$fixture/transition-prior-symlink-target"
+  cp "$transition_prior" "$mutation_target"
+  rm -- "$transition_prior"
+  ln -s "$mutation_target" "$transition_prior"
+  assert_prior_tryboot_transition_rejected companion-symlink
+
+  prepare_accepted_prior_tryboot_target
+  run_prior_tryboot_candidate_prepare >/dev/null
+  transition_prior="$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-tryboot.txt"
+  chmod 0644 "$transition_prior"
+  assert_prior_tryboot_transition_rejected companion-mode
+
+  prepare_accepted_prior_tryboot_target
+  run_prior_tryboot_candidate_prepare >/dev/null
+  transition_prior="$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-tryboot.txt"
+  chown 65534:65534 "$transition_prior"
+  assert_prior_tryboot_transition_rejected companion-owner
+
+  prepare_accepted_prior_tryboot_target
+  run_prior_tryboot_candidate_prepare >/dev/null
+  transition_prior="$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-tryboot.txt"
+  rm -- "$transition_prior"
+  mkdir "$transition_prior"
+  assert_prior_tryboot_transition_rejected companion-directory
+
+  prepare_accepted_prior_tryboot_target
+  run_prior_tryboot_candidate_prepare >/dev/null
+  transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  sed -i '/^prior_tryboot_existed=/d' "$transition"
+  assert_prior_tryboot_transition_rejected existence-missing
+
+  prepare_accepted_prior_tryboot_target
+  run_prior_tryboot_candidate_prepare >/dev/null
+  transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  printf 'prior_tryboot_existed=true\n' >> "$transition"
+  assert_prior_tryboot_transition_rejected existence-duplicated
+
+  prepare_accepted_prior_tryboot_target
+  run_prior_tryboot_candidate_prepare >/dev/null
+  transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  replace_equals_value "$transition" prior_tryboot_existed unknown
+  assert_prior_tryboot_transition_rejected existence-unknown
+
+  prepare_accepted_prior_tryboot_target
+  run_prior_tryboot_candidate_prepare >/dev/null
+  transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  replace_equals_value "$transition" prior_tryboot_sha256 none
+  assert_prior_tryboot_transition_rejected digest-none-mismatch
+
+  prepare_accepted_prior_tryboot_target
+  run_prior_tryboot_candidate_prepare >/dev/null
+  transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  sed -i '/^prior_tryboot_sha256=/d' "$transition"
+  assert_prior_tryboot_transition_rejected digest-missing
+
+  prepare_accepted_prior_tryboot_target
+  run_prior_tryboot_candidate_prepare >/dev/null
+  transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  replace_equals_value "$transition" prior_tryboot_sha256 malformed
+  assert_prior_tryboot_transition_rejected digest-malformed
+
+  prepare_accepted_prior_tryboot_target
+  run_prior_tryboot_candidate_prepare >/dev/null
+  transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  printf 'prior_tryboot_sha256=%s\n' "$accepted_prior_tryboot_sha" >> "$transition"
+  assert_prior_tryboot_transition_rejected digest-duplicated
+
+  prepare_accepted_prior_tryboot_target
+  run_prior_tryboot_candidate_prepare >/dev/null
+  transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  printf 'unknown_schema5_key=value\n' >> "$transition"
+  assert_prior_tryboot_transition_rejected unknown-key
+}
+
 case "${HP2R_FIXTURE_CASE:-}" in
   inactive-uninstall-backlight)
     exercise_inactive_uninstall_backlight_matrix
@@ -1770,6 +2425,14 @@ case "${HP2R_FIXTURE_CASE:-}" in
     ;;
   prior-absent-uninstall-proof)
     exercise_prior_absent_accepted_uninstall_proof_guard
+    exit 0
+    ;;
+  accepted-prior-tryboot)
+    exercise_accepted_prior_tryboot_authority
+    exit 0
+    ;;
+  accepted-prior-committed-recovery)
+    exercise_accepted_prior_committed_recovery
     exit 0
     ;;
   '')
@@ -2227,7 +2890,7 @@ for recovery_authority in \
   tryboot-state rollback-state rollback-candidate-dkms-state \
   rollback-candidate-tryboot.txt accepted-state accepted-stock-config.txt \
   accepted-transition accepted-transition-prior-config.txt accepted-uninstall \
-  accepted-uninstall-stock.txt
+  accepted-transition-prior-tryboot.txt accepted-uninstall-stock.txt
 do
   prepare_recoverable_record_orphan
   printf 'conflicting recovery authority\n' > "$root/var/lib/hyperpixel2r-kms/$recovery_authority"
@@ -2357,7 +3020,7 @@ done
 
 # A schema-2 accepted receipt predates driver ownership of the backlight rule.
 # Preparing the first capable successor must prove the ambient rule state and
-# carry that proof into the new schema-4 transition without mutating it.
+# carry that proof into the new schema-5 transition without mutating it.
 new_target
 run_stage >/dev/null
 install_live_hardware
@@ -2378,10 +3041,14 @@ if HP2R_FIXTURE_INTERRUPT_AFTER=accepted-transition-published \
   fail 'legacy accepted upgrade ignored transition publication interruption'
 fi
 legacy_transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
-grep -Fxq 'schema_version=4' "$legacy_transition" ||
-  fail 'legacy accepted upgrade did not publish a schema-4 transition'
+grep -Fxq 'schema_version=5' "$legacy_transition" ||
+  fail 'legacy accepted upgrade did not publish a schema-5 transition'
 grep -Fxq 'prior_backlight_rule_existed=false' "$legacy_transition" ||
   fail 'legacy accepted upgrade did not prove the ambient rule was absent'
+grep -Fxq 'prior_tryboot_existed=false' "$legacy_transition" ||
+  fail 'legacy accepted upgrade did not prove prior tryboot absence'
+grep -Fxq 'prior_tryboot_sha256=none' "$legacy_transition" ||
+  fail 'legacy accepted upgrade did not bind prior tryboot absence'
 assert_absent "$backlight_rule_path"
 run_accepted_remote recover-accepted >/dev/null
 assert_absent "$legacy_transition"
@@ -2436,8 +3103,8 @@ if HP2R_FIXTURE_INTERRUPT_AFTER=accepted-transition-published \
 fi
 new_transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
 assert_file "$new_transition"
-grep -Fxq 'schema_version=4' "$new_transition" ||
-  fail 'new transition did not publish the complete v4 journal'
+grep -Fxq 'schema_version=5' "$new_transition" ||
+  fail 'new transition did not publish the complete v5 journal'
 grep -Fxq 'candidate_backlight_rule_file=70-planeradar-backlight.rules' "$new_transition" ||
   fail 'new transition lost the candidate rule identity'
 grep -Fxq 'candidate_dkms_inventory_sha256=pending' "$new_transition" ||
@@ -2446,6 +3113,11 @@ grep -Fxq 'kind=new' "$new_transition" ||
   fail 'new transition journal lost its candidate kind'
 grep -Fxq "candidate_source_revision=$new_revision" "$new_transition" ||
   fail 'new transition journal lost its exact candidate identity'
+grep -Fxq 'prior_tryboot_existed=false' "$new_transition" ||
+  fail 'new transition did not preserve prior tryboot absence'
+grep -Fxq 'prior_tryboot_sha256=none' "$new_transition" ||
+  fail 'new transition did not bind prior tryboot absence'
+assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition-prior-tryboot.txt"
 assert_absent "$root/usr/lib/hyperpixel2r-kms/0.1.1/$new_revision/$release"
 assert_absent "$root/boot/firmware/tryboot.txt"
 grep -Fxq "dtoverlay=$overlay_file" "$root/boot/firmware/config.txt" ||
