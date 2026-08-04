@@ -260,7 +260,15 @@ Before `set_accepted_transition_phase prepared staged`, require the published ge
 
 - prepared with no generic state accepts only exact prior/absence or the exact bound candidate left by an interrupted stage;
 - prepared with valid generic state requires the state/artifact prior backup and current candidate;
-- staged requires the same generic state/artifact binding;
+- staged accepts exactly two fail-closed substates:
+  - before generic commit, valid generic state and artifact prior binding, the
+    live exact candidate tryboot, and normal config equal to
+    `prior_normal_config_sha256`;
+  - after generic commit but before `mark-committed-accepted`, generic state
+    absent, the live exact authorized prior or absence restored, and normal
+    config equal to the existing `candidate_normal_config_sha256`;
+  mixed substates such as state absent plus prior normal config or state present
+  plus restored prior are rejected;
 - later phases require exact restored prior/absence and no generic state.
 
 Add a deterministic fixture that changes the live file after `prepare-new` but before `stage`; require stage to reject before any candidate leaf appears. Repeat with symlink replacement and exact candidate bytes that are not the prior bytes.

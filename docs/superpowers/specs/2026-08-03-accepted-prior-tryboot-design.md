@@ -141,8 +141,14 @@ handled by existing transaction compensation.
 
 - `prepared`: the live prior tryboot file and durable companion must match the
   recorded prior authority.
-- `staged`: the live file is the exact candidate; generic state/artifact prior
-  backup must match the accepted-transition prior authority.
+- `staged` has exactly two valid substates. Before generic commit, generic state
+  and its artifact prior backup must match the accepted-transition prior
+  authority, the live tryboot file must be the exact candidate, and normal config
+  must still match `prior_normal_config_sha256`. After generic commit but before
+  `mark-committed-accepted`, generic state must be absent, the live exact prior
+  file or absence must be restored, and normal config must match the existing
+  `candidate_normal_config_sha256`. Mixed states, including state absent with
+  prior normal config or state present with restored prior, are invalid.
 - `committed`, `verified`, `finalizing`, and `receipt_published`: generic commit
   must already have restored the exact authorized prior file (or exact
   absence), and every accepted operation revalidates that fact.
