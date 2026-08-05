@@ -460,6 +460,7 @@ if test "${1-}" = bash && test "${2-}" = -s; then
     HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH:-}" \
     HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH:-}" \
     HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH:-}" \
+    HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY="${HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY:-}" \
     schema5_staged_authority_asserting="${schema5_staged_authority_asserting:-}" \
     schema5_staged_authority_allow_prepared="${schema5_staged_authority_allow_prepared:-}" \
     bash -c 'id -u > "$HP2R_FIXTURE_ROOT/tmp/remote-uid"; exec bash "$@"' bash "$@"; then
@@ -498,6 +499,7 @@ if test "${1-}" = bash && { [[ "${2-}" == /tmp/hp2r-tryboot-stage.*/* ]] || [[ "
     HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH:-}" \
     HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH:-}" \
     HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH:-}" \
+    HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY="${HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY:-}" \
     schema5_staged_authority_asserting="${schema5_staged_authority_asserting:-}" \
     schema5_staged_authority_allow_prepared="${schema5_staged_authority_allow_prepared:-}" \
     bash -c 'id -u > "$HP2R_FIXTURE_ROOT/tmp/remote-uid"; exec bash "$@"' bash "$script" "$@"
@@ -3395,6 +3397,16 @@ exercise_inactive_kernel_prepare() {
     assert_absent "$root/boot/firmware/tryboot.txt"
     exit 0
   fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-setter-snapshot; then
+    HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY=1 run_inactive_stage >/dev/null ||
+      fail 'setter snapshot mutation rejected an otherwise authorized stage'
+    assert_file "$root/tmp/setter-authority-mutated"
+    grep -Fxq 'target_identity_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
+      "$state_dir/accepted-transition" || fail 'phase setter consumed mutated live authority'
+    grep -Fxq 'phase=staged' "$state_dir/accepted-transition" ||
+      fail 'setter snapshot did not publish staged authority'
+    exit 0
+  fi
   if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-foreign-firmware; then
     printf 'foreign inactive firmware leaf\n' > "$root/boot/firmware/$kernel_name"
     chmod 0644 "$root/boot/firmware/$kernel_name"
@@ -3618,7 +3630,7 @@ case "${HP2R_FIXTURE_CASE:-}" in
     exercise_inactive_kernel_prepare
     exit 0
     ;;
-  inactive-kernel-phase-authority-drift|inactive-kernel-final-module-drift|inactive-kernel-final-artifact-drift|inactive-kernel-final-dkms-drift|inactive-kernel-stale-authority|inactive-kernel-hostile-env|inactive-kernel-commit-rejected)
+  inactive-kernel-phase-authority-drift|inactive-kernel-final-module-drift|inactive-kernel-final-artifact-drift|inactive-kernel-final-dkms-drift|inactive-kernel-setter-snapshot|inactive-kernel-stale-authority|inactive-kernel-hostile-env|inactive-kernel-commit-rejected)
     exercise_inactive_kernel_prepare
     exit 0
     ;;

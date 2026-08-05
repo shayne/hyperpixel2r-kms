@@ -172,6 +172,13 @@ fixture_interrupt_after() {
   exit 97
 }
 
+fixture_mutate_setter_authority() {
+  test "${HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY:-}" = 1 || return 0
+  sudo sed -i 's/^target_identity_sha256=.*/target_identity_sha256=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/' \
+    "$accepted_transition"
+  : > "$root/tmp/setter-authority-mutated"
+}
+
 dkms_available() {
   if test -n "$root"; then
     command -v "$dkms_command" >/dev/null 2>&1
@@ -4916,6 +4923,7 @@ set_accepted_transition_phase() {
   local prepared_snapshot="${5:-}"
   local expected_prepared_sha="${6:-}"
   local schema workspace state_tmp state_sha transition_source="$accepted_transition"
+  local transition_schema transition_inventory
 
   assert_accepted_transition || return
   test "$(accepted_transition_value phase)" = "$expected" || return
@@ -4925,15 +4933,18 @@ set_accepted_transition_phase() {
     test "$(sha "$prepared_snapshot")" = "$expected_prepared_sha" || return
     test "$(sha "$accepted_transition")" = "$expected_prepared_sha" || return
     transition_source="$prepared_snapshot"
+    fixture_mutate_setter_authority
   fi
-  schema="$(accepted_transition_value schema_version)"
+  transition_schema="$(sudo awk -F= '$1 == "schema_version" { print $2 }' "$transition_source")"
+  transition_inventory="$(sudo awk -F= '$1 == "candidate_dkms_inventory_sha256" { print $2 }' "$transition_source")"
+  schema="$transition_schema"
   if { test "$schema" = 3 || test "$schema" = 4 || test "$schema" = 5 || test "$schema" = 6; } &&
-    test "$(accepted_transition_value candidate_dkms_inventory_sha256)" = pending; then
+    test "$transition_inventory" = pending; then
     test "$expected:$next" = prepared:staged || return
     [[ "$inventory_sha" =~ ^[0-9a-f]{64}$ ]] || return
   elif test -n "$inventory_sha"; then
     { test "$schema" = 3 || test "$schema" = 4 || test "$schema" = 5 || test "$schema" = 6; } || return
-    test "$(accepted_transition_value candidate_dkms_inventory_sha256)" = \
+    test "$transition_inventory" = \
       "$inventory_sha" || return
     inventory_sha=''
   fi
