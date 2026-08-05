@@ -2294,6 +2294,37 @@ assert_inactive_stage_authority() {
   [[ "$accepted_transition_sha" =~ ^[0-9a-f]{64}$ ]]
 }
 
+assert_inactive_final_stage_boundary() {
+  local expected_version="$1" expected_release="$2" expected_revision="$3" expected_module_file="$4"
+  local expected_module_sha="$5" expected_overlay_file="$6" expected_overlay_sha="$7"
+  local expected_rule_file="$8" expected_rule_sha="$9" expected_normal_sha="${10}"
+  local expected_tryboot_sha="${11}" expected_transition_sha="${12}"
+  local transaction resolved vermagic
+
+  # assert_transaction_state proves the private schema-5 state, artifact tree,
+  # manifest, DKMS inventory, installed module/overlay/rule, and staged
+  # journal/receipt/companions are one coherent transaction.  The checks below
+  # make the final live boot and candidate-resolution leaves explicit.
+  transaction="$(assert_transaction_state)" || return
+  test "$transaction" = "$expected_version"$'\t'"$expected_revision"$'\t'"$expected_release"$'\t'"$artifact_root/$expected_version/$expected_revision/$expected_release" || return
+  assert_owned_regular "$normal_config" boot &&
+    test "$(sha "$normal_config")" = "$expected_normal_sha" &&
+    assert_owned_regular "$tryboot_config" boot &&
+    test "$(sha "$tryboot_config")" = "$expected_tryboot_sha" || return
+  assert_owned_regular "${root}/lib/modules/$expected_release/extra/$expected_module_file" 644 &&
+    test "$(sha "${root}/lib/modules/$expected_release/extra/$expected_module_file")" = "$expected_module_sha" &&
+    assert_owned_regular "${root}/boot/firmware/overlays/$expected_overlay_file" boot &&
+    test "$(sha "${root}/boot/firmware/overlays/$expected_overlay_file")" = "$expected_overlay_sha" &&
+    assert_owned_regular "$backlight_rule_path" 644 &&
+    test "$(sha "$backlight_rule_path")" = "$expected_rule_sha" || return
+  test "$(state_value accepted_transition_sha256)" = "$expected_transition_sha" &&
+    test "$(sha "$accepted_transition")" = "$expected_transition_sha" || return
+  resolved="$(sudo modinfo -k "$expected_release" -n hyperpixel2r_kms)" || return
+  test "$resolved" = "${root}/lib/modules/$expected_release/extra/$expected_module_file" || return
+  vermagic="$(sudo modinfo -k "$expected_release" -F vermagic hyperpixel2r_kms)" || return
+  case "$vermagic" in "$expected_release"*) ;; *) return 1;; esac
+}
+
 stage() {
   # These transaction fields deliberately remain global until the process EXIT
   # trap runs: Bash unwinds function locals before an EXIT trap on `set -e`.
@@ -2839,6 +2870,11 @@ stage() {
         assert_owned_regular "$firmware_initramfs_path" boot &&
         test "$(sha "$firmware_initramfs_path")" = "$candidate_initramfs_sha" ||
         die 'inactive bound leaves changed before staged phase publication'
+      assert_inactive_final_stage_boundary "$driver_version" "$release" "$revision" "$module_file" \
+        "$module_sha" "$overlay_file" "$overlay_sha" "$backlight_rule_file" \
+        "$backlight_rule_sha" "$normal_sha" "$candidate_sha" \
+        "$expected_accepted_transition_sha" ||
+        die 'inactive final staged boundary validation failed'
     fi
     if test "$(accepted_transition_value schema_version)" = 5 ||
       test "$(accepted_transition_value schema_version)" = 6; then
