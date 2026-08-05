@@ -20,6 +20,9 @@ bin_no_dkms="$fixture/bin-no-dkms"
 log="$fixture/commands.log"
 
 cleanup() {
+  if test -f "$fixture/tmp/inactive-late-writer.pid"; then
+    kill "$(cat "$fixture/tmp/inactive-late-writer.pid")" 2>/dev/null || true
+  fi
   rm -rf -- "$fixture"
 }
 trap cleanup EXIT
@@ -242,6 +245,25 @@ fi
 /usr/bin/cp "$@"
 copy_status=$?
 test "$copy_status" = 0 || exit "$copy_status"
+if test -n "${HP2R_INSTALL_ROOT:-}" && test -n "${HP2R_FIXTURE_RACE_INACTIVE_SOURCE:-}"; then
+  case "${HP2R_FIXTURE_RACE_INACTIVE_SOURCE}:$destination" in
+    prior-kernel:*/.hp2r-prior-kernel.*|prior-initramfs:*/.hp2r-prior-initramfs.*|candidate-kernel:*/.hp2r-candidate-kernel.*|candidate-initramfs:*/.hp2r-candidate-initramfs.*|base-dtb:*/.hp2r-candidate-base-dtb.*|vc4-overlay:*/.hp2r-candidate-vc4-overlay.*)
+      marker="$HP2R_FIXTURE_ROOT/tmp/inactive-source-${HP2R_FIXTURE_RACE_INACTIVE_SOURCE}-replaced"
+      if test ! -e "$marker"; then
+        : > "$marker"
+        printf 'replacement after capture\n' >> "$source_path"
+      fi
+      ;;
+  esac
+fi
+if test -n "${HP2R_INSTALL_ROOT:-}" && \
+  test -f "$HP2R_FIXTURE_ROOT/tmp/inactive-late-writer-class" && \
+  [[ "$destination" == */.hp2r-accepted-prior.* ]]; then
+  marker="$HP2R_FIXTURE_ROOT/tmp/inactive-late-writer-start"
+  if test ! -e "$marker"; then
+    : > "$marker"
+  fi
+fi
 if test -n "${HP2R_INSTALL_ROOT:-}" && test -n "${HP2R_FIXTURE_RACE_LATE_SYMLINK:-}"; then
   case "${HP2R_FIXTURE_RACE_LATE_SYMLINK}:$destination" in
     snapshot:*/.hp2r-incoming-manifest.*|atomic:*/.manifest.txt.*)
@@ -282,7 +304,12 @@ SCRIPT
 set -euo pipefail
 destination="${@: -1}"
 "$(dirname "$0")/fixture-record-fault" receipt-write "$destination"
-exec /usr/bin/tee "$@"
+/usr/bin/tee "$@"
+if test -n "${HP2R_INSTALL_ROOT:-}" && test -f "$HP2R_FIXTURE_ROOT/tmp/inactive-force-overlong"; then
+  case "$destination" in
+    */explicit-normal|*/normalized-normal) printf '%099d\n' 0 >> "$destination" ;;
+  esac
+fi
 SCRIPT
 
   install -m 0755 /dev/stdin "$bin/test" <<'SCRIPT'
@@ -577,6 +604,33 @@ SCRIPT
 #!/usr/bin/env bash
 case "${1-}" in -r) printf '%s\n' "${HP2R_FIXTURE_REMOTE_RUNNING_RELEASE:-$HP2R_FIXTURE_RELEASE}";; -m) printf 'aarch64\n';; *) exit 64;; esac
 SCRIPT
+
+  # df is a faithful fixture stub for the guard's only input contract: the
+  # available blocks of each independently addressed filesystem.  Locks use
+  # the container's real fuser and a process that truly holds the descriptor.
+  install -m 0755 /dev/stdin "$bin/df" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+path="${@: -1}"
+available='999999999'
+case "${HP2R_FIXTURE_SPACE:-}:$path" in
+  private:"$HP2R_FIXTURE_ROOT"/var/lib/hyperpixel2r-kms) available=1 ;;
+  firmware:"$HP2R_FIXTURE_ROOT"/boot/firmware) available=1 ;;
+esac
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+printf 'fixture 999999999 0 %s 0%% /fixture\n' "$available"
+SCRIPT
+
+  # Use copies rather than shell wrappers so /proc/<pid>/exe has the precise
+  # executable basename the production writer classifier is meant to inspect.
+  mkdir -p "$fixture/writer-bin"
+  for writer in apt apt-get dpkg unattended-upgrade update-initramfs mkinitramfs \
+    kernel-install dkms depmod flash-kernel rpi-eeprom-update lifecycle-remote.sh \
+    accepted-lifecycle.sh stage-tryboot.sh hp2r-boot-selector raspi-config reader
+  do
+    cp /bin/sleep "$fixture/writer-bin/$writer"
+    chmod 0755 "$fixture/writer-bin/$writer"
+  done
 
   install -m 0755 /dev/stdin "$bin/lsmod" <<'SCRIPT'
 #!/usr/bin/env bash
@@ -2727,8 +2781,185 @@ exercise_task3_aligned_authority() {
   source "$repo_root/tests/task3-authority-fixture.sh"
 }
 
+# This is the single authoritative Task 4 hostile inventory.  Keep names
+# stable: the matrix selector prints each exact name and the continuation
+# report records these groups/counts verbatim.  A source replacement is only
+# applicable to the six boot leaves captured into private authority; the
+# candidate module directory and package-status leaf are validated before
+# capture and have no snapshot/revalidation phase to race.
+inactive_hostile_cases() {
+  local source mutation companion lock writer
+
+  printf '%s\n' baseline writer-reader writer-self-nonmatch writer-parent-nonmatch running-third
+  for source in prior-kernel prior-initramfs candidate-kernel candidate-initramfs base-dtb vc4-overlay; do
+    for mutation in absent symlink directory fifo owner mode; do
+      printf 'source-%s-%s\n' "$source" "$mutation"
+    done
+    case "$source" in
+      prior-kernel|prior-initramfs) printf 'source-%s-hash-unbound\n' "$source" ;;
+      *) printf 'source-%s-hash\n' "$source" ;;
+    esac
+    printf 'source-%s-replace-during-capture\n' "$source"
+  done
+  for mutation in absent symlink directory fifo owner mode hash; do
+    printf 'source-prior-module-%s\n' "$mutation"
+  done
+  for mutation in absent symlink regular fifo owner mode; do
+    printf 'source-candidate-module-tree-%s\n' "$mutation"
+  done
+  for mutation in absent symlink directory fifo owner mode; do
+    printf 'source-package-source-%s\n' "$mutation"
+  done
+  for companion in prior-kernel prior-initramfs candidate-kernel candidate-initramfs; do
+    for mutation in symlink directory fifo owner mode hash unrelated-content; do
+      printf 'companion-%s-%s\n' "$companion" "$mutation"
+    done
+  done
+  for lock in dpkg dpkg-frontend apt initramfs lifecycle selector; do
+    printf 'writer-lock-%s\n' "$lock"
+  done
+  for writer in apt apt-get dpkg unattended-upgrade update-initramfs mkinitramfs \
+    kernel-install dkms depmod flash-kernel rpi-eeprom-update lifecycle-remote.sh \
+    accepted-lifecycle.sh stage-tryboot.sh hp2r-boot-selector raspi-config; do
+    printf 'writer-process-%s\n' "$writer"
+  done
+  printf '%s\n' writer-late-apt space-private space-firmware
+  printf '%s\n' config-generated-output-overlong config-include config-autoboot \
+    config-kernel config-initramfs config-ramfs config-os-prefix config-overlay-prefix \
+    config-display-duplicate config-display-conditional config-wrong-vc4-digest
+}
+
+inactive_path_fingerprint() {
+  local path="$1"
+
+  if test -L "$path"; then
+    printf 'symlink\t%s\t%s\t%s\n' "$(stat -c '%U:%G:%a' "$path")" "$(readlink "$path")" \
+      "$(sha256sum "$path" 2>/dev/null | awk '{ print $1 }' || true)"
+  elif test -e "$path"; then
+    printf '%s\t%s\t%s' "$(stat -c '%F' "$path")" "$(stat -c '%U:%G:%a' "$path")" \
+      "$(stat -c '%s' "$path")"
+    if test -f "$path"; then printf '\t%s' "$(sha256sum "$path" | awk '{ print $1 }')"; fi
+    printf '\n'
+  else
+    printf 'absent\n'
+  fi
+}
+
+capture_inactive_path() {
+  local path="$1" output="$2"
+  inactive_path_fingerprint "$path" > "$output"
+}
+
+assert_inactive_path_preserved() {
+  local path="$1" expected="$2" label="$3"
+  local actual="$fixture/inactive-path-actual"
+
+  capture_inactive_path "$path" "$actual"
+  cmp -s "$expected" "$actual" || fail "inactive hostile changed $label"
+}
+
+inactive_companion_path() {
+  local name="$1"
+  printf '%s/accepted-transition-%s.img\n' "$root/var/lib/hyperpixel2r-kms" "$name"
+}
+
+inactive_assert_failure_preserves_state() {
+  local normal_before="$1" module_before="$2" overlay_before="$3" companion_dir="$4"
+  local name path
+
+  cmp -s "$normal_before" "$root/boot/firmware/config.txt" ||
+    fail "hostile $HP2R_FIXTURE_HOSTILE changed normal config"
+  assert_inactive_path_preserved "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko" \
+    "$module_before" 'conventional module'
+  assert_inactive_path_preserved "$root/boot/firmware/overlays/$overlay_file" \
+    "$overlay_before" 'conventional overlay'
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  assert_absent "$root/boot/firmware/tryboot.txt"
+  for name in prior-kernel prior-initramfs candidate-kernel candidate-initramfs; do
+    path="$(inactive_companion_path "$name")"
+    assert_inactive_path_preserved "$path" "$companion_dir/$name" "companion $name"
+  done
+  if find "$root/boot/firmware" -maxdepth 1 -type f \
+    -name "hp2r-${source_revision:0:12}-*-kernel.img" -print -quit | grep -q . ||
+    find "$root/boot/firmware" -maxdepth 1 -type f \
+      -name "hp2r-${source_revision:0:12}-*-initramfs.img" -print -quit | grep -q .; then
+    fail "hostile $HP2R_FIXTURE_HOSTILE wrote a Task 5 firmware destination"
+  fi
+}
+
+inactive_mutate_source() {
+  local name="$1" mutation="$2" path='' source_kind=file
+
+  case "$name" in
+    prior-kernel) path="$root/boot/vmlinuz-$release" ;;
+    prior-initramfs) path="$root/boot/initrd.img-$release" ;;
+    candidate-kernel) path="$root/boot/vmlinuz-$candidate_release" ;;
+    candidate-initramfs) path="$root/boot/initrd.img-$candidate_release" ;;
+    base-dtb) path="$root/boot/firmware/bcm2710-rpi-zero-2-w.dtb" ;;
+    vc4-overlay) path="$root/boot/firmware/overlays/vc4-kms-v3d.dtbo" ;;
+    prior-module) path="$root/lib/modules/$release/extra/hyperpixel2r_kms.ko" ;;
+    candidate-module-tree) path="$root/lib/modules/$candidate_release"; source_kind=dir ;;
+    package-source) path="$root/var/lib/dpkg/info/linux-image-$candidate_release.list" ;;
+    *) fail "unknown inactive source: $name" ;;
+  esac
+  case "$mutation" in
+    replace-during-capture)
+      export HP2R_FIXTURE_RACE_INACTIVE_SOURCE="$name"
+      return
+      ;;
+    absent) rm -rf -- "$path" ;;
+    symlink)
+      rm -rf -- "$path"
+      ln -s /etc/passwd "$path"
+      ;;
+    directory)
+      rm -rf -- "$path"
+      mkdir "$path"
+      ;;
+    regular)
+      rm -rf -- "$path"
+      printf 'not a module directory\n' > "$path"
+      ;;
+    fifo)
+      rm -rf -- "$path"
+      mkfifo "$path"
+      ;;
+    owner) chown 65534:65534 "$path" ;;
+    mode)
+      if test "$source_kind" = dir; then chmod 0700 "$path"; else chmod 0600 "$path"; fi
+      ;;
+    hash|hash-unbound) printf 'source digest drift\n' >> "$path" ;;
+    *) fail "unknown inactive source mutation: $mutation" ;;
+  esac
+}
+
+inactive_mutate_companion() {
+  local name="$1" mutation="$2" path source
+  path="$(inactive_companion_path "$name")"
+  case "$name" in
+    prior-kernel) source="$root/boot/vmlinuz-$release" ;;
+    prior-initramfs) source="$root/boot/initrd.img-$release" ;;
+    candidate-kernel) source="$root/boot/vmlinuz-$candidate_release" ;;
+    candidate-initramfs) source="$root/boot/initrd.img-$candidate_release" ;;
+    *) fail "unknown inactive companion: $name" ;;
+  esac
+  case "$mutation" in
+    symlink) ln -s /etc/passwd "$path" ;;
+    directory) mkdir "$path" ;;
+    fifo) mkfifo "$path" ;;
+    owner) printf 'unsafe companion\n' > "$path"; chown 65534:65534 "$path"; chmod 0600 "$path" ;;
+    mode) printf 'unsafe companion\n' > "$path"; chmod 0644 "$path" ;;
+    hash) cp "$source" "$path"; chmod 0600 "$path"; printf 'companion digest drift\n' >> "$path" ;;
+    unrelated-content) printf 'unrelated companion content\n' > "$path"; chmod 0600 "$path" ;;
+    *) fail "unknown inactive companion mutation: $mutation" ;;
+  esac
+}
+
 exercise_inactive_kernel_prepare() {
   local candidate_release='6.18.39+rpt-rpi-v8'
+  if test "${HP2R_FIXTURE_HOSTILE:-}" = config-generated-output-overlong; then
+    candidate_release="6.18.39+rpt-rpi-v8-$(printf x%.0s {1..70})"
+  fi
   local candidate_parent="$fixture/inactive-kernel-target"
   local candidate_target="$candidate_parent/$candidate_release"
   local candidate_manifest="$candidate_target/target.txt"
@@ -2740,7 +2971,7 @@ exercise_inactive_kernel_prepare() {
   local candidate_initramfs="/boot/initrd.img-$candidate_release"
   local normal_before="$fixture/inactive-normal-before"
   local conventional_before="$fixture/inactive-conventional-before"
-  local revision12 release_tag kernel_name initramfs_name companion
+  local revision12 release_tag kernel_name initramfs_name companion prepared_in_hostile=false
 
   new_target
   run_stage >/dev/null
@@ -2798,44 +3029,110 @@ exercise_inactive_kernel_prepare() {
         --backlight-rule-sha256 "$(awk -F '\t' '$1 == "backlight_rule_sha256" { print $2 }' "$artifact_manifest")"
   }
   if test -n "${HP2R_FIXTURE_HOSTILE:-}"; then
-    hostile_path=''
-    case "$HP2R_FIXTURE_HOSTILE" in
-      source-absent) rm -- "$root$candidate_kernel" ;;
-      source-symlink) hostile_path="$fixture/hostile-source"; cp "$root$candidate_kernel" "$hostile_path"; rm -- "$root$candidate_kernel"; ln -s "$hostile_path" "$root$candidate_kernel" ;;
-      source-directory) rm -- "$root$candidate_kernel"; mkdir "$root$candidate_kernel" ;;
-      source-fifo) rm -- "$root$candidate_kernel"; mkfifo "$root$candidate_kernel" ;;
-      source-owner) chown 65534:65534 "$root$candidate_kernel" ;;
-      source-mode) chmod 0600 "$root$candidate_kernel" ;;
-      source-hash) printf 'hash drift\n' >> "$root$candidate_kernel" ;;
-      module-source-absent) rm -rf -- "$root/lib/modules/$candidate_release" ;;
-      package-source-absent) rm -- "$root/var/lib/dpkg/info/linux-image-$candidate_release.list" ;;
+    local hostile="$HP2R_FIXTURE_HOSTILE" negative=true name mutation lock writer pid=''
+    local normal_state="$fixture/inactive-hostile-normal" module_state="$fixture/inactive-hostile-module"
+    local overlay_state="$fixture/inactive-hostile-overlay" companion_state="$fixture/inactive-hostile-companions"
+
+    mkdir "$companion_state"
+    case "$hostile" in
+      baseline|writer-self-nonmatch|writer-parent-nonmatch|source-prior-kernel-hash-unbound|source-prior-initramfs-hash-unbound) negative=false ;;
+      writer-reader) "$fixture/writer-bin/reader" 30 >/dev/null 2>&1 & pid="$!"; negative=false ;;
       running-third) export HP2R_FIXTURE_REMOTE_RUNNING_RELEASE='6.18.33+rpt-rpi-v8' ;;
-      vc4-hash) printf 'vc4 drift\n' >> "$root/boot/firmware/overlays/vc4-kms-v3d.dtbo" ;;
-      config-overlong) printf '%099d\n' 0 >> "$root/boot/firmware/config.txt" ;;
-      config-duplicate) printf 'dtoverlay=hyperpixel2r-kms-aaaaaaaaaaaa.dtbo\n' >> "$root/boot/firmware/config.txt" ;;
-      config-conditional) printf '[pi4]\ndtoverlay=hyperpixel2r-kms-aaaaaaaaaaaa.dtbo\n' >> "$root/boot/firmware/config.txt" ;;
-      config-override) printf 'kernel=foreign.img\n' >> "$root/boot/firmware/config.txt" ;;
+      source-*)
+        for name in prior-kernel prior-initramfs candidate-kernel candidate-initramfs \
+          base-dtb vc4-overlay prior-module candidate-module-tree package-source; do
+          if [[ "${hostile#source-}" == "$name-"* ]]; then
+            mutation="${hostile#source-$name-}"
+            inactive_mutate_source "$name" "$mutation"
+            name=''
+            break
+          fi
+        done
+        test -z "$name" || fail "unknown inactive hostile source case: $hostile"
+        ;;
+      companion-*)
+        for name in prior-kernel prior-initramfs candidate-kernel candidate-initramfs; do
+          if [[ "${hostile#companion-}" == "$name-"* ]]; then
+            mutation="${hostile#companion-$name-}"
+            inactive_mutate_companion "$name" "$mutation"
+            name=''
+            break
+          fi
+        done
+        test -z "$name" || fail "unknown inactive hostile companion case: $hostile"
+        ;;
+      writer-lock-*)
+        lock="${hostile#writer-lock-}"
+        case "$lock" in
+          dpkg) export HP2R_FIXTURE_ACTIVE_LOCK="$root/var/lib/dpkg/lock" ;;
+          dpkg-frontend) export HP2R_FIXTURE_ACTIVE_LOCK="$root/var/lib/dpkg/lock-frontend" ;;
+          apt) export HP2R_FIXTURE_ACTIVE_LOCK="$root/run/lock/apt" ;;
+          initramfs) export HP2R_FIXTURE_ACTIVE_LOCK="$root/run/lock/update-initramfs" ;;
+          lifecycle) export HP2R_FIXTURE_ACTIVE_LOCK="$root/run/lock/hyperpixel2r-kms" ;;
+          selector) export HP2R_FIXTURE_ACTIVE_LOCK="$root/run/lock/hp2r-boot-selector" ;;
+          *) fail "unknown inactive writer lock: $lock" ;;
+        esac
+        mkdir -p "$(dirname "$HP2R_FIXTURE_ACTIVE_LOCK")"
+        bash -c 'exec 9>"$1"; flock -n 9; sleep 30' bash \
+          "$HP2R_FIXTURE_ACTIVE_LOCK" >/dev/null 2>&1 & pid="$!"
+        ;;
+      writer-process-*)
+        writer="${hostile#writer-process-}"
+        test -x "$fixture/writer-bin/$writer" || fail "unknown inactive writer process: $writer"
+        "$fixture/writer-bin/$writer" 30 >/dev/null 2>&1 & pid="$!"
+        ;;
+      writer-late-apt)
+        export HP2R_FIXTURE_LATE_WRITER=apt
+        printf 'apt\n' > "$root/tmp/inactive-late-writer-class"
+        bash -c 'while ! test -e "$1"; do sleep 0.01; done; exec "$2" 30' bash \
+          "$root/tmp/inactive-late-writer-start" "$fixture/writer-bin/apt" \
+          >/dev/null 2>&1 & pid="$!"
+        ;;
+      space-private) export HP2R_FIXTURE_SPACE=private ;;
+      space-firmware) export HP2R_FIXTURE_SPACE=firmware ;;
+      config-generated-output-overlong) : > "$root/tmp/inactive-force-overlong" ;;
       config-include) printf 'include extra.txt\n' >> "$root/boot/firmware/config.txt" ;;
       config-autoboot) printf 'autoboot.txt\n' >> "$root/boot/firmware/config.txt" ;;
-      companion-symlink) hostile_path="$fixture/hostile-companion"; printf unsafe > "$hostile_path"; ln -s "$hostile_path" "$state_dir/accepted-transition-candidate-kernel.img" ;;
-      companion-directory) mkdir "$state_dir/accepted-transition-candidate-kernel.img" ;;
-      companion-fifo) mkfifo "$state_dir/accepted-transition-candidate-kernel.img" ;;
-      companion-owner) printf unsafe > "$state_dir/accepted-transition-candidate-kernel.img"; chown 65534:65534 "$state_dir/accepted-transition-candidate-kernel.img"; chmod 0600 "$state_dir/accepted-transition-candidate-kernel.img" ;;
-      companion-mode) printf unsafe > "$state_dir/accepted-transition-candidate-kernel.img"; chmod 0644 "$state_dir/accepted-transition-candidate-kernel.img" ;;
-      companion-hash) printf unsafe > "$state_dir/accepted-transition-candidate-kernel.img"; chmod 0600 "$state_dir/accepted-transition-candidate-kernel.img" ;;
-      *) fail "unknown inactive hostile case: $HP2R_FIXTURE_HOSTILE" ;;
+      config-kernel) printf 'kernel=foreign.img\n' >> "$root/boot/firmware/config.txt" ;;
+      config-initramfs) printf 'initramfs foreign.img followkernel\n' >> "$root/boot/firmware/config.txt" ;;
+      config-ramfs) printf 'ramfsfile=foreign.img\n' >> "$root/boot/firmware/config.txt" ;;
+      config-os-prefix) printf 'os_prefix=foreign/\n' >> "$root/boot/firmware/config.txt" ;;
+      config-overlay-prefix) printf 'overlay_prefix=foreign/\n' >> "$root/boot/firmware/config.txt" ;;
+      config-display-duplicate) printf 'dtoverlay=hyperpixel2r-kms-aaaaaaaaaaaa.dtbo\n' >> "$root/boot/firmware/config.txt" ;;
+      config-display-conditional) printf '[pi4]\ndtoverlay=hyperpixel2r-kms-aaaaaaaaaaaa.dtbo\n' >> "$root/boot/firmware/config.txt" ;;
+      config-wrong-vc4-digest) printf 'vc4 digest drift\n' >> "$root/boot/firmware/overlays/vc4-kms-v3d.dtbo" ;;
+      *) fail "unknown inactive hostile case: $hostile" ;;
     esac
-    cp "$root/boot/firmware/config.txt" "$fixture/hostile-normal-before"
-    if run_inactive_prepare >/dev/null 2>&1; then
-      fail "inactive prepare accepted hostile $HP2R_FIXTURE_HOSTILE"
+    cp "$root/boot/firmware/config.txt" "$normal_state"
+    capture_inactive_path "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko" "$module_state"
+    capture_inactive_path "$root/boot/firmware/overlays/$overlay_file" "$overlay_state"
+    for name in prior-kernel prior-initramfs candidate-kernel candidate-initramfs; do
+      capture_inactive_path "$(inactive_companion_path "$name")" "$companion_state/$name"
+    done
+    if "$negative"; then
+      if test "${HP2R_FIXTURE_DEBUG:-}" = 1; then
+        run_inactive_prepare && fail "inactive prepare accepted hostile $hostile"
+      elif run_inactive_prepare >/dev/null 2>&1; then
+        if test "$hostile" = writer-late-apt && ! test -f "$root/tmp/inactive-late-writer-start"; then
+          fail 'inactive late-writer fixture did not launch after capture'
+        fi
+        fail "inactive prepare accepted hostile $hostile"
+      fi
+      test -z "$pid" || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }
+      inactive_assert_failure_preserves_state "$normal_state" "$module_state" "$overlay_state" "$companion_state"
+      exit 0
     fi
-    cmp -s "$fixture/hostile-normal-before" "$root/boot/firmware/config.txt" ||
-      fail "hostile $HP2R_FIXTURE_HOSTILE changed normal config"
-    assert_absent "$state_dir/accepted-transition"
-    assert_absent "$root/boot/firmware/tryboot.txt"
-    exit 0
+    if test "${HP2R_FIXTURE_DEBUG:-}" = 1 || test "$hostile" = baseline; then
+      run_inactive_prepare || fail "inactive prepare rejected harmless $hostile"
+    else
+      run_inactive_prepare >/dev/null || fail "inactive prepare rejected harmless $hostile"
+    fi
+    test -z "$pid" || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }
+    prepared_in_hostile=true
   fi
-  if test -n "${HP2R_FIXTURE_INTERRUPT_AFTER:-}"; then
+  if "$prepared_in_hostile"; then
+    :
+  elif test -n "${HP2R_FIXTURE_INTERRUPT_AFTER:-}"; then
     if run_inactive_prepare >/dev/null 2>&1; then
       fail "inactive prepare ignored interruption after $HP2R_FIXTURE_INTERRUPT_AFTER"
     fi
@@ -2883,9 +3180,31 @@ exercise_inactive_kernel_prepare() {
   assert_absent "$root/boot/firmware/tryboot.txt"
 }
 
+exercise_inactive_kernel_matrix() {
+  local hostile count=0
+
+  while IFS= read -r hostile; do
+    test -n "$hostile" || continue
+    if HP2R_FIXTURE_CASE=inactive-kernel HP2R_FIXTURE_HOSTILE="$hostile" \
+      bash "${BASH_SOURCE[0]}" >/dev/null; then
+      count=$((count + 1))
+      printf 'PASS inactive-kernel hostile %s\n' "$hostile"
+    else
+      fail "inactive-kernel hostile matrix failed: $hostile"
+    fi
+  done < <(inactive_hostile_cases)
+  test "$count" = "$(inactive_hostile_cases | wc -l | tr -d ' ')" ||
+    fail "inactive-kernel hostile matrix count drifted: $count"
+  printf 'inactive-kernel hostile matrix passed: %s cases\n' "$count"
+}
+
 case "${HP2R_FIXTURE_CASE:-}" in
   inactive-kernel)
     exercise_inactive_kernel_prepare
+    exit 0
+    ;;
+  inactive-kernel-matrix)
+    exercise_inactive_kernel_matrix
     exit 0
     ;;
   task3-authority)
