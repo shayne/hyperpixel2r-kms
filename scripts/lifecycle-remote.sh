@@ -1217,6 +1217,75 @@ state_value() {
   sudo awk -F= -v wanted="$key" '$1 == wanted { print $2 }' "$state_file"
 }
 
+canonical_prepared_transition_sha() {
+  assert_owned_regular "$accepted_transition" 600 || return
+  sudo sed \
+    -e 's/^phase=staged$/phase=prepared/' \
+    -e 's/^candidate_dkms_inventory_sha256=.*/candidate_dkms_inventory_sha256=pending/' \
+    "$accepted_transition" | sha256sum | awk '{ print $1 }'
+}
+
+assert_schema5_staged_authority() (
+  local release="$1" revision="$2" module_file="$3" module_sha="$4"
+  local overlay_file="$5" overlay_sha="$6" normal_sha="$7" candidate_sha="$8"
+  local kernel_file initramfs_file kernel_sha initramfs_sha prior_kernel_sha prior_initramfs_sha
+  local expected_kernel_file expected_initramfs_file
+
+  # A staged journal validates its generic prior-tryboot binding by calling
+  # assert_transaction_state.  That nested validation is part of the same
+  # proof already in progress here; otherwise schema-5 and schema-6 recurse.
+  test "${schema5_staged_authority_asserting:-false}" != true || return 0
+  schema5_staged_authority_asserting=true
+
+  assert_accepted_state || return
+  assert_accepted_transition || return
+  test "$(accepted_transition_value schema_version)" = 6 &&
+    test "$(accepted_transition_value boot_transition)" = inactive-kernel || return
+  case "$(accepted_transition_value phase)" in
+    staged) ;;
+    prepared) test "${schema5_staged_authority_allow_prepared:-false}" = true || return ;;
+    *) return ;;
+  esac
+  test "$(accepted_transition_value candidate_driver_version)" = "$(state_value driver_version)" &&
+    test "$(accepted_transition_value candidate_kernel_release)" = "$release" &&
+    test "$(accepted_transition_value candidate_source_revision)" = "$revision" &&
+    test "$(accepted_transition_value candidate_module_file)" = "$module_file" &&
+    test "$(accepted_transition_value candidate_module_sha256)" = "$module_sha" &&
+    test "$(accepted_transition_value candidate_overlay_file)" = "$overlay_file" &&
+    test "$(accepted_transition_value candidate_overlay_sha256)" = "$overlay_sha" &&
+    test "$(accepted_transition_value prior_normal_config_sha256)" = "$normal_sha" &&
+    test "$(accepted_transition_value tryboot_config_sha256)" = "$candidate_sha" || return
+  IFS=$'\t' read -r expected_kernel_file expected_initramfs_file <<<"$(
+    inactive_candidate_boot_names "$revision" "$release"
+  )" || return
+  kernel_file="$(state_value candidate_kernel_file)"
+  initramfs_file="$(state_value candidate_initramfs_file)"
+  kernel_sha="$(state_value candidate_kernel_sha256)"
+  initramfs_sha="$(state_value candidate_initramfs_sha256)"
+  prior_kernel_sha="$(state_value prior_normal_kernel_sha256)"
+  prior_initramfs_sha="$(state_value prior_normal_initramfs_sha256)"
+  test "$kernel_file" = "$expected_kernel_file" &&
+    test "$initramfs_file" = "$expected_initramfs_file" &&
+    test "$kernel_file" = "$(accepted_transition_value candidate_kernel_file)" &&
+    test "$initramfs_file" = "$(accepted_transition_value candidate_initramfs_file)" &&
+    test "$kernel_sha" = "$(accepted_transition_value candidate_kernel_sha256)" &&
+    test "$initramfs_sha" = "$(accepted_transition_value candidate_initramfs_sha256)" &&
+    test "$prior_kernel_sha" = "$(accepted_transition_value prior_normal_kernel_sha256)" &&
+    test "$prior_initramfs_sha" = "$(accepted_transition_value prior_normal_initramfs_sha256)" || return
+  test "$(state_value accepted_transition_sha256)" = \
+    "$(canonical_prepared_transition_sha)" || return
+  assert_owned_regular "${root}/boot/firmware/$kernel_file" boot &&
+    test "$(sha "${root}/boot/firmware/$kernel_file")" = "$kernel_sha" &&
+    assert_owned_regular "${root}/boot/firmware/$initramfs_file" boot &&
+    test "$(sha "${root}/boot/firmware/$initramfs_file")" = "$initramfs_sha" || return
+  test "$(accepted_transition_value prior_kernel_release)" = \
+    "$(accepted_value kernel_release)" || return
+  assert_owned_regular "${root}/boot/vmlinuz-$(accepted_value kernel_release)" boot &&
+    test "$(sha "${root}/boot/vmlinuz-$(accepted_value kernel_release)")" = "$prior_kernel_sha" &&
+    assert_owned_regular "${root}/boot/initrd.img-$(accepted_value kernel_release)" boot &&
+    test "$(sha "${root}/boot/initrd.img-$(accepted_value kernel_release)")" = "$prior_initramfs_sha"
+)
+
 assert_transaction_state() {
   local schema driver_version revision source_tree release module_file module_sha overlay_file overlay_sha applied_dtb_file applied_dtb_sha normal_sha candidate_sha prior_existed prior_sha replaced_overlay module_existed overlay_existed prior_dkms_inventory_sha artifact_dir manifest overlay_name
   local backlight_rule_file backlight_rule_sha prior_backlight_rule_existed prior_backlight_rule_sha
@@ -1337,6 +1406,8 @@ assert_transaction_state() {
     [[ "$(state_value prior_normal_kernel_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
     [[ "$(state_value prior_normal_initramfs_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
     [[ "$(state_value accepted_transition_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
+    assert_schema5_staged_authority "$release" "$revision" "$module_file" "$module_sha" \
+      "$overlay_file" "$overlay_sha" "$normal_sha" "$candidate_sha" || return
   fi
   assert_owned_regular "${root}/lib/modules/$release/extra/$module_file" 644 || return
   assert_owned_regular "${root}/boot/firmware/overlays/$overlay_file" boot || return
@@ -2745,13 +2816,36 @@ stage() {
   published_state=true
   fixture_interrupt_after candidate-tryboot-state-published
   if "$accepted_bound"; then
+    if "$inactive_stage"; then
+      schema5_staged_authority_allow_prepared=true
+      assert_inactive_stage_authority "$driver_version" "$revision" "$release" \
+        "$manifest_sha" "$module_file" "$module_sha" "$overlay_file" "$overlay_sha" \
+        "$backlight_rule_file" "$backlight_rule_sha" "$normal_sha" "$candidate_sha" ||
+        die 'inactive accepted authority changed before staged phase publication'
+      test "$accepted_transition_sha" = "$expected_accepted_transition_sha" ||
+        die 'inactive accepted authority digest changed before staged phase publication'
+      assert_owned_regular "$state_file" 600 &&
+        test "$(state_value accepted_transition_sha256)" = "$expected_accepted_transition_sha" &&
+        assert_owned_regular "$tryboot_config" boot &&
+        test "$(sha "$tryboot_config")" = "$candidate_sha" &&
+        assert_owned_regular "$firmware_kernel_path" boot &&
+        test "$(sha "$firmware_kernel_path")" = "$candidate_kernel_sha" &&
+        assert_owned_regular "$firmware_initramfs_path" boot &&
+        test "$(sha "$firmware_initramfs_path")" = "$candidate_initramfs_sha" ||
+        die 'inactive bound leaves changed before staged phase publication'
+    fi
     if test "$(accepted_transition_value schema_version)" = 5 ||
       test "$(accepted_transition_value schema_version)" = 6; then
-      validate_staged_prior_tryboot ||
+      if ! validate_staged_prior_tryboot; then
+        schema5_staged_authority_allow_prepared=false
         die 'generic stage prior tryboot binding failed validation'
+      fi
     fi
-    set_accepted_transition_phase prepared staged '' "$prior_dkms_inventory_sha" ||
+    if ! set_accepted_transition_phase prepared staged '' "$prior_dkms_inventory_sha"; then
+      schema5_staged_authority_allow_prepared=false
       die 'failed to mark accepted candidate staged'
+    fi
+    schema5_staged_authority_allow_prepared=false
     fixture_interrupt_after candidate-staged-published
   fi
   sudo depmod -a "$release"

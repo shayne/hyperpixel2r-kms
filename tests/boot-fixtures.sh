@@ -456,6 +456,7 @@ if test "${1-}" = bash && test "${2-}" = -s; then
   fi
   if setpriv --reuid=65534 --regid=65534 --clear-groups \
     env HP2R_INSTALL_ROOT="$HP2R_FIXTURE_ROOT" PATH="$PATH" \
+    HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH:-}" \
     bash -c 'id -u > "$HP2R_FIXTURE_ROOT/tmp/remote-uid"; exec bash "$@"' bash "$@"; then
     remote_status=0
   else
@@ -488,6 +489,7 @@ if test "${1-}" = bash && { [[ "${2-}" == /tmp/hp2r-tryboot-stage.*/* ]] || [[ "
   fi
   setpriv --reuid=65534 --regid=65534 --clear-groups \
     env HP2R_INSTALL_ROOT="$HP2R_FIXTURE_ROOT" PATH="$PATH" \
+    HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH:-}" \
     bash -c 'id -u > "$HP2R_FIXTURE_ROOT/tmp/remote-uid"; exec bash "$@"' bash "$script" "$@"
   exit
 fi
@@ -860,7 +862,13 @@ if test -n "${HP2R_INSTALL_ROOT:-}"; then
       ;;
   esac
 fi
-exec /usr/bin/mv "$@"
+/usr/bin/mv "$@"
+if test "${HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH:-}" = 1 && \
+  test "$destination" = "$HP2R_FIXTURE_ROOT/var/lib/hyperpixel2r-kms/tryboot-state"; then
+  sed -i 's/^target_identity_sha256=.*/target_identity_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/' \
+    "$HP2R_FIXTURE_ROOT/var/lib/hyperpixel2r-kms/accepted-transition"
+  : > "$HP2R_FIXTURE_ROOT/tmp/accepted-authority-mutated-on-state-publish"
+fi
 SCRIPT
 
   install -m 0755 /dev/stdin "$bin/rm" <<'SCRIPT'
@@ -3312,6 +3320,19 @@ exercise_inactive_kernel_prepare() {
     assert_absent "$root/boot/firmware/$initramfs_name"
     exit 0
   fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-phase-authority-drift; then
+    if HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH=1 run_inactive_stage >/dev/null 2>&1; then
+      fail 'inactive stage advanced a journal mutated after schema-5 publication'
+    fi
+    assert_file "$root/tmp/accepted-authority-mutated-on-state-publish"
+    grep -Fxq 'phase=prepared' "$state_dir/accepted-transition" ||
+      fail 'mutated inactive authority advanced past prepared phase'
+    assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+    assert_absent "$root/boot/firmware/tryboot.txt"
+    assert_absent "$root/boot/firmware/$kernel_name"
+    assert_absent "$root/boot/firmware/$initramfs_name"
+    exit 0
+  fi
   if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-foreign-firmware; then
     printf 'foreign inactive firmware leaf\n' > "$root/boot/firmware/$kernel_name"
     chmod 0644 "$root/boot/firmware/$kernel_name"
@@ -3390,6 +3411,20 @@ exercise_inactive_kernel_prepare() {
     fail 'inactive stage loaded or probed a module'
   ! grep -Fq 'bind ' "$log" ||
     fail 'inactive stage bound a candidate device during staging'
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-stale-authority; then
+    replace_equals_value "$state_dir/accepted-transition" target_identity_sha256 \
+      dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+    if run_accepted_remote identity >/dev/null 2>&1; then
+      fail 'schema-5 identity accepted stale staged authority'
+    fi
+    if run_controller commit-boot.sh >/dev/null 2>&1; then
+      fail 'schema-5 commit accepted stale staged authority'
+    fi
+    if run_controller rollback-boot.sh >/dev/null 2>&1; then
+      fail 'schema-5 rollback accepted stale staged authority'
+    fi
+    exit 0
+  fi
   if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-rollback; then
     run_controller rollback-boot.sh >/dev/null
     cmp -s "$normal_before" "$root/boot/firmware/config.txt" ||
@@ -3470,6 +3505,10 @@ case "${HP2R_FIXTURE_CASE:-}" in
     exit 0
     ;;
   inactive-kernel-rollback)
+    exercise_inactive_kernel_prepare
+    exit 0
+    ;;
+  inactive-kernel-phase-authority-drift|inactive-kernel-stale-authority)
     exercise_inactive_kernel_prepare
     exit 0
     ;;
