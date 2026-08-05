@@ -68,6 +68,13 @@ state_keys_v4=(
   "${state_keys[@]}" backlight_rule_file backlight_rule_sha256
   prior_backlight_rule_existed prior_backlight_rule_sha256
 )
+state_keys_v5=(
+  "${state_keys_v4[@]}" boot_transition
+  candidate_kernel_file candidate_kernel_sha256
+  candidate_initramfs_file candidate_initramfs_sha256
+  prior_normal_kernel_sha256 prior_normal_initramfs_sha256
+  accepted_transition_sha256
+)
 accepted_keys_v1=(
   schema_version driver_version source_revision kernel_release manifest_sha256
   module_file module_sha256 overlay_file overlay_sha256 normal_config_sha256
@@ -249,6 +256,7 @@ derive_inactive_tryboot_config() {
   assert_supported_inactive_config "$source" || return
   write_surgical_stock_config "$source" "$(accepted_value overlay_file)" "$output" "$workspace" || return
   {
+    printf '# hyperpixel2r-kms one-shot inactive-kernel candidate\n'
     printf 'kernel=%s\n' "$kernel_file"
     printf 'initramfs %s followkernel\n' "$initramfs_file"
     printf 'dtoverlay=%s\n' "$overlay_file"
@@ -406,6 +414,19 @@ assert_inactive_companions() {
     local path="${pair%%:*}" expected="${pair#*:}"
     assert_owned_regular "$path" 600 || return
     test "$(sha "$path")" = "$expected" || return
+  done
+}
+
+clear_inactive_transition_companions() {
+  local prior_kernel_sha="$1" prior_initramfs_sha="$2" candidate_kernel_sha="$3" candidate_initramfs_sha="$4"
+
+  assert_inactive_companions "$prior_kernel_sha" "$prior_initramfs_sha" \
+    "$candidate_kernel_sha" "$candidate_initramfs_sha" || return
+  sudo rm -- "$accepted_transition_prior_kernel" "$accepted_transition_prior_initramfs" \
+    "$accepted_transition_candidate_kernel" "$accepted_transition_candidate_initramfs" || return
+  for companion in "$accepted_transition_prior_kernel" "$accepted_transition_prior_initramfs" \
+    "$accepted_transition_candidate_kernel" "$accepted_transition_candidate_initramfs"; do
+    test ! -L "$companion" && test ! -e "$companion" || return
   done
 }
 
@@ -1169,6 +1190,7 @@ assert_state_schema() {
     2) expected_keys=("${state_keys_v2[@]}") ;;
     3) expected_keys=("${state_keys[@]}") ;;
     4) expected_keys=("${state_keys_v4[@]}") ;;
+    5) expected_keys=("${state_keys_v5[@]}") ;;
     *) echo 'unsupported tryboot state schema version' >&2; return 1 ;;
   esac
   test "$(sudo awk 'END { print NR }' "$state_file")" = "${#expected_keys[@]}" || {
@@ -1216,7 +1238,7 @@ assert_transaction_state() {
   prior_existed="$(state_value tryboot_existed)"
   prior_sha="$(state_value prior_tryboot_sha256)"
   replaced_overlay="$(state_value replaced_overlay)"
-  if test "$schema" = 2 || test "$schema" = 3 || test "$schema" = 4; then
+  if test "$schema" = 2 || test "$schema" = 3 || test "$schema" = 4 || test "$schema" = 5; then
     module_existed="$(state_value module_existed)"
     overlay_existed="$(state_value overlay_existed)"
   else
@@ -1252,7 +1274,7 @@ assert_transaction_state() {
   test "$(sha "$tryboot_config")" = "$candidate_sha" || { echo 'candidate tryboot config changed since stage' >&2; return 1; }
   artifact_dir="$artifact_root/$driver_version/$revision/$release"
   assert_artifact_tree "$artifact_dir" "$prior_existed" || return
-  if test "$schema" = 3 || test "$schema" = 4; then
+  if test "$schema" = 3 || test "$schema" = 4 || test "$schema" = 5; then
     prior_dkms_inventory_sha="$(state_value prior_dkms_inventory_sha256)"
     [[ "$prior_dkms_inventory_sha" =~ ^[0-9a-f]{64}$ ]] || {
       echo 'invalid prior DKMS inventory checksum' >&2
@@ -1264,7 +1286,7 @@ assert_transaction_state() {
     }
   fi
   manifest="$artifact_dir/manifest.txt"
-  if test "$schema" = 4; then
+  if test "$schema" = 4 || test "$schema" = 5; then
     test "$(manifest_value "$manifest" schema_version)" = 2 || {
       echo 'artifact and transaction schema versions differ' >&2
       return 1
@@ -1307,6 +1329,14 @@ assert_transaction_state() {
   test "$(manifest_value "$manifest" applied_dtb_sha256)" = "$applied_dtb_sha" || { echo 'artifact and transaction applied dtb checksums differ' >&2; return 1; }
   if test "$prior_existed" = true; then
     test "$(sha "$artifact_dir/prior-tryboot.txt")" = "$prior_sha" || { echo 'stored prior tryboot checksum differs' >&2; return 1; }
+  fi
+  if test "$schema" = 5; then
+    test "$(state_value boot_transition)" = inactive-kernel || return
+    [[ "$(state_value candidate_kernel_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
+    [[ "$(state_value candidate_initramfs_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
+    [[ "$(state_value prior_normal_kernel_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
+    [[ "$(state_value prior_normal_initramfs_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
+    [[ "$(state_value accepted_transition_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
   fi
   assert_owned_regular "${root}/lib/modules/$release/extra/$module_file" 644 || return
   assert_owned_regular "${root}/boot/firmware/overlays/$overlay_file" boot || return
@@ -2147,6 +2177,52 @@ remove_artifact_tree() {
   sudo rmdir -- "$artifact_root" 2>/dev/null || true
 }
 
+assert_inactive_stage_authority() {
+  local expected_version="$1" expected_revision="$2" expected_release="$3"
+  local expected_manifest_sha="$4" expected_module_file="$5" expected_module_sha="$6"
+  local expected_overlay_file="$7" expected_overlay_sha="$8" expected_rule_file="$9"
+  local expected_rule_sha="${10}" expected_normal_sha="${11}" expected_candidate_sha="${12}"
+  local prior_release expected_kernel_file expected_initramfs_file
+
+  assert_accepted_state || return
+  assert_accepted_transition || return
+  test "$(accepted_transition_value schema_version)" = 6 || return
+  test "$(accepted_transition_value kind)" = new &&
+    test "$(accepted_transition_value phase)" = prepared &&
+    test "$(accepted_transition_value boot_transition)" = inactive-kernel || return
+  test "$(accepted_transition_value candidate_driver_version)" = "$expected_version" &&
+    test "$(accepted_transition_value candidate_source_revision)" = "$expected_revision" &&
+    test "$(accepted_transition_value candidate_kernel_release)" = "$expected_release" &&
+    test "$(accepted_transition_value candidate_manifest_sha256)" = "$expected_manifest_sha" &&
+    test "$(accepted_transition_value candidate_module_file)" = "$expected_module_file" &&
+    test "$(accepted_transition_value candidate_module_sha256)" = "$expected_module_sha" &&
+    test "$(accepted_transition_value candidate_overlay_file)" = "$expected_overlay_file" &&
+    test "$(accepted_transition_value candidate_overlay_sha256)" = "$expected_overlay_sha" &&
+    test "$(accepted_transition_value candidate_backlight_rule_file)" = "$expected_rule_file" &&
+    test "$(accepted_transition_value candidate_backlight_rule_sha256)" = "$expected_rule_sha" &&
+    test "$(accepted_transition_value prior_normal_config_sha256)" = "$expected_normal_sha" &&
+    test "$(accepted_transition_value tryboot_config_sha256)" = "$expected_candidate_sha" || return
+  IFS=$'\t' read -r expected_kernel_file expected_initramfs_file <<<"$(
+    inactive_candidate_boot_names "$expected_revision" "$expected_release"
+  )" || return
+  test "$(accepted_transition_value candidate_kernel_file)" = "$expected_kernel_file" &&
+    test "$(accepted_transition_value candidate_initramfs_file)" = "$expected_initramfs_file" || return
+  prior_release="$(accepted_transition_value prior_kernel_release)" || return
+  require_regular "${root}/boot/vmlinuz-$prior_release" &&
+    require_regular "${root}/boot/initrd.img-$prior_release" || return
+  test "$(sha "${root}/boot/vmlinuz-$prior_release")" = \
+    "$(accepted_transition_value prior_normal_kernel_sha256)" &&
+    test "$(sha "${root}/boot/initrd.img-$prior_release")" = \
+      "$(accepted_transition_value prior_normal_initramfs_sha256)" || return
+  assert_inactive_companions \
+    "$(accepted_transition_value prior_normal_kernel_sha256)" \
+    "$(accepted_transition_value prior_normal_initramfs_sha256)" \
+    "$(accepted_transition_value candidate_kernel_sha256)" \
+    "$(accepted_transition_value candidate_initramfs_sha256)" || return
+  accepted_transition_sha="$(sha "$accepted_transition")" || return
+  [[ "$accepted_transition_sha" =~ ^[0-9a-f]{64}$ ]]
+}
+
 stage() {
   # These transaction fields deliberately remain global until the process EXIT
   # trap runs: Bash unwinds function locals before an EXIT trap on `set -e`.
@@ -2160,6 +2236,7 @@ stage() {
   applied_dtb_file="$8"
   backlight_rule_file="$9"
   replacement="${10-}"
+  expected_accepted_transition_sha="${11-}"
   incoming="${root}${incoming_logical}"
   artifact_dir="$artifact_root/$driver_version/$revision/$release"
   module_path="${root}/lib/modules/$release/extra/$module_file"
@@ -2206,6 +2283,18 @@ stage() {
   accepted_bound=false
   accepted_prior_dkms_state=''
   resolved_path=''
+  inactive_stage=false
+  accepted_transition_sha=''
+  candidate_kernel_file=''
+  candidate_initramfs_file=''
+  candidate_kernel_sha=''
+  candidate_initramfs_sha=''
+  prior_normal_kernel_sha=''
+  prior_normal_initramfs_sha=''
+  firmware_kernel_path=''
+  firmware_initramfs_path=''
+  created_firmware_kernel=false
+  created_firmware_initramfs=false
 
   stage_cleanup() {
     local status=$?
@@ -2231,6 +2320,8 @@ stage() {
       fi
       if "$created_overlay"; then sudo rm -f -- "$overlay_path" || true; fi
       if "$created_module"; then sudo rm -f -- "$module_path" || true; fi
+      if "$created_firmware_initramfs"; then sudo rm -f -- "$firmware_initramfs_path" || true; fi
+      if "$created_firmware_kernel"; then sudo rm -f -- "$firmware_kernel_path" || true; fi
       if "$installed_backlight_rule"; then
         if "$prior_backlight_rule_existed"; then
           atomic_copy "$prior_backlight_rule" "$backlight_rule_path" 644 \
@@ -2265,6 +2356,9 @@ stage() {
   [[ "$overlay_file" = "hyperpixel2r-kms-${revision:0:12}.dtbo" ]] || die 'unsafe incoming overlay file'
   test "$applied_dtb_file" = hyperpixel2r-kms-applied.dtb || die 'unsafe incoming applied dtb file'
   test "$backlight_rule_file" = 70-planeradar-backlight.rules || die 'unsafe incoming backlight rule file'
+  test -z "$expected_accepted_transition_sha" ||
+    [[ "$expected_accepted_transition_sha" =~ ^[0-9a-f]{64}$ ]] ||
+    die 'unsafe accepted transition digest'
   assert_kernel_module_root "$release" ||
     die 'running kernel module root is unsafe'
   test ! -L "$state_file" && test ! -e "$state_file" || die 'refusing active tryboot transaction'
@@ -2304,11 +2398,28 @@ stage() {
   normal_snapshot="$(privileged_snapshot "$normal_config" "$rollback_tmp" normal)" || die 'failed to capture normal boot config'
   normal_sha="$(sha "$normal_snapshot")" || die 'failed to hash normal boot config snapshot'
   sudo awk '{ line=$0; sub(/\r$/, "", line); if (length(line) > 98) exit 1 }' "$normal_snapshot" || die 'normal boot config has a firmware-line-length violation'
-  validate_overlay_declarations "$normal_snapshot" "$replacement" "$candidate" "$rollback_tmp" || die 'unsafe, absent, multiple, or conflicting display overlay declaration'
-  assert_private_workspace "$rollback_tmp" || die 'private stage workspace changed while creating candidate'
-  printf '\n# hyperpixel2r-kms one-shot candidate\ndtoverlay=%s\n' "$overlay_file" | sudo tee -a "$candidate" >/dev/null || die 'failed to append candidate boot config'
-  assert_owned_regular "$candidate" 600 || die 'candidate boot config ownership drifted'
-  LC_ALL=C sudo awk '{ line=$0; sub(/\r$/, "", line); if (length(line) > 98) exit 1 }' "$candidate" || die 'candidate boot config has a firmware-line-length violation'
+  if sudo test -e "$accepted_state" || sudo test -L "$accepted_state"; then
+    assert_accepted_state || die 'accepted driver receipt is unsafe'
+    assert_accepted_transition || die 'accepted candidate journal is missing or unsafe'
+    if test "$(accepted_transition_value schema_version)" = 6 &&
+      test "$(accepted_transition_value candidate_kernel_release)" = "$release"; then
+      inactive_stage=true
+      IFS=$'\t' read -r candidate_kernel_file candidate_initramfs_file <<<"$(
+        inactive_candidate_boot_names "$revision" "$release"
+      )" || die 'failed to derive inactive candidate firmware names'
+      derive_inactive_tryboot_config "$normal_snapshot" "$candidate_kernel_file" \
+        "$candidate_initramfs_file" "$overlay_file" "$candidate" "$rollback_tmp" ||
+        die 'failed to derive inactive candidate tryboot config'
+    fi
+  fi
+  if ! "$inactive_stage"; then
+    validate_overlay_declarations "$normal_snapshot" "$replacement" "$candidate" "$rollback_tmp" || die 'unsafe, absent, multiple, or conflicting display overlay declaration'
+    assert_private_workspace "$rollback_tmp" || die 'private stage workspace changed while creating candidate'
+    printf '\n# hyperpixel2r-kms one-shot candidate\ndtoverlay=%s\n' "$overlay_file" | sudo tee -a "$candidate" >/dev/null || die 'failed to append candidate boot config'
+    assert_owned_regular "$candidate" 600 || die 'candidate boot config ownership drifted'
+    LC_ALL=C sudo awk '{ line=$0; sub(/\r$/, "", line); if (length(line) > 98) exit 1 }' "$candidate" || die 'candidate boot config has a firmware-line-length violation'
+  fi
+  candidate_sha="$(sha "$candidate")" || die 'failed to hash private candidate config'
   if sudo test -L "$tryboot_config"; then
     die 'unsafe preexisting tryboot config'
   elif sudo test -e "$tryboot_config"; then
@@ -2348,7 +2459,29 @@ stage() {
   fi
   assert_owned_regular "$prior_state_snapshot" 600 || die 'prior DKMS state snapshot ownership drifted'
 
-  if sudo test -e "$accepted_state" || sudo test -L "$accepted_state"; then
+  if "$inactive_stage"; then
+    if ! assert_inactive_stage_authority "$driver_version" "$revision" "$release" \
+      "$manifest_sha" "$module_file" "$module_sha" "$overlay_file" "$overlay_sha" \
+      "$backlight_rule_file" "$backlight_rule_sha" "$normal_sha" "$candidate_sha"; then
+      die 'inactive accepted authority differs from staged preconditions'
+    fi
+    test "$accepted_transition_sha" = "$expected_accepted_transition_sha" ||
+      die 'inactive accepted authority digest differs from controller authorization'
+    candidate_kernel_sha="$(accepted_transition_value candidate_kernel_sha256)"
+    candidate_initramfs_sha="$(accepted_transition_value candidate_initramfs_sha256)"
+    prior_normal_kernel_sha="$(accepted_transition_value prior_normal_kernel_sha256)"
+    prior_normal_initramfs_sha="$(accepted_transition_value prior_normal_initramfs_sha256)"
+    firmware_kernel_path="${root}/boot/firmware/$candidate_kernel_file"
+    firmware_initramfs_path="${root}/boot/firmware/$candidate_initramfs_file"
+    accepted_prior_dkms_state="$(accepted_transition_value prior_dkms_status)"
+    if test "$accepted_prior_dkms_state" != "$prior_dkms_state"; then
+      case "$accepted_prior_dkms_state:$prior_dkms_state" in
+        registered:added|registered:built|registered:installed) ;;
+        *) die 'inactive accepted authority differs from staged DKMS precondition' ;;
+      esac
+    fi
+    accepted_bound=true
+  elif sudo test -e "$accepted_state" || sudo test -L "$accepted_state"; then
     assert_accepted_state || die 'accepted driver receipt is unsafe'
     assert_accepted_transition || die 'accepted candidate journal is missing or unsafe'
     test "$(accepted_transition_value kind)" = new ||
@@ -2394,6 +2527,27 @@ stage() {
   else
     test ! -L "$accepted_transition" && test ! -e "$accepted_transition" ||
       die 'accepted candidate journal exists without an accepted receipt'
+  fi
+
+  if "$inactive_stage"; then
+    # The prepared schema-6 journal and its private companions are the only
+    # authority for firmware leaves.  A pre-existing exact leaf is reusable
+    # only after that authority was revalidated above; foreign or divergent
+    # leaves remain intact because copy_if_absent_or_exact fails closed.
+    if copy_if_absent_or_exact "$accepted_transition_candidate_kernel" \
+      "$firmware_kernel_path" 644 "$candidate_kernel_sha" true; then
+      "$copy_was_created" && created_firmware_kernel=true
+    else
+      die 'failed to publish candidate kernel firmware leaf'
+    fi
+    fixture_interrupt_after candidate-kernel-firmware-published
+    if copy_if_absent_or_exact "$accepted_transition_candidate_initramfs" \
+      "$firmware_initramfs_path" 644 "$candidate_initramfs_sha" true; then
+      "$copy_was_created" && created_firmware_initramfs=true
+    else
+      die 'failed to publish candidate initramfs firmware leaf'
+    fi
+    fixture_interrupt_after candidate-initramfs-firmware-published
   fi
 
   if sudo test -L "$artifact_dir"; then
@@ -2461,21 +2615,23 @@ stage() {
     die 'existing DKMS source tree is unsafe'
   elif sudo test -e "$dkms_dir"; then
     if assert_source_tree_shape "$dkms_dir" "$artifact_dir/dkms-source" 2>/dev/null; then
-      sudo depmod -a "$release" || die 'failed to refresh module resolution before DKMS reuse'
-      resolved_path="$(resolved_module_path "$release" hyperpixel2r_kms)" ||
-        die 'failed to resolve installed module before DKMS reuse'
-      resolved_sha="$(module_leaf_sha "$resolved_path" "$rollback_tmp")" ||
-        die 'failed to hash installed module before DKMS reuse'
-      if test "$resolved_path" != "$module_path" ||
-        test "$resolved_sha" != "$module_sha"; then
-        case "$prior_dkms_state" in
-          registered|added|built|installed)
-            run_dkms remove -m hyperpixel2r-kms -v "$driver_version" --all ||
-              die 'failed to remove mismatched DKMS registration'
-            dkms_replaced=true
-            ;;
-          *) die 'mismatched resolved module is not bound to a removable DKMS registration' ;;
-        esac
+      if ! "$inactive_stage"; then
+        sudo depmod -a "$release" || die 'failed to refresh module resolution before DKMS reuse'
+        resolved_path="$(resolved_module_path "$release" hyperpixel2r_kms)" ||
+          die 'failed to resolve installed module before DKMS reuse'
+        resolved_sha="$(module_leaf_sha "$resolved_path" "$rollback_tmp")" ||
+          die 'failed to hash installed module before DKMS reuse'
+        if test "$resolved_path" != "$module_path" ||
+          test "$resolved_sha" != "$module_sha"; then
+          case "$prior_dkms_state" in
+            registered|added|built|installed)
+              run_dkms remove -m hyperpixel2r-kms -v "$driver_version" --all ||
+                die 'failed to remove mismatched DKMS registration'
+              dkms_replaced=true
+              ;;
+            *) die 'mismatched resolved module is not bound to a removable DKMS registration' ;;
+          esac
+        fi
       fi
     else
       test "$prior_dkms_state" != absent || die 'missing prior DKMS capture'
@@ -2505,20 +2661,50 @@ stage() {
     *) die 'invalid DKMS status result' ;;
   esac
   sudo depmod -a "$release" || die 'failed to refresh candidate module resolution'
-  test "$(resolved_module_path "$release" hyperpixel2r_kms)" = "$module_path" &&
-    test "$(module_leaf_sha "$module_path" "$rollback_tmp")" = "$module_sha" ||
-    die 'candidate module is not selected by running-kernel resolution'
+  if "$inactive_stage"; then
+    resolved_path="$(sudo modinfo -k "$release" -n hyperpixel2r_kms)" ||
+      die 'failed to resolve candidate module path'
+    test "$resolved_path" = "$module_path" &&
+      test "$(sha "$module_path")" = "$module_sha" ||
+      die 'candidate module is not selected in the candidate release tree'
+    candidate_vermagic="$(sudo modinfo -k "$release" -F vermagic hyperpixel2r_kms)" ||
+      die 'failed to read candidate module vermagic'
+    case "$candidate_vermagic" in "$release"*) ;; *) die 'candidate module vermagic differs from candidate release';; esac
+  else
+    test "$(resolved_module_path "$release" hyperpixel2r_kms)" = "$module_path" &&
+      test "$(module_leaf_sha "$module_path" "$rollback_tmp")" = "$module_sha" ||
+      die 'candidate module is not selected by running-kernel resolution'
+  fi
   fixture_interrupt_after candidate-dkms-activated
   test "$(sha "$normal_config")" = "$normal_sha" || die 'normal boot config changed while staging tryboot candidate'
   candidate_snapshot="$(privileged_snapshot "$candidate" "$rollback_tmp" candidate)" || die 'failed to capture candidate config'
   candidate_sha="$(sha "$candidate_snapshot")" || die 'failed to hash candidate config snapshot'
+  if "$inactive_stage"; then
+    assert_inactive_stage_authority "$driver_version" "$revision" "$release" \
+      "$manifest_sha" "$module_file" "$module_sha" "$overlay_file" "$overlay_sha" \
+      "$backlight_rule_file" "$backlight_rule_sha" "$normal_sha" "$candidate_sha" ||
+      die 'inactive accepted authority changed before generic state publication'
+    test "$expected_accepted_transition_sha" = "$(sha "$accepted_transition")" ||
+      die 'inactive accepted authority digest changed before generic state publication'
+    assert_owned_regular "$firmware_kernel_path" boot &&
+      test "$(sha "$firmware_kernel_path")" = "$candidate_kernel_sha" &&
+      assert_owned_regular "$firmware_initramfs_path" boot &&
+      test "$(sha "$firmware_initramfs_path")" = "$candidate_initramfs_sha" &&
+      assert_owned_regular "$module_path" 644 &&
+      test "$(sha "$module_path")" = "$module_sha" &&
+      assert_owned_regular "$overlay_path" boot &&
+      test "$(sha "$overlay_path")" = "$overlay_sha" &&
+      assert_owned_regular "$backlight_rule_path" 644 &&
+      test "$(sha "$backlight_rule_path")" = "$backlight_rule_sha" ||
+      die 'inactive staged leaf validation failed before generic state publication'
+  fi
   atomic_copy "$candidate_snapshot" "$tryboot_config" 644 "$candidate_sha" true || die 'failed to publish tryboot config'
   published_tryboot=true
   fixture_interrupt_after candidate-tryboot-published
   test "$(sha "$normal_config")" = "$normal_sha" || die 'normal boot config changed while staging tryboot candidate'
   state_tmp="$(private_file "$rollback_tmp" state)" || die 'failed to create private tryboot state'
   {
-    printf 'schema_version=4\n'
+    if "$inactive_stage"; then printf 'schema_version=5\n'; else printf 'schema_version=4\n'; fi
     printf 'driver_version=%s\n' "$driver_version"
     printf 'source_revision=%s\n' "$revision"
     printf 'source_tree=%s\n' "$source_tree"
@@ -2541,6 +2727,16 @@ stage() {
     printf 'backlight_rule_sha256=%s\n' "$backlight_rule_sha"
     printf 'prior_backlight_rule_existed=%s\n' "$prior_backlight_rule_existed"
     printf 'prior_backlight_rule_sha256=%s\n' "$prior_backlight_rule_sha"
+    if "$inactive_stage"; then
+      printf 'boot_transition=inactive-kernel\n'
+      printf 'candidate_kernel_file=%s\n' "$candidate_kernel_file"
+      printf 'candidate_kernel_sha256=%s\n' "$candidate_kernel_sha"
+      printf 'candidate_initramfs_file=%s\n' "$candidate_initramfs_file"
+      printf 'candidate_initramfs_sha256=%s\n' "$candidate_initramfs_sha"
+      printf 'prior_normal_kernel_sha256=%s\n' "$prior_normal_kernel_sha"
+      printf 'prior_normal_initramfs_sha256=%s\n' "$prior_normal_initramfs_sha"
+      printf 'accepted_transition_sha256=%s\n' "$accepted_transition_sha"
+    fi
   } | sudo tee "$state_tmp" >/dev/null || die 'failed to write private tryboot state'
   assert_owned_regular "$state_tmp" 600 || die 'private tryboot state ownership drifted'
   state_snapshot="$(privileged_snapshot "$state_tmp" "$rollback_tmp" state)" || die 'failed to capture tryboot state'
@@ -2549,7 +2745,8 @@ stage() {
   published_state=true
   fixture_interrupt_after candidate-tryboot-state-published
   if "$accepted_bound"; then
-    if test "$(accepted_transition_value schema_version)" = 5; then
+    if test "$(accepted_transition_value schema_version)" = 5 ||
+      test "$(accepted_transition_value schema_version)" = 6; then
       validate_staged_prior_tryboot ||
         die 'generic stage prior tryboot binding failed validation'
     fi
@@ -3404,6 +3601,11 @@ rollback() {
   rb_module_hold=''
   rb_overlay_path=''
   rb_dkms_dir=''
+  rb_inactive=false
+  rb_firmware_kernel_path=''
+  rb_firmware_initramfs_path=''
+  rb_firmware_kernel_sha=''
+  rb_firmware_initramfs_sha=''
   rb_complete=false
   rb_finalizing=false
   rb_loaded=false
@@ -3452,11 +3654,13 @@ rollback() {
     rb_tryboot_existed="$(state_value tryboot_existed)"
     if test "$(state_value schema_version)" = 2 ||
       test "$(state_value schema_version)" = 3 ||
-      test "$(state_value schema_version)" = 4; then
+      test "$(state_value schema_version)" = 4 ||
+      test "$(state_value schema_version)" = 5; then
       rb_module_existed="$(state_value module_existed)"
       rb_overlay_existed="$(state_value overlay_existed)"
     fi
-    if test "$(state_value schema_version)" = 4; then
+    if test "$(state_value schema_version)" = 4 ||
+      test "$(state_value schema_version)" = 5; then
       rb_backlight_rule_file="$(state_value backlight_rule_file)"
       rb_backlight_rule_sha="$(state_value backlight_rule_sha256)"
       rb_prior_backlight_rule_existed="$(state_value prior_backlight_rule_existed)"
@@ -3468,6 +3672,18 @@ rollback() {
     rb_module_hold="${rb_module_path}.hp2r-rollback-hold"
     rb_overlay_path="${root}/boot/firmware/overlays/$rb_overlay_file"
     rb_dkms_dir="$dkms_root/hyperpixel2r-kms-$rb_version"
+    if test "$(state_value schema_version)" = 5; then
+      rb_inactive=true
+      rb_firmware_kernel_path="${root}/boot/firmware/$(state_value candidate_kernel_file)"
+      rb_firmware_initramfs_path="${root}/boot/firmware/$(state_value candidate_initramfs_file)"
+      rb_firmware_kernel_sha="$(state_value candidate_kernel_sha256)"
+      rb_firmware_initramfs_sha="$(state_value candidate_initramfs_sha256)"
+      assert_owned_regular "$rb_firmware_kernel_path" boot &&
+        test "$(sha "$rb_firmware_kernel_path")" = "$rb_firmware_kernel_sha" &&
+        assert_owned_regular "$rb_firmware_initramfs_path" boot &&
+        test "$(sha "$rb_firmware_initramfs_path")" = "$rb_firmware_initramfs_sha" ||
+        die 'inactive candidate firmware leaves are not journal-bound'
+    fi
     test ! -L "$rb_module_hold" && test ! -e "$rb_module_hold" ||
       die 'candidate module rollback hold already exists'
     assert_source_tree_shape "$rb_dkms_dir" "$rb_artifact/dkms-source" ||
@@ -3626,6 +3842,15 @@ rollback() {
     die 'prior module resolution drifted before transaction retirement'
   assert_rollback_boot_state ||
     die 'restored boot state drifted before transaction retirement'
+  if "$rb_inactive"; then
+    assert_owned_regular "$rb_firmware_kernel_path" boot &&
+      test "$(sha "$rb_firmware_kernel_path")" = "$rb_firmware_kernel_sha" &&
+      assert_owned_regular "$rb_firmware_initramfs_path" boot &&
+      test "$(sha "$rb_firmware_initramfs_path")" = "$rb_firmware_initramfs_sha" ||
+      die 'inactive candidate firmware leaves drifted before retirement'
+    sudo rm -- "$rb_firmware_kernel_path" "$rb_firmware_initramfs_path" ||
+      die 'failed to remove journal-owned inactive candidate firmware leaves'
+  fi
   rb_finalizing=true
   if sudo test -e "$state_file"; then
     test "$(sha "$state_file")" = "$rb_transaction_sha" ||
@@ -4542,12 +4767,12 @@ set_accepted_transition_phase() {
   assert_accepted_transition || return
   test "$(accepted_transition_value phase)" = "$expected" || return
   schema="$(accepted_transition_value schema_version)"
-  if { test "$schema" = 3 || test "$schema" = 4 || test "$schema" = 5; } &&
+  if { test "$schema" = 3 || test "$schema" = 4 || test "$schema" = 5 || test "$schema" = 6; } &&
     test "$(accepted_transition_value candidate_dkms_inventory_sha256)" = pending; then
     test "$expected:$next" = prepared:staged || return
     [[ "$inventory_sha" =~ ^[0-9a-f]{64}$ ]] || return
   elif test -n "$inventory_sha"; then
-    { test "$schema" = 3 || test "$schema" = 4 || test "$schema" = 5; } || return
+    { test "$schema" = 3 || test "$schema" = 4 || test "$schema" = 5 || test "$schema" = 6; } || return
     test "$(accepted_transition_value candidate_dkms_inventory_sha256)" = \
       "$inventory_sha" || return
     inventory_sha=''
@@ -4775,10 +5000,16 @@ prepare_new_accepted() {
     die 'accepted normal config cannot be separated from prior driver'
   candidate="$(private_file "$workspace" accepted-candidate)" ||
     die 'failed to allocate accepted candidate'
-  stock_sha="$(sha "$stock")"
-  atomic_copy "$stock" "$candidate" 600 "$stock_sha" || die 'failed to seed accepted candidate'
-  printf '\n# hyperpixel2r-kms one-shot candidate\ndtoverlay=%s\n' "$overlay_file" |
-    sudo tee -a "$candidate" >/dev/null || die 'failed to append accepted candidate'
+  if "$inactive"; then
+    stock_sha="$(sha "$explicit_normal")"
+    atomic_copy "$explicit_normal" "$candidate" 600 "$stock_sha" ||
+      die 'failed to seed accepted inactive candidate'
+  else
+    stock_sha="$(sha "$stock")"
+    atomic_copy "$stock" "$candidate" 600 "$stock_sha" || die 'failed to seed accepted candidate'
+    printf '\n# hyperpixel2r-kms one-shot candidate\ndtoverlay=%s\n' "$overlay_file" |
+      sudo tee -a "$candidate" >/dev/null || die 'failed to append accepted candidate'
+  fi
   publish_accepted_transition new "$version" "$revision" "$release" "$manifest_sha" \
     "$module_file" "$module_sha" "$overlay_file" "$overlay_sha" \
     "$backlight_rule_file" "$backlight_rule_sha" \
@@ -4929,7 +5160,6 @@ assert_accepted_transition() {
     esac
   fi
   if test "$schema" = 6; then
-    test "$phase" = prepared || return
     test "$(accepted_transition_value boot_transition)" = inactive-kernel || return
     [[ "$(accepted_transition_value target_identity_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
     test "$(accepted_transition_value prior_driver_version)" = "$(accepted_value driver_version)" || return
@@ -5162,6 +5392,7 @@ restore_prior_from_accepted_transition() {
   local candidate_overlay module_path prior_overlay_path candidate_overlay_path prior_status candidate_status prior_dir candidate_dir
   local prior_backlight_rule_file prior_backlight_rule_sha accepted_schema transition_schema
   local prior_tryboot_existed prior_tryboot_sha transition_sha
+  local inactive_prior_kernel_sha inactive_prior_initramfs_sha inactive_candidate_kernel_sha inactive_candidate_initramfs_sha
   local bound_candidate_version bound_candidate_revision bound_candidate_release
   local bound_candidate_manifest_sha bound_candidate_module_file bound_candidate_module_sha
   local bound_candidate_overlay_file bound_candidate_overlay_sha
@@ -5178,9 +5409,15 @@ restore_prior_from_accepted_transition() {
   bound_candidate_overlay_sha="$(accepted_transition_value candidate_overlay_sha256)"
   accepted_schema="$(accepted_value schema_version)" || return
   transition_schema="$(accepted_transition_value schema_version)" || return
-  if test "$transition_schema" = 5; then
+  if test "$transition_schema" = 5 || test "$transition_schema" = 6; then
     prior_tryboot_existed="$(accepted_transition_value prior_tryboot_existed)"
     prior_tryboot_sha="$(accepted_transition_value prior_tryboot_sha256)"
+  fi
+  if test "$transition_schema" = 6; then
+    inactive_prior_kernel_sha="$(accepted_transition_value prior_normal_kernel_sha256)"
+    inactive_prior_initramfs_sha="$(accepted_transition_value prior_normal_initramfs_sha256)"
+    inactive_candidate_kernel_sha="$(accepted_transition_value candidate_kernel_sha256)"
+    inactive_candidate_initramfs_sha="$(accepted_transition_value candidate_initramfs_sha256)"
   fi
   prior_version="$(accepted_transition_value prior_driver_version)"
   prior_revision="$(accepted_transition_value prior_source_revision)"
@@ -5230,9 +5467,14 @@ restore_prior_from_accepted_transition() {
     restore_accepted_prior_tryboot || return
     sudo rm -- "$accepted_transition" || return
     sudo rm -- "$accepted_transition_prior_config" || return
-    if test "$transition_schema" = 5; then
+    if test "$transition_schema" = 5 || test "$transition_schema" = 6; then
       clear_accepted_prior_tryboot_proof \
         "$prior_tryboot_existed" "$prior_tryboot_sha" || return
+    fi
+    if test "$transition_schema" = 6; then
+      clear_inactive_transition_companions \
+        "$inactive_prior_kernel_sha" "$inactive_prior_initramfs_sha" \
+        "$inactive_candidate_kernel_sha" "$inactive_candidate_initramfs_sha" || return
     fi
     if test "$accepted_schema" != 3; then
       sudo rm -f -- "$accepted_prior_backlight_rule" || return
@@ -5296,9 +5538,14 @@ restore_prior_from_accepted_transition() {
     "$bound_candidate_overlay_sha" || return
   sudo rm -- "$accepted_transition" || return
   sudo rm -- "$accepted_transition_prior_config" || return
-  if test "$transition_schema" = 5; then
+  if test "$transition_schema" = 5 || test "$transition_schema" = 6; then
     clear_accepted_prior_tryboot_proof \
       "$prior_tryboot_existed" "$prior_tryboot_sha" || return
+  fi
+  if test "$transition_schema" = 6; then
+    clear_inactive_transition_companions \
+      "$inactive_prior_kernel_sha" "$inactive_prior_initramfs_sha" \
+      "$inactive_candidate_kernel_sha" "$inactive_candidate_initramfs_sha" || return
   fi
   if test "$accepted_schema" != 3; then
     sudo rm -f -- "$accepted_prior_backlight_rule" || return

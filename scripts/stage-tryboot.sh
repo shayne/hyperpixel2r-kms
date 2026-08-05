@@ -173,7 +173,8 @@ remote_stage="$(ssh "${ssh_options[@]}" "$target" mktemp -d /tmp/hp2r-tryboot-st
 scp "${ssh_options[@]}" -rp "$payload/." "$target:$remote_stage/"
 ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" stage \
   "$remote_stage" "$driver_version" "$source_revision" "$source_tree" "$release" \
-  "$module_file" "$overlay_file" "$applied_dtb_file" "$backlight_rule_file" "$replace_overlay"
+  "$module_file" "$overlay_file" "$applied_dtb_file" "$backlight_rule_file" "$replace_overlay" \
+  "${authorized_transition_sha:-}"
 
 # Delete the validated incoming payload before the reboot is requested.  The
 # transaction is fully published on target at this point; keeping /tmp input

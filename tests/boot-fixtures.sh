@@ -133,6 +133,8 @@ new_target() {
     "$root/var/lib" \
     "$bin"
   chmod 1777 "$root/tmp"
+  : > "$log"
+  chmod 0666 "$log"
   printf '[all]\ndtoverlay=vc4-kms-dpi-hyperpixel2r,rotate=90\n' \
     > "$root/boot/firmware/config.txt"
   cc "$repo_root/tests/fixture-sudo.c" -o "$bin/sudo"
@@ -413,6 +415,9 @@ target="$1"
 shift
 test "$target" = pi@fixture
 if test "${1-}" = uname && test "${2-}" = -r; then
+  if test -n "${HP2R_FIXTURE_LOG:-}"; then
+    printf 'remote-uname %s\n' "$*" >> "$HP2R_FIXTURE_LOG"
+  fi
   printf '%s\n' "${HP2R_FIXTURE_RUNNING_RELEASE:-$HP2R_FIXTURE_RELEASE}"
   exit
 fi
@@ -435,6 +440,7 @@ if test "${1-}" = rm && test "${2-}" = -rf; then
   exit
 fi
 if test "${1-}" = bash && test "${2-}" = -s; then
+  remote_action="${4-}"
   if test "${HP2R_FIXTURE_FAIL_INACTIVE_AUTH:-}" = 1 && \
     test "${4-}" = authorize-inactive-stage; then
     : > "$HP2R_FIXTURE_ROOT/tmp/inactive-authorization-attempted"
@@ -448,10 +454,19 @@ if test "${1-}" = bash && test "${2-}" = -s; then
     done
     set -- "${filtered[@]}"
   fi
-  setpriv --reuid=65534 --regid=65534 --clear-groups \
+  if setpriv --reuid=65534 --regid=65534 --clear-groups \
     env HP2R_INSTALL_ROOT="$HP2R_FIXTURE_ROOT" PATH="$PATH" \
-    bash -c 'id -u > "$HP2R_FIXTURE_ROOT/tmp/remote-uid"; exec bash "$@"' bash "$@"
-  exit
+    bash -c 'id -u > "$HP2R_FIXTURE_ROOT/tmp/remote-uid"; exec bash "$@"' bash "$@"; then
+    remote_status=0
+  else
+    remote_status=$?
+  fi
+  if test "$remote_action" = authorize-inactive-stage && \
+    test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-state-digest; then
+    sed -i 's/^target_identity_sha256=.*/target_identity_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/' \
+      "$HP2R_FIXTURE_ROOT/var/lib/hyperpixel2r-kms/accepted-transition"
+  fi
+  exit "$remote_status"
 fi
 if test "${1-}" = bash && { [[ "${2-}" == /tmp/hp2r-tryboot-stage.*/* ]] || [[ "${2-}" == /tmp/hp2r-accepted.*/* ]]; }; then
   script="$HP2R_FIXTURE_ROOT$2"
@@ -543,15 +558,24 @@ SCRIPT
 set -euo pipefail
 release=''
 module=''
+field=''
 while test "$#" -gt 0; do
   case "$1" in
     -k) release="$2"; shift 2 ;;
+    -F) field="$2"; shift 2 ;;
     -n) shift ;;
     *) module="$1"; shift ;;
   esac
 done
 test "$module" = hyperpixel2r_kms
 test -n "$release"
+if test -n "${HP2R_FIXTURE_LOG:-}"; then
+  printf 'modinfo -k %s -F %s %s\n' "$release" "${field:-none}" "$module" >> "$HP2R_FIXTURE_LOG"
+fi
+if test "$field" = vermagic; then
+  printf '%s fixture\n' "$release"
+  exit 0
+fi
 relative="$(awk -F ': ' '$1 == "hyperpixel2r_kms.ko" { print $2 }' \
   "$HP2R_FIXTURE_ROOT/lib/modules/$release/modules.dep")"
 test -n "$relative"
@@ -602,7 +626,27 @@ SCRIPT
 
   install -m 0755 /dev/stdin "$bin/uname" <<'SCRIPT'
 #!/usr/bin/env bash
+if test -n "${HP2R_FIXTURE_LOG:-}"; then
+  printf 'uname %s\n' "$*" >> "$HP2R_FIXTURE_LOG"
+fi
 case "${1-}" in -r) printf '%s\n' "${HP2R_FIXTURE_REMOTE_RUNNING_RELEASE:-$HP2R_FIXTURE_RELEASE}";; -m) printf 'aarch64\n';; *) exit 64;; esac
+SCRIPT
+
+  for loader in modprobe insmod rmmod; do
+    install -m 0755 /dev/stdin "$bin/$loader" <<SCRIPT
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'module-load $loader %s\\n' "\$*" >> "\$HP2R_FIXTURE_LOG"
+exit 64
+SCRIPT
+  done
+
+  install -m 0755 /dev/stdin "$bin/mount" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'mount %s\n' "$*" >> "$HP2R_FIXTURE_LOG"
+case " $* " in *' --bind '*) printf 'bind %s\n' "$*" >> "$HP2R_FIXTURE_LOG";; esac
+exit 64
 SCRIPT
 
   # df is a faithful fixture stub for the guard's only input contract: the
@@ -2972,7 +3016,8 @@ exercise_inactive_kernel_prepare() {
   local candidate_parent="$fixture/inactive-kernel-target"
   local candidate_target="$candidate_parent/$candidate_release"
   local candidate_manifest="$candidate_target/target.txt"
-  local artifact_manifest="$repo_root/dist/artifacts/$release/manifest.txt"
+  local candidate_artifact="$fixture/inactive-candidate-artifact"
+  local artifact_manifest="$candidate_artifact/manifest.txt"
   local state_dir="$root/var/lib/hyperpixel2r-kms"
   local prior_kernel="/boot/vmlinuz-$release"
   local prior_initramfs="/boot/initrd.img-$release"
@@ -2980,10 +3025,16 @@ exercise_inactive_kernel_prepare() {
   local candidate_initramfs="/boot/initrd.img-$candidate_release"
   local normal_before="$fixture/inactive-normal-before"
   local conventional_before="$fixture/inactive-conventional-before"
-  local revision12 release_tag kernel_name initramfs_name companion prepared_in_hostile=false
+  local prior_kernel_before="$fixture/inactive-prior-kernel-before"
+  local prior_initramfs_before="$fixture/inactive-prior-initramfs-before"
+  local revision12 release_tag kernel_name initramfs_name companion prepared_in_hostile=false accepted_pre_stage_sha
 
   new_target
-  run_stage >/dev/null
+  if [[ "${HP2R_FIXTURE_INTERRUPT_AFTER:-}" == candidate-* ]]; then
+    HP2R_FIXTURE_INTERRUPT_AFTER='' run_stage >/dev/null
+  else
+    run_stage >/dev/null
+  fi
   install_live_hardware
   run_controller commit-boot.sh >/dev/null
   run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" >/dev/null
@@ -3006,6 +3057,9 @@ exercise_inactive_kernel_prepare() {
     "$root/boot/firmware/bcm2710-rpi-zero-2-w.dtb"
   cp "$candidate_target/root/boot/firmware/overlays/vc4-kms-v3d.dtbo" \
     "$root/boot/firmware/overlays/vc4-kms-v3d.dtbo"
+  cp -a "$repo_root/dist/artifacts/$release" "$candidate_artifact"
+  replace_manifest_value "$artifact_manifest" kernel_release "$candidate_release"
+  replace_manifest_value "$artifact_manifest" module_vermagic "$candidate_release fixture"
   replace_manifest_value "$candidate_manifest" kernel_release "$candidate_release"
   replace_manifest_value "$candidate_manifest" kernel_image_path "$candidate_kernel"
   replace_manifest_value "$candidate_manifest" initramfs_path "$candidate_initramfs"
@@ -3013,6 +3067,8 @@ exercise_inactive_kernel_prepare() {
     "$(sha256sum "$candidate_target/root$candidate_kernel" | awk '{ print $1 }')"
   replace_manifest_value "$candidate_manifest" initramfs_sha256 \
     "$(sha256sum "$candidate_target/root$candidate_initramfs" | awk '{ print $1 }')"
+  cp "$root$prior_kernel" "$prior_kernel_before"
+  cp "$root$prior_initramfs" "$prior_initramfs_before"
 
   run_inactive_prepare() {
     PATH="$bin:$PATH" \
@@ -3024,7 +3080,7 @@ exercise_inactive_kernel_prepare() {
       HP2R_TARGET=pi@fixture \
       scripts/accepted-lifecycle.sh \
         --action prepare-new \
-        --driver-version 0.1.2 \
+        --driver-version 0.1.1 \
         --source-revision "$source_revision" \
         --kernel-release "$candidate_release" \
         --kernel-target "$candidate_parent" \
@@ -3036,6 +3092,14 @@ exercise_inactive_kernel_prepare() {
         --overlay-sha256 "$(awk -F '\t' '$1 == "overlay_sha256" { print $2 }' "$artifact_manifest")" \
         --backlight-rule-file "$backlight_rule_file" \
         --backlight-rule-sha256 "$(awk -F '\t' '$1 == "backlight_rule_sha256" { print $2 }' "$artifact_manifest")"
+  }
+  run_inactive_stage() {
+    HP2R_FIXTURE_REPLACE_OVERLAY="$overlay_file" run_stage \
+      --stage-only \
+      --artifact-dir "$candidate_artifact" \
+      --kernel-target "$candidate_parent" \
+      --kernel-release "$candidate_release" \
+      --target-identity-sha256 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   }
   if test -n "${HP2R_FIXTURE_HOSTILE:-}"; then
     local hostile="$HP2R_FIXTURE_HOSTILE" negative=true name mutation lock writer pid=''
@@ -3181,7 +3245,8 @@ exercise_inactive_kernel_prepare() {
   fi
   if "$prepared_in_hostile"; then
     :
-  elif test -n "${HP2R_FIXTURE_INTERRUPT_AFTER:-}"; then
+  elif test -n "${HP2R_FIXTURE_INTERRUPT_AFTER:-}" && \
+    [[ "${HP2R_FIXTURE_INTERRUPT_AFTER}" == accepted-transition-* ]]; then
     if run_inactive_prepare >/dev/null 2>&1; then
       fail "inactive prepare ignored interruption after $HP2R_FIXTURE_INTERRUPT_AFTER"
     fi
@@ -3227,6 +3292,118 @@ exercise_inactive_kernel_prepare() {
   cmp -s "$conventional_before" "$root/boot/firmware/config.txt" ||
     fail 'inactive prepare changed conventional normal boot pair'
   assert_absent "$root/boot/firmware/tryboot.txt"
+
+  # Task 5 must stage the prepared inactive candidate through the public
+  # controller while the fixture still reports the accepted, prior release.
+  # The pre-Task-5 generic writer instead binds schema 4 state and its
+  # running-kernel resolver, so this is intentionally RED until the target
+  # stage branch becomes cross-kernel aware.
+  : > "$log"
+  accepted_pre_stage_sha="$(sha256sum "$state_dir/accepted-transition" | awk '{ print $1 }')"
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-state-digest; then
+    if run_inactive_stage >/dev/null 2>&1; then
+      fail 'inactive stage accepted an authority changed after controller authorization'
+    fi
+    cmp -s "$normal_before" "$root/boot/firmware/config.txt" ||
+      fail 'digest-rejected inactive stage changed normal config'
+    assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+    assert_absent "$root/boot/firmware/tryboot.txt"
+    assert_absent "$root/boot/firmware/$kernel_name"
+    assert_absent "$root/boot/firmware/$initramfs_name"
+    exit 0
+  fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-foreign-firmware; then
+    printf 'foreign inactive firmware leaf\n' > "$root/boot/firmware/$kernel_name"
+    chmod 0644 "$root/boot/firmware/$kernel_name"
+    cp "$root/boot/firmware/$kernel_name" "$fixture/foreign-inactive-kernel"
+    if run_inactive_stage >/dev/null 2>&1; then
+      fail 'inactive stage accepted a foreign candidate firmware leaf'
+    fi
+    cmp -s "$fixture/foreign-inactive-kernel" "$root/boot/firmware/$kernel_name" ||
+      fail 'foreign candidate firmware leaf was changed during rejection'
+    assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+    assert_absent "$root/boot/firmware/tryboot.txt"
+    assert_absent "$root/boot/firmware/$initramfs_name"
+    exit 0
+  fi
+  if [[ "${HP2R_FIXTURE_INTERRUPT_AFTER:-}" == candidate-* ]]; then
+    if run_inactive_stage >/dev/null 2>&1; then
+      fail "inactive stage ignored interruption after $HP2R_FIXTURE_INTERRUPT_AFTER"
+    fi
+    cmp -s "$normal_before" "$root/boot/firmware/config.txt" ||
+      fail "inactive interruption changed normal config: $HP2R_FIXTURE_INTERRUPT_AFTER"
+    assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+    assert_absent "$root/boot/firmware/tryboot.txt"
+    assert_absent "$root/boot/firmware/$kernel_name"
+    assert_absent "$root/boot/firmware/$initramfs_name"
+    exit 0
+  fi
+  run_inactive_stage
+  grep -Fxq 'schema_version=5' "$state_dir/tryboot-state" ||
+    fail 'inactive stage did not publish schema-5 generic state'
+  grep -Fxq 'boot_transition=inactive-kernel' "$state_dir/tryboot-state" ||
+    fail 'inactive stage did not bind its inactive boot transition'
+  grep -Fxq "candidate_kernel_file=$kernel_name" "$state_dir/tryboot-state" ||
+    fail 'inactive stage did not bind candidate kernel firmware name'
+  grep -Fxq "candidate_initramfs_file=$initramfs_name" "$state_dir/tryboot-state" ||
+    fail 'inactive stage did not bind candidate initramfs firmware name'
+  grep -Fxq "accepted_transition_sha256=$accepted_pre_stage_sha" \
+    "$state_dir/tryboot-state" || fail 'inactive stage did not bind accepted authority digest'
+  cmp -s "$root$candidate_kernel" "$root/boot/firmware/$kernel_name" ||
+    fail 'inactive stage did not publish exact candidate kernel firmware leaf'
+  cmp -s "$root$candidate_initramfs" "$root/boot/firmware/$initramfs_name" ||
+    fail 'inactive stage did not publish exact candidate initramfs firmware leaf'
+  assert_file "$root/lib/modules/$candidate_release/extra/hyperpixel2r_kms.ko"
+  cmp -s "$candidate_artifact/hyperpixel2r_kms.ko" \
+    "$root/lib/modules/$candidate_release/extra/hyperpixel2r_kms.ko" ||
+    fail 'inactive stage did not install the candidate module in its release tree'
+  assert_file "$root/boot/firmware/overlays/$overlay_file"
+  assert_file "$root/etc/udev/rules.d/$backlight_rule_file"
+  assert_file "$root/usr/src/hyperpixel2r-kms-0.1.1/dkms.conf"
+  grep -Fxq "depmod -a $candidate_release" "$log" ||
+    fail 'inactive stage did not run depmod for the candidate release'
+  grep -Fxq "modinfo -k $candidate_release -F none hyperpixel2r_kms" "$log" ||
+    fail 'inactive stage did not prove the candidate module path explicitly'
+  grep -Fxq "modinfo -k $candidate_release -F vermagic hyperpixel2r_kms" "$log" ||
+    fail 'inactive stage did not prove the candidate module vermagic explicitly'
+  test "$(tail -n 4 "$root/boot/firmware/tryboot.txt")" = "$(printf '%s\n' \
+    '# hyperpixel2r-kms one-shot inactive-kernel candidate' \
+    "kernel=$kernel_name" \
+    "initramfs $initramfs_name followkernel" \
+    "dtoverlay=$overlay_file")" ||
+    fail 'inactive stage tryboot tail is not the exact four-line candidate selection'
+  ! grep -Fq '$' "$root/boot/firmware/tryboot.txt" ||
+    fail 'inactive stage wrote a literal shell variable into tryboot config'
+  cmp -s "$normal_before" "$root/boot/firmware/config.txt" ||
+    fail 'inactive stage changed normal boot config'
+  cmp -s "$conventional_before" "$root/boot/firmware/config.txt" ||
+    fail 'inactive stage changed conventional normal config selection'
+  cmp -s "$prior_kernel_before" "$root$prior_kernel" ||
+    fail 'inactive stage changed conventional normal kernel'
+  cmp -s "$prior_initramfs_before" "$root$prior_initramfs" ||
+    fail 'inactive stage changed conventional normal initramfs'
+  grep -Fxq "remote-uname uname -r" "$log" ||
+    fail 'inactive stage did not record controller running-release evidence'
+  ! grep -Fq "modinfo -k $release " "$log" ||
+    fail 'inactive stage used running-kernel module resolution'
+  ! grep -Fq 'module-load ' "$log" ||
+    fail 'inactive stage loaded or probed a module'
+  ! grep -Fq 'bind ' "$log" ||
+    fail 'inactive stage bound a candidate device during staging'
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-rollback; then
+    run_controller rollback-boot.sh >/dev/null
+    cmp -s "$normal_before" "$root/boot/firmware/config.txt" ||
+      fail 'inactive rollback did not restore the prior normal config'
+    cmp -s "$prior_kernel_before" "$root$prior_kernel" ||
+      fail 'inactive rollback changed the prior conventional kernel'
+    cmp -s "$prior_initramfs_before" "$root$prior_initramfs" ||
+      fail 'inactive rollback changed the prior conventional initramfs'
+    assert_absent "$root/boot/firmware/tryboot.txt"
+    assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+    assert_absent "$root/boot/firmware/$kernel_name"
+    assert_absent "$root/boot/firmware/$initramfs_name"
+    assert_absent "$root/lib/modules/$candidate_release/extra/hyperpixel2r_kms.ko"
+  fi
 }
 
 exercise_inactive_kernel_matrix() {
@@ -3251,8 +3428,48 @@ exercise_inactive_kernel_matrix() {
   printf 'inactive-kernel hostile matrix passed: %s cases\n' "$count"
 }
 
+exercise_inactive_kernel_interruptions() {
+  local boundary count=0
+
+  for boundary in \
+    candidate-kernel-firmware-published \
+    candidate-initramfs-firmware-published \
+    candidate-artifact-published \
+    candidate-rule-installed \
+    candidate-module-installed \
+    candidate-overlay-installed \
+    candidate-dkms-activated \
+    candidate-tryboot-published \
+    candidate-tryboot-state-published
+  do
+    if HP2R_FIXTURE_CASE=inactive-kernel HP2R_FIXTURE_INTERRUPT_AFTER="$boundary" \
+      bash "${BASH_SOURCE[0]}" >/dev/null; then
+      count=$((count + 1))
+    else
+      fail "inactive interruption fixture failed: $boundary"
+    fi
+  done
+  test "$count" = 9 || fail 'inactive interruption inventory drifted'
+}
+
 case "${HP2R_FIXTURE_CASE:-}" in
   inactive-kernel)
+    exercise_inactive_kernel_prepare
+    exit 0
+    ;;
+  inactive-kernel-state-digest)
+    exercise_inactive_kernel_prepare
+    exit 0
+    ;;
+  inactive-kernel-foreign-firmware)
+    exercise_inactive_kernel_prepare
+    exit 0
+    ;;
+  inactive-kernel-interruptions)
+    exercise_inactive_kernel_interruptions
+    exit 0
+    ;;
+  inactive-kernel-rollback)
     exercise_inactive_kernel_prepare
     exit 0
     ;;
