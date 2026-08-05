@@ -2797,6 +2797,43 @@ exercise_inactive_kernel_prepare() {
         --backlight-rule-file "$backlight_rule_file" \
         --backlight-rule-sha256 "$(awk -F '\t' '$1 == "backlight_rule_sha256" { print $2 }' "$artifact_manifest")"
   }
+  if test -n "${HP2R_FIXTURE_HOSTILE:-}"; then
+    hostile_path=''
+    case "$HP2R_FIXTURE_HOSTILE" in
+      source-absent) rm -- "$root$candidate_kernel" ;;
+      source-symlink) hostile_path="$fixture/hostile-source"; cp "$root$candidate_kernel" "$hostile_path"; rm -- "$root$candidate_kernel"; ln -s "$hostile_path" "$root$candidate_kernel" ;;
+      source-directory) rm -- "$root$candidate_kernel"; mkdir "$root$candidate_kernel" ;;
+      source-fifo) rm -- "$root$candidate_kernel"; mkfifo "$root$candidate_kernel" ;;
+      source-owner) chown 65534:65534 "$root$candidate_kernel" ;;
+      source-mode) chmod 0600 "$root$candidate_kernel" ;;
+      source-hash) printf 'hash drift\n' >> "$root$candidate_kernel" ;;
+      module-source-absent) rm -rf -- "$root/lib/modules/$candidate_release" ;;
+      package-source-absent) rm -- "$root/var/lib/dpkg/info/linux-image-$candidate_release.list" ;;
+      vc4-hash) printf 'vc4 drift\n' >> "$root/boot/firmware/overlays/vc4-kms-v3d.dtbo" ;;
+      config-overlong) printf '%099d\n' 0 >> "$root/boot/firmware/config.txt" ;;
+      config-duplicate) printf 'dtoverlay=hyperpixel2r-kms-aaaaaaaaaaaa.dtbo\n' >> "$root/boot/firmware/config.txt" ;;
+      config-conditional) printf '[pi4]\ndtoverlay=hyperpixel2r-kms-aaaaaaaaaaaa.dtbo\n' >> "$root/boot/firmware/config.txt" ;;
+      config-override) printf 'kernel=foreign.img\n' >> "$root/boot/firmware/config.txt" ;;
+      config-include) printf 'include extra.txt\n' >> "$root/boot/firmware/config.txt" ;;
+      config-autoboot) printf 'autoboot.txt\n' >> "$root/boot/firmware/config.txt" ;;
+      companion-symlink) hostile_path="$fixture/hostile-companion"; printf unsafe > "$hostile_path"; ln -s "$hostile_path" "$state_dir/accepted-transition-candidate-kernel.img" ;;
+      companion-directory) mkdir "$state_dir/accepted-transition-candidate-kernel.img" ;;
+      companion-fifo) mkfifo "$state_dir/accepted-transition-candidate-kernel.img" ;;
+      companion-owner) printf unsafe > "$state_dir/accepted-transition-candidate-kernel.img"; chown 65534:65534 "$state_dir/accepted-transition-candidate-kernel.img"; chmod 0600 "$state_dir/accepted-transition-candidate-kernel.img" ;;
+      companion-mode) printf unsafe > "$state_dir/accepted-transition-candidate-kernel.img"; chmod 0644 "$state_dir/accepted-transition-candidate-kernel.img" ;;
+      companion-hash) printf unsafe > "$state_dir/accepted-transition-candidate-kernel.img"; chmod 0600 "$state_dir/accepted-transition-candidate-kernel.img" ;;
+      *) fail "unknown inactive hostile case: $HP2R_FIXTURE_HOSTILE" ;;
+    esac
+    cp "$root/boot/firmware/config.txt" "$fixture/hostile-normal-before"
+    if run_inactive_prepare >/dev/null 2>&1; then
+      fail "inactive prepare accepted hostile $HP2R_FIXTURE_HOSTILE"
+    fi
+    cmp -s "$fixture/hostile-normal-before" "$root/boot/firmware/config.txt" ||
+      fail "hostile $HP2R_FIXTURE_HOSTILE changed normal config"
+    assert_absent "$state_dir/accepted-transition"
+    assert_absent "$root/boot/firmware/tryboot.txt"
+    exit 0
+  fi
   if test -n "${HP2R_FIXTURE_INTERRUPT_AFTER:-}"; then
     if run_inactive_prepare >/dev/null 2>&1; then
       fail "inactive prepare ignored interruption after $HP2R_FIXTURE_INTERRUPT_AFTER"

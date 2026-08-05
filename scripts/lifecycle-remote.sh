@@ -4590,7 +4590,7 @@ prepare_new_accepted() {
     vc4_overlay_path="${root}/boot/firmware/overlays/vc4-kms-v3d.dtbo"
     for source in "$prior_kernel_path" "$prior_initramfs_path" \
       "$candidate_kernel_path" "$candidate_initramfs_path" "$base_dtb_path" "$vc4_overlay_path"; do
-      require_regular "$source" || die 'inactive boot source is missing or unsafe'
+      assert_owned_regular "$source" boot || die 'inactive boot source is missing or unsafe'
     done
     test "$(sha "$candidate_kernel_path")" = "$candidate_kernel_sha256" ||
       die 'candidate kernel source differs from target export'
@@ -4602,7 +4602,7 @@ prepare_new_accepted() {
       die 'candidate shared VC4 overlay differs from target export'
     assert_owned_dir "$candidate_module_root" ||
       die 'candidate module source is missing or unsafe'
-    require_regular "${root}/var/lib/dpkg/info/linux-image-$release.list" ||
+    assert_owned_regular "${root}/var/lib/dpkg/info/linux-image-$release.list" 644 ||
       die 'candidate package source is missing or unsafe'
     assert_no_boot_writers || die 'a boot/package writer is active'
     recover_inactive_orphan_companions "$prior_kernel_path" "$prior_initramfs_path" \
