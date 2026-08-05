@@ -459,6 +459,7 @@ if test "${1-}" = bash && test "${2-}" = -s; then
     HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH:-}" \
     HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH:-}" \
     HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH:-}" \
+    HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH:-}" \
     schema5_staged_authority_asserting="${schema5_staged_authority_asserting:-}" \
     schema5_staged_authority_allow_prepared="${schema5_staged_authority_allow_prepared:-}" \
     bash -c 'id -u > "$HP2R_FIXTURE_ROOT/tmp/remote-uid"; exec bash "$@"' bash "$@"; then
@@ -496,6 +497,7 @@ if test "${1-}" = bash && { [[ "${2-}" == /tmp/hp2r-tryboot-stage.*/* ]] || [[ "
     HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH:-}" \
     HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH:-}" \
     HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH:-}" \
+    HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH:-}" \
     schema5_staged_authority_asserting="${schema5_staged_authority_asserting:-}" \
     schema5_staged_authority_allow_prepared="${schema5_staged_authority_allow_prepared:-}" \
     bash -c 'id -u > "$HP2R_FIXTURE_ROOT/tmp/remote-uid"; exec bash "$@"' bash "$script" "$@"
@@ -886,6 +888,11 @@ if test "${HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH:-}" = 1 && \
   test "$destination" = "$HP2R_FIXTURE_ROOT/var/lib/hyperpixel2r-kms/tryboot-state"; then
   printf 'late artifact drift\n' >> "$HP2R_FIXTURE_ROOT/usr/lib/hyperpixel2r-kms/0.1.1/1c64ae9dd22f7e16245154d4caa911859369814e/6.18.39+rpt-rpi-v8/manifest.txt"
   : > "$HP2R_FIXTURE_ROOT/tmp/artifact-mutated-on-state-publish"
+fi
+if test "${HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH:-}" = 1 && \
+  test "$destination" = "$HP2R_FIXTURE_ROOT/var/lib/hyperpixel2r-kms/tryboot-state"; then
+  printf 'added\n' > "$HP2R_FIXTURE_ROOT/var/lib/dkms/registered"
+  : > "$HP2R_FIXTURE_ROOT/tmp/dkms-mutated-on-state-publish"
 fi
 SCRIPT
 
@@ -3377,6 +3384,17 @@ exercise_inactive_kernel_prepare() {
     assert_absent "$root/boot/firmware/$initramfs_name"
     exit 0
   fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-final-dkms-drift; then
+    if HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH=1 run_inactive_stage >/dev/null 2>&1; then
+      fail 'inactive stage accepted live candidate DKMS drift in the final window'
+    fi
+    assert_file "$root/tmp/dkms-mutated-on-state-publish"
+    grep -Fxq 'phase=prepared' "$state_dir/accepted-transition" ||
+      fail 'late DKMS drift advanced the accepted phase'
+    assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+    assert_absent "$root/boot/firmware/tryboot.txt"
+    exit 0
+  fi
   if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-foreign-firmware; then
     printf 'foreign inactive firmware leaf\n' > "$root/boot/firmware/$kernel_name"
     chmod 0644 "$root/boot/firmware/$kernel_name"
@@ -3600,7 +3618,7 @@ case "${HP2R_FIXTURE_CASE:-}" in
     exercise_inactive_kernel_prepare
     exit 0
     ;;
-  inactive-kernel-phase-authority-drift|inactive-kernel-final-module-drift|inactive-kernel-final-artifact-drift|inactive-kernel-stale-authority|inactive-kernel-hostile-env|inactive-kernel-commit-rejected)
+  inactive-kernel-phase-authority-drift|inactive-kernel-final-module-drift|inactive-kernel-final-artifact-drift|inactive-kernel-final-dkms-drift|inactive-kernel-stale-authority|inactive-kernel-hostile-env|inactive-kernel-commit-rejected)
     exercise_inactive_kernel_prepare
     exit 0
     ;;

@@ -2321,6 +2321,7 @@ assert_inactive_final_stage_boundary() {
     test "$(sha "$accepted_transition")" = "$expected_transition_sha" || return
   resolved="$(sudo modinfo -k "$expected_release" -n hyperpixel2r_kms)" || return
   test "$resolved" = "${root}/lib/modules/$expected_release/extra/$expected_module_file" || return
+  test "$(validate_dkms_status "$expected_version")" = registered || return
   vermagic="$(sudo modinfo -k "$expected_release" -F vermagic hyperpixel2r_kms)" || return
   case "$vermagic" in "$expected_release"*) ;; *) return 1;; esac
 }
