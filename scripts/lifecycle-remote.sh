@@ -2356,6 +2356,7 @@ stage() {
   resolved_path=''
   inactive_stage=false
   accepted_transition_sha=''
+  accepted_transition_prepared_snapshot=''
   candidate_kernel_file=''
   candidate_initramfs_file=''
   candidate_kernel_sha=''
@@ -2758,6 +2759,10 @@ stage() {
       die 'inactive accepted authority changed before generic state publication'
     test "$expected_accepted_transition_sha" = "$(sha "$accepted_transition")" ||
       die 'inactive accepted authority digest changed before generic state publication'
+    accepted_transition_prepared_snapshot="$(privileged_snapshot "$accepted_transition" "$rollback_tmp" accepted-transition-prepared)" ||
+      die 'failed to capture prepared accepted authority'
+    test "$(sha "$accepted_transition_prepared_snapshot")" = "$expected_accepted_transition_sha" ||
+      die 'prepared accepted authority snapshot differs from controller authorization'
     assert_owned_regular "$firmware_kernel_path" boot &&
       test "$(sha "$firmware_kernel_path")" = "$candidate_kernel_sha" &&
       assert_owned_regular "$firmware_initramfs_path" boot &&
@@ -2850,7 +2855,8 @@ stage() {
       sudo depmod -a "$release" || die 'failed to finalize candidate module dependency map'
       sudo sync || die 'failed to synchronize inactive candidate before staging journal'
     fi
-    if ! set_accepted_transition_phase prepared staged '' "$prior_dkms_inventory_sha"; then
+    if ! set_accepted_transition_phase prepared staged '' "$prior_dkms_inventory_sha" \
+      "$accepted_transition_prepared_snapshot" "$expected_accepted_transition_sha"; then
       schema5_staged_authority_allow_prepared=false
       die 'failed to mark accepted candidate staged'
     fi
@@ -4870,10 +4876,19 @@ set_accepted_transition_phase() {
   local next="$2"
   local normal_sha="${3:-}"
   local inventory_sha="${4:-}"
-  local schema workspace state_tmp state_sha
+  local prepared_snapshot="${5:-}"
+  local expected_prepared_sha="${6:-}"
+  local schema workspace state_tmp state_sha transition_source="$accepted_transition"
 
   assert_accepted_transition || return
   test "$(accepted_transition_value phase)" = "$expected" || return
+  if test -n "$prepared_snapshot" || test -n "$expected_prepared_sha"; then
+    test -n "$prepared_snapshot" && [[ "$expected_prepared_sha" =~ ^[0-9a-f]{64}$ ]] || return
+    assert_owned_regular "$prepared_snapshot" 600 || return
+    test "$(sha "$prepared_snapshot")" = "$expected_prepared_sha" || return
+    test "$(sha "$accepted_transition")" = "$expected_prepared_sha" || return
+    transition_source="$prepared_snapshot"
+  fi
   schema="$(accepted_transition_value schema_version)"
   if { test "$schema" = 3 || test "$schema" = 4 || test "$schema" = 5 || test "$schema" = 6; } &&
     test "$(accepted_transition_value candidate_dkms_inventory_sha256)" = pending; then
@@ -4893,20 +4908,20 @@ set_accepted_transition_phase() {
       -e "s/^phase=$expected\$/phase=$next/" \
       -e "s/^candidate_normal_config_sha256=.*/candidate_normal_config_sha256=$normal_sha/" \
       -e "s/^candidate_dkms_inventory_sha256=pending\$/candidate_dkms_inventory_sha256=$inventory_sha/" \
-      "$accepted_transition" | sudo tee "$state_tmp" >/dev/null || return
+      "$transition_source" | sudo tee "$state_tmp" >/dev/null || return
   elif test -n "$normal_sha"; then
     sudo sed \
       -e "s/^phase=$expected\$/phase=$next/" \
       -e "s/^candidate_normal_config_sha256=.*/candidate_normal_config_sha256=$normal_sha/" \
-      "$accepted_transition" | sudo tee "$state_tmp" >/dev/null || return
+      "$transition_source" | sudo tee "$state_tmp" >/dev/null || return
   elif test -n "$inventory_sha"; then
     sudo sed \
       -e "s/^phase=$expected\$/phase=$next/" \
       -e "s/^candidate_dkms_inventory_sha256=pending\$/candidate_dkms_inventory_sha256=$inventory_sha/" \
-      "$accepted_transition" | sudo tee "$state_tmp" >/dev/null || return
+      "$transition_source" | sudo tee "$state_tmp" >/dev/null || return
   else
     sudo sed -e "s/^phase=$expected\$/phase=$next/" \
-      "$accepted_transition" | sudo tee "$state_tmp" >/dev/null || return
+      "$transition_source" | sudo tee "$state_tmp" >/dev/null || return
   fi
   state_sha="$(sha "$state_tmp")" || return
   atomic_copy "$state_tmp" "$accepted_transition" 600 "$state_sha" || return
