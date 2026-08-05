@@ -144,6 +144,7 @@ docker run --rm \
   --workdir /repo \
   --env HP2R_FIXTURE_REPO_ROOT=/repo \
   --env HP2R_FIXTURE_CASE="${HP2R_FIXTURE_CASE:-}" \
+  --env HP2R_FIXTURE_INTERRUPT_AFTER="${HP2R_FIXTURE_INTERRUPT_AFTER:-}" \
   "$image" \
   bash tests/boot-fixtures.sh
 

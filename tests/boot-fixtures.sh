@@ -2727,7 +2727,129 @@ exercise_task3_aligned_authority() {
   source "$repo_root/tests/task3-authority-fixture.sh"
 }
 
+exercise_inactive_kernel_prepare() {
+  local candidate_release='6.18.39+rpt-rpi-v8'
+  local candidate_parent="$fixture/inactive-kernel-target"
+  local candidate_target="$candidate_parent/$candidate_release"
+  local candidate_manifest="$candidate_target/target.txt"
+  local artifact_manifest="$repo_root/dist/artifacts/$release/manifest.txt"
+  local state_dir="$root/var/lib/hyperpixel2r-kms"
+  local prior_kernel="/boot/vmlinuz-$release"
+  local prior_initramfs="/boot/initrd.img-$release"
+  local candidate_kernel="/boot/vmlinuz-$candidate_release"
+  local candidate_initramfs="/boot/initrd.img-$candidate_release"
+  local normal_before="$fixture/inactive-normal-before"
+  local conventional_before="$fixture/inactive-conventional-before"
+  local revision12 release_tag kernel_name initramfs_name companion
+
+  new_target
+  run_stage >/dev/null
+  install_live_hardware
+  run_controller commit-boot.sh >/dev/null
+  run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" >/dev/null
+  cp "$root/boot/firmware/config.txt" "$normal_before"
+  cp "$root/boot/firmware/config.txt" "$conventional_before"
+
+  rm -rf -- "$candidate_parent"
+  mkdir -p "$candidate_target"
+  cp -a "$repo_root/dist/kernel-target/$release/root" "$candidate_target/root"
+  cp "$repo_root/dist/kernel-target/$release/target.txt" "$candidate_manifest"
+  printf 'inactive prior kernel bytes\n' > "$root$prior_kernel"
+  printf 'inactive prior initramfs bytes\n' > "$root$prior_initramfs"
+  printf 'inactive candidate kernel bytes\n' > "$candidate_target/root$candidate_kernel"
+  printf 'inactive candidate initramfs bytes\n' > "$candidate_target/root$candidate_initramfs"
+  mkdir -p "$root/lib/modules/$candidate_release" "$root/var/lib/dpkg/info"
+  : > "$root/var/lib/dpkg/info/linux-image-$candidate_release.list"
+  cp "$candidate_target/root$candidate_kernel" "$root$candidate_kernel"
+  cp "$candidate_target/root$candidate_initramfs" "$root$candidate_initramfs"
+  cp "$candidate_target/root/boot/firmware/bcm2710-rpi-zero-2-w.dtb" \
+    "$root/boot/firmware/bcm2710-rpi-zero-2-w.dtb"
+  cp "$candidate_target/root/boot/firmware/overlays/vc4-kms-v3d.dtbo" \
+    "$root/boot/firmware/overlays/vc4-kms-v3d.dtbo"
+  replace_manifest_value "$candidate_manifest" kernel_release "$candidate_release"
+  replace_manifest_value "$candidate_manifest" kernel_image_path "$candidate_kernel"
+  replace_manifest_value "$candidate_manifest" initramfs_path "$candidate_initramfs"
+  replace_manifest_value "$candidate_manifest" kernel_image_sha256 \
+    "$(sha256sum "$candidate_target/root$candidate_kernel" | awk '{ print $1 }')"
+  replace_manifest_value "$candidate_manifest" initramfs_sha256 \
+    "$(sha256sum "$candidate_target/root$candidate_initramfs" | awk '{ print $1 }')"
+
+  run_inactive_prepare() {
+    PATH="$bin:$PATH" \
+      HP2R_FIXTURE_ROOT="$root" \
+      HP2R_FIXTURE_RELEASE="$release" \
+      HP2R_FIXTURE_LOG="$log" \
+      HP2R_FIXTURE_REPO_ROOT="$repo_root" \
+      HP2R_FIXTURE_ACCEPTED_CONTROLLER=1 \
+      HP2R_TARGET=pi@fixture \
+      scripts/accepted-lifecycle.sh \
+        --action prepare-new \
+        --driver-version 0.1.2 \
+        --source-revision "$source_revision" \
+        --kernel-release "$candidate_release" \
+        --kernel-target "$candidate_parent" \
+        --target-identity-sha256 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+        --manifest-sha256 "$(sha256sum "$artifact_manifest" | awk '{ print $1 }')" \
+        --module-file hyperpixel2r_kms.ko \
+        --module-sha256 "$(awk -F '\t' '$1 == "module_sha256" { print $2 }' "$artifact_manifest")" \
+        --overlay-file "$overlay_file" \
+        --overlay-sha256 "$(awk -F '\t' '$1 == "overlay_sha256" { print $2 }' "$artifact_manifest")" \
+        --backlight-rule-file "$backlight_rule_file" \
+        --backlight-rule-sha256 "$(awk -F '\t' '$1 == "backlight_rule_sha256" { print $2 }' "$artifact_manifest")"
+  }
+  if test -n "${HP2R_FIXTURE_INTERRUPT_AFTER:-}"; then
+    if run_inactive_prepare >/dev/null 2>&1; then
+      fail "inactive prepare ignored interruption after $HP2R_FIXTURE_INTERRUPT_AFTER"
+    fi
+    assert_absent "$state_dir/accepted-transition"
+    HP2R_FIXTURE_INTERRUPT_AFTER='' run_inactive_prepare >/dev/null ||
+      fail "inactive prepare did not recover exact orphan companions after $HP2R_FIXTURE_INTERRUPT_AFTER"
+  else
+    run_inactive_prepare >/dev/null
+  fi
+
+  revision12="${source_revision:0:12}"
+  release_tag="$(printf %s "$candidate_release" | sha256sum | awk '{ print substr($1, 1, 12) }')"
+  kernel_name="hp2r-$revision12-$release_tag-kernel.img"
+  initramfs_name="hp2r-$revision12-$release_tag-initramfs.img"
+  grep -Fxq 'schema_version=6' "$state_dir/accepted-transition" ||
+    fail 'inactive prepare did not publish schema-6 authority'
+  grep -Fxq 'target_identity_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
+    "$state_dir/accepted-transition" || fail 'inactive prepare did not bind target identity'
+  grep -Fxq "candidate_kernel_file=$kernel_name" "$state_dir/accepted-transition" ||
+    fail 'inactive prepare did not use deterministic kernel firmware name'
+  grep -Fxq "candidate_initramfs_file=$initramfs_name" "$state_dir/accepted-transition" ||
+    fail 'inactive prepare did not use deterministic initramfs firmware name'
+  for companion in \
+    accepted-transition-prior-kernel.img \
+    accepted-transition-prior-initramfs.img \
+    accepted-transition-candidate-kernel.img \
+    accepted-transition-candidate-initramfs.img
+  do
+    assert_file "$state_dir/$companion"
+    test "$(stat -c '%U:%G:%a' "$state_dir/$companion")" = root:root:600 ||
+      fail "inactive companion ownership drifted: $companion"
+  done
+  cmp -s "$root$prior_kernel" "$state_dir/accepted-transition-prior-kernel.img" ||
+    fail 'inactive prior kernel companion bytes drifted'
+  cmp -s "$root$prior_initramfs" "$state_dir/accepted-transition-prior-initramfs.img" ||
+    fail 'inactive prior initramfs companion bytes drifted'
+  cmp -s "$root$candidate_kernel" "$state_dir/accepted-transition-candidate-kernel.img" ||
+    fail 'inactive candidate kernel companion bytes drifted'
+  cmp -s "$root$candidate_initramfs" "$state_dir/accepted-transition-candidate-initramfs.img" ||
+    fail 'inactive candidate initramfs companion bytes drifted'
+  cmp -s "$normal_before" "$root/boot/firmware/config.txt" ||
+    fail 'inactive prepare changed normal boot config'
+  cmp -s "$conventional_before" "$root/boot/firmware/config.txt" ||
+    fail 'inactive prepare changed conventional normal boot pair'
+  assert_absent "$root/boot/firmware/tryboot.txt"
+}
+
 case "${HP2R_FIXTURE_CASE:-}" in
+  inactive-kernel)
+    exercise_inactive_kernel_prepare
+    exit 0
+    ;;
   task3-authority)
     exercise_task3_aligned_authority
     exit 0

@@ -15,6 +15,10 @@ accepted_stock_config="$state_dir/accepted-stock-config.txt"
 accepted_transition="$state_dir/accepted-transition"
 accepted_transition_prior_config="$state_dir/accepted-transition-prior-config.txt"
 accepted_transition_prior_tryboot="$state_dir/accepted-transition-prior-tryboot.txt"
+accepted_transition_prior_kernel="$state_dir/accepted-transition-prior-kernel.img"
+accepted_transition_prior_initramfs="$state_dir/accepted-transition-prior-initramfs.img"
+accepted_transition_candidate_kernel="$state_dir/accepted-transition-candidate-kernel.img"
+accepted_transition_candidate_initramfs="$state_dir/accepted-transition-candidate-initramfs.img"
 accepted_uninstall="$state_dir/accepted-uninstall"
 accepted_uninstall_stock="$state_dir/accepted-uninstall-stock.txt"
 accepted_prior_backlight_rule="$state_dir/accepted-prior-backlight-rule"
@@ -176,6 +180,182 @@ run_dkms() {
 sha() {
   require_regular "$1" || return
   sudo sha256sum -- "$1" | awk '{print $1}'
+}
+
+release_tag12() {
+  local release="$1"
+
+  [[ "$release" =~ ^[A-Za-z0-9._+-]+$ ]] || return
+  printf %s "$release" | sha256sum | awk '{ print substr($1, 1, 12) }'
+}
+
+inactive_candidate_boot_names() {
+  local revision="$1"
+  local release="$2"
+  local tag
+
+  [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || return
+  tag="$(release_tag12 "$release")" || return
+  printf 'hp2r-%s-%s-kernel.img\thp2r-%s-%s-initramfs.img\n' \
+    "${revision:0:12}" "$tag" "${revision:0:12}" "$tag"
+}
+
+assert_firmware_line_cap() {
+  local path="$1"
+
+  require_regular "$path" || return
+  LC_ALL=C sudo awk '{ line=$0; sub(/\r$/, "", line); if (length(line) > 98) exit 1 }' "$path"
+}
+
+assert_supported_inactive_config() {
+  local path="$1"
+  local active='all' line section display_count=0
+
+  require_regular "$path" || return
+  assert_firmware_line_cap "$path" || return
+  while IFS= read -r line || test -n "$line"; do
+    line="${line%$'\r'}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    case "$line" in
+      ''|[[:space:]]\#*) continue ;;
+      \[*\])
+        section="${line#[}"
+        section="${section%]}"
+        case "$section" in all) active=all ;; *) active=conditional ;; esac
+        continue
+        ;;
+    esac
+    case "$line" in
+      include*|*autoboot.txt*|kernel=*|initramfs*|ramfs*|os_prefix=*|overlay_prefix=*) return 1 ;;
+      dtoverlay=*)
+        test "$active" = all || return
+        display_count=$((display_count + 1))
+        case "$line" in
+          dtoverlay=vc4-kms-dpi-hyperpixel2r,*|dtoverlay=vc4-kms-dpi-hyperpixel2r|dtoverlay=hyperpixel2r-kms-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].dtbo) ;;
+          *) return 1 ;;
+        esac
+        ;;
+    esac
+  done < <(sudo cat "$path")
+  test "$display_count" = 1
+}
+
+derive_inactive_tryboot_config() {
+  local source="$1" kernel_file="$2" initramfs_file="$3" overlay_file="$4"
+  local output="$5" workspace="$6"
+
+  assert_private_workspace "$workspace" || return
+  assert_supported_inactive_config "$source" || return
+  write_surgical_stock_config "$source" "$(accepted_value overlay_file)" "$output" "$workspace" || return
+  {
+    printf 'kernel=%s\n' "$kernel_file"
+    printf 'initramfs %s followkernel\n' "$initramfs_file"
+    printf 'dtoverlay=%s\n' "$overlay_file"
+  } | sudo tee -a "$output" >/dev/null || return
+  assert_owned_regular "$output" 600 && assert_firmware_line_cap "$output"
+}
+
+derive_explicit_normal_config() {
+  derive_inactive_tryboot_config "$@"
+}
+
+derive_normalized_normal_config() {
+  local source="$1" overlay_file="$2" output="$3" workspace="$4"
+
+  assert_private_workspace "$workspace" || return
+  assert_supported_inactive_config "$source" || return
+  write_surgical_stock_config "$source" "$(accepted_value overlay_file)" "$output" "$workspace" || return
+  {
+    printf 'auto_initramfs=1\n'
+    printf 'dtoverlay=%s\n' "$overlay_file"
+  } | sudo tee -a "$output" >/dev/null || return
+  assert_owned_regular "$output" 600 && assert_firmware_line_cap "$output"
+}
+
+assert_no_boot_writers() {
+  local lock
+
+  for lock in \
+    "$root/var/lib/dpkg/lock" "$root/var/lib/dpkg/lock-frontend" \
+    "$root/run/lock/apt" "$root/run/lock/update-initramfs" \
+    "$root/run/lock/hyperpixel2r-kms" "$root/run/lock/hp2r-boot-selector"
+  do
+    test ! -L "$lock" || return
+    if sudo test -e "$lock"; then
+      require_regular "$lock" || return
+      command -v fuser >/dev/null 2>&1 || return
+      sudo fuser -s -- "$lock" >/dev/null 2>&1 && return
+    fi
+  done
+}
+
+assert_transition_space() {
+  local private_need="$1" firmware_need="$2" private_avail firmware_avail margin=1048576
+
+  [[ "$private_need" =~ ^[0-9]+$ ]] && [[ "$firmware_need" =~ ^[0-9]+$ ]] || return
+  private_avail="$(df -Pk "$state_dir" | awk 'END { print $4 * 1024 }')" || return
+  firmware_avail="$(df -Pk "$(dirname "$normal_config")" | awk 'END { print $4 * 1024 }')" || return
+  test "$private_avail" -ge $((private_need + margin)) &&
+    test "$firmware_avail" -ge $((firmware_need + margin))
+}
+
+assert_inactive_companions() {
+  local prior_kernel_sha="$1" prior_initramfs_sha="$2" candidate_kernel_sha="$3" candidate_initramfs_sha="$4"
+
+  for pair in \
+    "$accepted_transition_prior_kernel:$prior_kernel_sha" \
+    "$accepted_transition_prior_initramfs:$prior_initramfs_sha" \
+    "$accepted_transition_candidate_kernel:$candidate_kernel_sha" \
+    "$accepted_transition_candidate_initramfs:$candidate_initramfs_sha"
+  do
+    local path="${pair%%:*}" expected="${pair#*:}"
+    assert_owned_regular "$path" 600 || return
+    test "$(sha "$path")" = "$expected" || return
+  done
+}
+
+recover_inactive_orphan_companions() {
+  local prior_kernel="$1" prior_initramfs="$2" candidate_kernel="$3" candidate_initramfs="$4"
+  local path source found=false
+  local -a paths=(
+    "$accepted_transition_prior_kernel"
+    "$accepted_transition_prior_initramfs"
+    "$accepted_transition_candidate_kernel"
+    "$accepted_transition_candidate_initramfs"
+  )
+  local -a sources=("$prior_kernel" "$prior_initramfs" "$candidate_kernel" "$candidate_initramfs")
+  local index
+
+  test ! -L "$accepted_transition" && test ! -e "$accepted_transition" || return
+  if sudo test -L "$accepted_transition_prior_config"; then
+    return
+  elif sudo test -e "$accepted_transition_prior_config"; then
+    assert_owned_regular "$accepted_transition_prior_config" 600 || return
+    assert_owned_regular "$normal_config" boot || return
+    test "$(sha "$accepted_transition_prior_config")" = "$(accepted_value normal_config_sha256)" || return
+    test "$(sha "$normal_config")" = "$(accepted_value normal_config_sha256)" || return
+    found=true
+  fi
+  test ! -L "$accepted_transition_prior_tryboot" && test ! -e "$accepted_transition_prior_tryboot" || return
+  for index in "${!paths[@]}"; do
+    path="${paths[$index]}"
+    source="${sources[$index]}"
+    test ! -L "$path" || return
+    if sudo test -e "$path"; then
+      found=true
+      assert_owned_regular "$path" 600 || return
+      require_regular "$source" || return
+      test "$(sha "$path")" = "$(sha "$source")" || return
+    fi
+  done
+  "$found" || return 0
+  for path in "${paths[@]}"; do
+    if sudo test -e "$path"; then sudo rm -- "$path" || return; fi
+  done
+  if sudo test -e "$accepted_transition_prior_config"; then
+    sudo rm -- "$accepted_transition_prior_config" || return
+  fi
 }
 
 require_regular() {
@@ -4108,14 +4288,41 @@ publish_accepted_transition() {
   local prior_tryboot_existed="${16:-false}"
   local prior_tryboot_sha="${17:-none}"
   local prior_tryboot_snapshot="${18:-}"
+  local target_identity_sha256="${19:-}"
+  local prior_kernel_snapshot="${20:-}"
+  local prior_initramfs_snapshot="${21:-}"
+  local candidate_kernel_snapshot="${22:-}"
+  local candidate_initramfs_snapshot="${23:-}"
+  local candidate_base_dtb_sha="${24:-}"
+  local candidate_vc4_overlay_sha="${25:-}"
   local prior_sha candidate_sha state_tmp state_sha candidate_artifact candidate_inventory_sha
   local accepted_schema transition_schema prior_backlight_rule_existed prior_backlight_rule_sha prior_rule_snapshot=''
+  local prior_kernel_sha prior_initramfs_sha candidate_kernel_sha candidate_initramfs_sha
+  local candidate_kernel_file candidate_initramfs_file
 
   prior_sha="$(sha "$prior_snapshot")" || return
   candidate_sha="$(sha "$candidate_snapshot")" || return
   if test "$kind" = new; then
     candidate_inventory_sha=pending
-    transition_schema=5
+    if test -n "$target_identity_sha256"; then
+      [[ "$target_identity_sha256" =~ ^[0-9a-f]{64}$ ]] || return
+      IFS=$'\t' read -r candidate_kernel_file candidate_initramfs_file <<<"$(
+        inactive_candidate_boot_names "$candidate_revision" "$candidate_release"
+      )" || return
+      for source in "$prior_kernel_snapshot" "$prior_initramfs_snapshot" \
+        "$candidate_kernel_snapshot" "$candidate_initramfs_snapshot"; do
+        assert_owned_regular "$source" 600 || return
+      done
+      prior_kernel_sha="$(sha "$prior_kernel_snapshot")" || return
+      prior_initramfs_sha="$(sha "$prior_initramfs_snapshot")" || return
+      candidate_kernel_sha="$(sha "$candidate_kernel_snapshot")" || return
+      candidate_initramfs_sha="$(sha "$candidate_initramfs_snapshot")" || return
+      [[ "$candidate_base_dtb_sha" =~ ^[0-9a-f]{64}$ ]] || return
+      [[ "$candidate_vc4_overlay_sha" =~ ^[0-9a-f]{64}$ ]] || return
+      transition_schema=6
+    else
+      transition_schema=5
+    fi
     case "$prior_tryboot_existed" in
       true)
         [[ "$prior_tryboot_sha" =~ ^[0-9a-f]{64}$ ]] || return
@@ -4186,17 +4393,44 @@ publish_accepted_transition() {
     printf 'candidate_backlight_rule_sha256=%s\n' "$candidate_backlight_rule_sha"
     printf 'prior_backlight_rule_existed=%s\n' "$prior_backlight_rule_existed"
     printf 'prior_backlight_rule_sha256=%s\n' "$prior_backlight_rule_sha"
-    if test "$transition_schema" = 5; then
+    if test "$transition_schema" = 5 || test "$transition_schema" = 6; then
       printf 'prior_tryboot_existed=%s\n' "$prior_tryboot_existed"
       printf 'prior_tryboot_sha256=%s\n' "$prior_tryboot_sha"
+    fi
+    if test "$transition_schema" = 6; then
+      printf 'target_identity_sha256=%s\n' "$target_identity_sha256"
+      printf 'boot_transition=inactive-kernel\n'
+      printf 'prior_normal_kernel_sha256=%s\n' "$prior_kernel_sha"
+      printf 'prior_normal_initramfs_sha256=%s\n' "$prior_initramfs_sha"
+      printf 'candidate_kernel_file=%s\n' "$candidate_kernel_file"
+      printf 'candidate_kernel_sha256=%s\n' "$candidate_kernel_sha"
+      printf 'candidate_initramfs_file=%s\n' "$candidate_initramfs_file"
+      printf 'candidate_initramfs_sha256=%s\n' "$candidate_initramfs_sha"
+      printf 'candidate_base_dtb_sha256=%s\n' "$candidate_base_dtb_sha"
+      printf 'candidate_vc4_overlay_sha256=%s\n' "$candidate_vc4_overlay_sha"
+      printf 'explicit_normal_config_sha256=pending\n'
+      printf 'normalized_normal_config_sha256=pending\n'
     fi
   } | sudo tee "$state_tmp" >/dev/null || return
   state_sha="$(sha "$state_tmp")" || return
   atomic_copy "$prior_snapshot" "$accepted_transition_prior_config" 600 "$prior_sha" || return
-  if test "$transition_schema" = 5 && test "$prior_tryboot_existed" = true; then
+  if { test "$transition_schema" = 5 || test "$transition_schema" = 6; } && test "$prior_tryboot_existed" = true; then
     atomic_copy "$prior_tryboot_snapshot" "$accepted_transition_prior_tryboot" 600 \
       "$prior_tryboot_sha" || return
     fixture_interrupt_after accepted-transition-prior-tryboot-published
+  fi
+  if test "$transition_schema" = 6; then
+    atomic_copy "$prior_kernel_snapshot" "$accepted_transition_prior_kernel" 600 "$prior_kernel_sha" || return
+    fixture_interrupt_after accepted-transition-prior-kernel-published
+    atomic_copy "$prior_initramfs_snapshot" "$accepted_transition_prior_initramfs" 600 "$prior_initramfs_sha" || return
+    fixture_interrupt_after accepted-transition-prior-initramfs-published
+    atomic_copy "$candidate_kernel_snapshot" "$accepted_transition_candidate_kernel" 600 "$candidate_kernel_sha" || return
+    fixture_interrupt_after accepted-transition-candidate-kernel-published
+    atomic_copy "$candidate_initramfs_snapshot" "$accepted_transition_candidate_initramfs" 600 "$candidate_initramfs_sha" || return
+    fixture_interrupt_after accepted-transition-candidate-initramfs-published
+    assert_inactive_companions "$prior_kernel_sha" "$prior_initramfs_sha" \
+      "$candidate_kernel_sha" "$candidate_initramfs_sha" || return
+    fixture_interrupt_after accepted-transition-before-journal-published
   fi
   atomic_copy "$state_tmp" "$accepted_transition" 600 "$state_sha" || return
   assert_accepted_transition || return
@@ -4272,6 +4506,11 @@ prepare_new_accepted() {
   local candidate_vc4_overlay_sha256="${15-}"
   local prior_version prior_status workspace prior_snapshot stock candidate stock_sha
   local prior_artifact prior_tryboot_existed prior_tryboot_sha prior_tryboot_snapshot=''
+  local inactive=false prior_release prior_module_path prior_overlay_path candidate_module_root
+  local prior_kernel_path prior_initramfs_path candidate_kernel_path candidate_initramfs_path
+  local base_dtb_path vc4_overlay_path prior_kernel_snapshot='' prior_initramfs_snapshot=''
+  local candidate_kernel_snapshot='' candidate_initramfs_snapshot='' base_dtb_snapshot='' vc4_snapshot=''
+  local explicit_normal='' normalized_normal='' transition_private_need=0 transition_firmware_need=0
 
   assert_accepted_state || die 'accepted driver state is missing or unsafe'
   case "$#" in
@@ -4283,16 +4522,24 @@ prepare_new_accepted() {
         [[ "$candidate_base_dtb_sha256" =~ ^[0-9a-f]{64}$ ]] &&
         [[ "$candidate_vc4_overlay_sha256" =~ ^[0-9a-f]{64}$ ]] ||
         die 'unsafe inactive target provenance'
+      inactive=true
       ;;
     *) die 'unexpected accepted preparation provenance' ;;
   esac
   test ! -L "$accepted_transition" && test ! -e "$accepted_transition" ||
     die 'an accepted driver transition is already active'
-  test ! -L "$accepted_transition_prior_config" && test ! -e "$accepted_transition_prior_config" ||
-    die 'orphan accepted transition config exists'
-  test ! -L "$accepted_transition_prior_tryboot" && \
-    test ! -e "$accepted_transition_prior_tryboot" ||
-    die 'orphan accepted transition prior tryboot exists'
+  if ! "$inactive"; then
+    test ! -L "$accepted_transition_prior_config" && test ! -e "$accepted_transition_prior_config" ||
+      die 'orphan accepted transition config exists'
+    test ! -L "$accepted_transition_prior_tryboot" && \
+      test ! -e "$accepted_transition_prior_tryboot" ||
+      die 'orphan accepted transition prior tryboot exists'
+    for companion in "$accepted_transition_prior_kernel" "$accepted_transition_prior_initramfs" \
+      "$accepted_transition_candidate_kernel" "$accepted_transition_candidate_initramfs"; do
+      test ! -L "$companion" && test ! -e "$companion" ||
+        die 'orphan inactive transition companion exists'
+    done
+  fi
   test ! -L "$state_file" && test ! -e "$state_file" ||
     die 'a legacy tryboot transaction is active'
   [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'unsafe candidate driver version'
@@ -4312,6 +4559,7 @@ prepare_new_accepted() {
     "$(accepted_value driver_version):$(accepted_value source_revision):$(accepted_value kernel_release)" ||
     die 'candidate is already accepted'
   prior_version="$(accepted_value driver_version)"
+  prior_release="$(accepted_value kernel_release)"
   prior_status="$(validate_dkms_status "$prior_version")" ||
     die 'accepted prior DKMS status is invalid'
   case "$prior_status" in absent|unregistered|registered) ;; *) die 'accepted prior DKMS status is invalid';; esac
@@ -4319,6 +4567,55 @@ prepare_new_accepted() {
     die 'accepted normal config drifted before transition'
   prior_artifact="$(accepted_prior_artifact_path)" ||
     die 'accepted prior artifact is unsafe'
+  if "$inactive"; then
+    test "$release" != "$prior_release" ||
+      die 'inactive accepted preparation requires a different kernel release'
+    assert_supported_inactive_config "$normal_config" ||
+      die 'inactive accepted preparation requires one unconditional display selection'
+    test ! -L "$tryboot_config" && test ! -e "$tryboot_config" ||
+      die 'inactive accepted preparation requires no generic tryboot state'
+    prior_module_path="${root}/lib/modules/$prior_release/extra/$(accepted_value module_file)"
+    prior_overlay_path="${root}/boot/firmware/overlays/$(accepted_value overlay_file)"
+    assert_owned_regular "$prior_module_path" 644 &&
+      test "$(sha "$prior_module_path")" = "$(accepted_value module_sha256)" &&
+      assert_owned_regular "$prior_overlay_path" boot &&
+      test "$(sha "$prior_overlay_path")" = "$(accepted_value overlay_sha256)" ||
+      die 'accepted conventional module or overlay pair drifted'
+    prior_kernel_path="${root}/boot/vmlinuz-$prior_release"
+    prior_initramfs_path="${root}/boot/initrd.img-$prior_release"
+    candidate_kernel_path="${root}/boot/vmlinuz-$release"
+    candidate_initramfs_path="${root}/boot/initrd.img-$release"
+    candidate_module_root="${root}/lib/modules/$release"
+    base_dtb_path="${root}/boot/firmware/bcm2710-rpi-zero-2-w.dtb"
+    vc4_overlay_path="${root}/boot/firmware/overlays/vc4-kms-v3d.dtbo"
+    for source in "$prior_kernel_path" "$prior_initramfs_path" \
+      "$candidate_kernel_path" "$candidate_initramfs_path" "$base_dtb_path" "$vc4_overlay_path"; do
+      require_regular "$source" || die 'inactive boot source is missing or unsafe'
+    done
+    test "$(sha "$candidate_kernel_path")" = "$candidate_kernel_sha256" ||
+      die 'candidate kernel source differs from target export'
+    test "$(sha "$candidate_initramfs_path")" = "$candidate_initramfs_sha256" ||
+      die 'candidate initramfs source differs from target export'
+    test "$(sha "$base_dtb_path")" = "$candidate_base_dtb_sha256" ||
+      die 'candidate base DTB differs from target export'
+    test "$(sha "$vc4_overlay_path")" = "$candidate_vc4_overlay_sha256" ||
+      die 'candidate shared VC4 overlay differs from target export'
+    assert_owned_dir "$candidate_module_root" ||
+      die 'candidate module source is missing or unsafe'
+    require_regular "${root}/var/lib/dpkg/info/linux-image-$release.list" ||
+      die 'candidate package source is missing or unsafe'
+    assert_no_boot_writers || die 'a boot/package writer is active'
+    recover_inactive_orphan_companions "$prior_kernel_path" "$prior_initramfs_path" \
+      "$candidate_kernel_path" "$candidate_initramfs_path" ||
+      die 'inactive orphan companions are unsafe for recovery'
+    transition_private_need=$(($(sudo stat -c '%s' "$prior_kernel_path") + \
+      $(sudo stat -c '%s' "$prior_initramfs_path") + \
+      $(sudo stat -c '%s' "$candidate_kernel_path") + \
+      $(sudo stat -c '%s' "$candidate_initramfs_path")))
+    transition_firmware_need="$transition_private_need"
+    assert_transition_space "$transition_private_need" "$transition_firmware_need" ||
+      die 'insufficient space for inactive transition authority'
+  fi
   if sudo test -L "$tryboot_config"; then
     die 'accepted prior tryboot config is unsafe'
   elif sudo test -e "$tryboot_config"; then
@@ -4348,6 +4645,32 @@ prepare_new_accepted() {
   fi
   prior_snapshot="$(privileged_snapshot "$normal_config" "$workspace" accepted-prior)" ||
     die 'failed to snapshot accepted normal config'
+  if "$inactive"; then
+    prior_kernel_snapshot="$(privileged_snapshot "$prior_kernel_path" "$workspace" prior-kernel)" || die 'failed to snapshot prior kernel'
+    prior_initramfs_snapshot="$(privileged_snapshot "$prior_initramfs_path" "$workspace" prior-initramfs)" || die 'failed to snapshot prior initramfs'
+    candidate_kernel_snapshot="$(privileged_snapshot "$candidate_kernel_path" "$workspace" candidate-kernel)" || die 'failed to snapshot candidate kernel'
+    candidate_initramfs_snapshot="$(privileged_snapshot "$candidate_initramfs_path" "$workspace" candidate-initramfs)" || die 'failed to snapshot candidate initramfs'
+    base_dtb_snapshot="$(privileged_snapshot "$base_dtb_path" "$workspace" candidate-base-dtb)" || die 'failed to snapshot candidate base DTB'
+    vc4_snapshot="$(privileged_snapshot "$vc4_overlay_path" "$workspace" candidate-vc4-overlay)" || die 'failed to snapshot candidate VC4 overlay'
+    test "$(sha "$normal_config")" = "$(sha "$prior_snapshot")" &&
+      test "$(sha "$prior_kernel_path")" = "$(sha "$prior_kernel_snapshot")" &&
+      test "$(sha "$prior_initramfs_path")" = "$(sha "$prior_initramfs_snapshot")" &&
+      test "$(sha "$candidate_kernel_path")" = "$(sha "$candidate_kernel_snapshot")" &&
+      test "$(sha "$candidate_initramfs_path")" = "$(sha "$candidate_initramfs_snapshot")" &&
+      test "$(sha "$base_dtb_path")" = "$(sha "$base_dtb_snapshot")" &&
+      test "$(sha "$vc4_overlay_path")" = "$(sha "$vc4_snapshot")" ||
+      die 'inactive live source changed while capturing authority'
+    IFS=$'\t' read -r inactive_kernel_name inactive_initramfs_name <<<"$(
+      inactive_candidate_boot_names "$revision" "$release"
+    )" || die 'failed to derive inactive firmware names'
+    explicit_normal="$(private_file "$workspace" explicit-normal)" || die 'failed to allocate explicit inactive normal config'
+    derive_explicit_normal_config "$prior_snapshot" "$inactive_kernel_name" \
+      "$inactive_initramfs_name" "$overlay_file" "$explicit_normal" "$workspace" ||
+      die 'failed to derive explicit inactive normal config'
+    normalized_normal="$(private_file "$workspace" normalized-normal)" || die 'failed to allocate normalized inactive normal config'
+    derive_normalized_normal_config "$prior_snapshot" "$overlay_file" "$normalized_normal" "$workspace" ||
+      die 'failed to derive normalized inactive normal config'
+  fi
   stock="$(private_file "$workspace" accepted-stock)" || die 'failed to allocate accepted stock'
   write_surgical_stock_config "$prior_snapshot" "$(accepted_value overlay_file)" "$stock" "$workspace" ||
     die 'accepted normal config cannot be separated from prior driver'
@@ -4361,7 +4684,10 @@ prepare_new_accepted() {
     "$module_file" "$module_sha" "$overlay_file" "$overlay_sha" \
     "$backlight_rule_file" "$backlight_rule_sha" \
     "$prior_snapshot" "$candidate" "$prior_status" "$workspace" \
-    "$prior_tryboot_existed" "$prior_tryboot_sha" "$prior_tryboot_snapshot" ||
+    "$prior_tryboot_existed" "$prior_tryboot_sha" "$prior_tryboot_snapshot" \
+    "$target_identity_sha256" "$prior_kernel_snapshot" "$prior_initramfs_snapshot" \
+    "$candidate_kernel_snapshot" "$candidate_initramfs_snapshot" \
+    "$candidate_base_dtb_sha256" "$candidate_vc4_overlay_sha256" ||
     die 'failed to publish accepted candidate journal'
   remove_transaction_workspace "$workspace" || die 'failed to remove accepted transition workspace'
   accepted_workspace=''
@@ -4398,6 +4724,7 @@ assert_accepted_transition() {
     3) keys=("${accepted_transition_keys[@]}") ;;
     4) keys=("${accepted_transition_keys_v4[@]}") ;;
     5) keys=("${accepted_transition_keys_v5[@]}") ;;
+    6) keys=("${accepted_transition_keys_v6[@]}") ;;
     *) return 1 ;;
   esac
   test "$(sudo awk 'END { print NR }' "$accepted_transition")" = "${#keys[@]}" || return
@@ -4408,7 +4735,7 @@ assert_accepted_transition() {
   done
   kind="$(accepted_transition_value kind)"
   case "$kind" in new|retained) ;; *) return 1;; esac
-  if test "$schema" = 5; then test "$kind" = new || return; fi
+  if test "$schema" = 5 || test "$schema" = 6; then test "$kind" = new || return; fi
   phase="$(accepted_transition_value phase)"
   case "$phase" in prepared|staged|committed|verified|finalizing|receipt_published) ;; *) return 1;; esac
   prior_version="$(accepted_transition_value prior_driver_version)"
@@ -4434,7 +4761,7 @@ assert_accepted_transition() {
   case "$(accepted_transition_value prior_dkms_status)" in absent|unregistered|registered) ;; *) return 1;; esac
   candidate_artifact="$artifact_root/$candidate_version/$candidate_revision/$candidate_release"
   marker="$candidate_artifact/dkms-prior-state"
-  if test "$schema" = 3 || test "$schema" = 4 || test "$schema" = 5; then
+  if test "$schema" = 3 || test "$schema" = 4 || test "$schema" = 5 || test "$schema" = 6; then
     if test "$(accepted_transition_value candidate_dkms_inventory_sha256)" = pending; then
       test "$kind:$phase" = new:prepared || return
     else
@@ -4448,7 +4775,7 @@ assert_accepted_transition() {
     assert_dkms_inventory_file "$marker" || return
     test "$(sudo sed -n '1p' "$marker")" != schema_version=2 || return
   fi
-  if test "$schema" = 4 || test "$schema" = 5; then
+  if test "$schema" = 4 || test "$schema" = 5 || test "$schema" = 6; then
     test "$(accepted_transition_value candidate_backlight_rule_file)" = \
       70-planeradar-backlight.rules || return
     [[ "$(accepted_transition_value candidate_backlight_rule_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
@@ -4483,7 +4810,7 @@ assert_accepted_transition() {
   fi
   test "$(sha "$accepted_transition_prior_config")" = \
     "$(accepted_transition_value prior_normal_config_sha256)" || return
-  if test "$schema" = 5; then
+  if test "$schema" = 5 || test "$schema" = 6; then
     case "$(accepted_transition_value prior_tryboot_existed)" in
       true)
         [[ "$(accepted_transition_value prior_tryboot_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
@@ -4501,6 +4828,31 @@ assert_accepted_transition() {
         ;;
       *) return 1 ;;
     esac
+  fi
+  if test "$schema" = 6; then
+    test "$phase" = prepared || return
+    test "$(accepted_transition_value boot_transition)" = inactive-kernel || return
+    [[ "$(accepted_transition_value target_identity_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
+    test "$(accepted_transition_value prior_driver_version)" = "$(accepted_value driver_version)" || return
+    test "$(accepted_transition_value prior_source_revision)" = "$(accepted_value source_revision)" || return
+    test "$(accepted_transition_value prior_kernel_release)" = "$(accepted_value kernel_release)" || return
+    for key in prior_normal_kernel_sha256 prior_normal_initramfs_sha256 \
+      candidate_kernel_sha256 candidate_initramfs_sha256 candidate_base_dtb_sha256 \
+      candidate_vc4_overlay_sha256; do
+      [[ "$(accepted_transition_value "$key")" =~ ^[0-9a-f]{64}$ ]] || return
+    done
+    IFS=$'\t' read -r inactive_kernel_file inactive_initramfs_file <<<"$(
+      inactive_candidate_boot_names "$candidate_revision" "$candidate_release"
+    )" || return
+    test "$(accepted_transition_value candidate_kernel_file)" = "$inactive_kernel_file" || return
+    test "$(accepted_transition_value candidate_initramfs_file)" = "$inactive_initramfs_file" || return
+    test "$(accepted_transition_value explicit_normal_config_sha256)" = pending || return
+    test "$(accepted_transition_value normalized_normal_config_sha256)" = pending || return
+    assert_inactive_companions \
+      "$(accepted_transition_value prior_normal_kernel_sha256)" \
+      "$(accepted_transition_value prior_normal_initramfs_sha256)" \
+      "$(accepted_transition_value candidate_kernel_sha256)" \
+      "$(accepted_transition_value candidate_initramfs_sha256)" || return
   fi
   if test "$phase" = receipt_published; then
     test "$(accepted_value driver_version)" = "$candidate_version" || return
