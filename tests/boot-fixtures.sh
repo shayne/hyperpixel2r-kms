@@ -459,6 +459,8 @@ if test "${1-}" = bash && test "${2-}" = -s; then
     HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH:-}" \
     HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH:-}" \
     HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH:-}" \
+    schema5_staged_authority_asserting="${schema5_staged_authority_asserting:-}" \
+    schema5_staged_authority_allow_prepared="${schema5_staged_authority_allow_prepared:-}" \
     bash -c 'id -u > "$HP2R_FIXTURE_ROOT/tmp/remote-uid"; exec bash "$@"' bash "$@"; then
     remote_status=0
   else
@@ -494,6 +496,8 @@ if test "${1-}" = bash && { [[ "${2-}" == /tmp/hp2r-tryboot-stage.*/* ]] || [[ "
     HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH:-}" \
     HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH:-}" \
     HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH:-}" \
+    schema5_staged_authority_asserting="${schema5_staged_authority_asserting:-}" \
+    schema5_staged_authority_allow_prepared="${schema5_staged_authority_allow_prepared:-}" \
     bash -c 'id -u > "$HP2R_FIXTURE_ROOT/tmp/remote-uid"; exec bash "$@"' bash "$script" "$@"
   exit
 fi
@@ -3465,6 +3469,23 @@ exercise_inactive_kernel_prepare() {
     fi
     exit 0
   fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-hostile-env; then
+    replace_equals_value "$state_dir/accepted-transition" target_identity_sha256 \
+      dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+    if schema5_staged_authority_asserting=true schema5_staged_authority_allow_prepared=true \
+      run_accepted_remote identity >/dev/null 2>&1; then
+      fail 'preseeded schema5 guards bypassed stale identity rejection'
+    fi
+    if schema5_staged_authority_asserting=true schema5_staged_authority_allow_prepared=true \
+      run_controller commit-boot.sh >/dev/null 2>&1; then
+      fail 'preseeded schema5 guards bypassed stale commit rejection'
+    fi
+    if schema5_staged_authority_asserting=true schema5_staged_authority_allow_prepared=true \
+      run_controller rollback-boot.sh >/dev/null 2>&1; then
+      fail 'preseeded schema5 guards bypassed stale rollback rejection'
+    fi
+    exit 0
+  fi
   if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-commit-rejected; then
     cp "$root/boot/firmware/config.txt" "$fixture/commit-normal-before"
     cp "$root/boot/firmware/tryboot.txt" "$fixture/commit-tryboot-before"
@@ -3570,7 +3591,7 @@ case "${HP2R_FIXTURE_CASE:-}" in
     exercise_inactive_kernel_prepare
     exit 0
     ;;
-  inactive-kernel-phase-authority-drift|inactive-kernel-final-module-drift|inactive-kernel-final-artifact-drift|inactive-kernel-stale-authority|inactive-kernel-commit-rejected)
+  inactive-kernel-phase-authority-drift|inactive-kernel-final-module-drift|inactive-kernel-final-artifact-drift|inactive-kernel-stale-authority|inactive-kernel-hostile-env|inactive-kernel-commit-rejected)
     exercise_inactive_kernel_prepare
     exit 0
     ;;
