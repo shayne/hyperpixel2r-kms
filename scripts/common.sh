@@ -675,7 +675,7 @@ hp2r_validate_inactive_target_manifest() {
   local -a components
 
   hp2r_validate_schema2_target_manifest "$manifest" || return
-  test -d "$root" && test ! -L "$root" || {
+  test ! -L "$root" && test -d "$root" || {
     echo "inactive target export root is missing or a symlink: $root" >&2
     return 1
   }
