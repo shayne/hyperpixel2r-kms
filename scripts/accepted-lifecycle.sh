@@ -135,6 +135,7 @@ case "$action" in
     )
     if test "$kernel_release" != "$running_release"; then
       prepare_args+=(
+        "$target_identity_sha256" \
         "$candidate_kernel_sha256" "$candidate_initramfs_sha256" \
         "$candidate_base_dtb_sha256" "$candidate_vc4_overlay_sha256"
       )

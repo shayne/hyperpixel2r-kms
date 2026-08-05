@@ -118,11 +118,16 @@ if test -n "$requested_release"; then
   candidate_kernel_file="hp2r-${source_revision:0:12}-${release_tag}-kernel.img"
   candidate_initramfs_file="hp2r-${source_revision:0:12}-${release_tag}-initramfs.img"
   authorization="$(ssh "${ssh_options[@]}" "$target" bash -s -- authorize-inactive-stage < "$repo_root/scripts/lifecycle-remote.sh")"
-  IFS=$'\t' read -r authorized_release authorized_kernel_file authorized_kernel_sha \
+  test "${authorization#*$'\n'}" = "$authorization" || {
+    echo 'inactive stage authorization has an unsafe tuple shape' >&2
+    exit 1
+  }
+  IFS=$'\t' read -r authorized_release authorized_target_identity authorized_kernel_file authorized_kernel_sha \
     authorized_initramfs_file authorized_initramfs_sha authorized_base_dtb_sha \
     authorized_vc4_overlay_sha authorized_transition_sha extra <<<"$authorization"
   test -z "${extra:-}" &&
     test "$authorized_release" = "$release" &&
+    test "$authorized_target_identity" = "$target_identity_sha256" &&
     test "$authorized_kernel_file" = "$candidate_kernel_file" &&
     test "$authorized_kernel_sha" = "$candidate_kernel_sha256" &&
     test "$authorized_initramfs_file" = "$candidate_initramfs_file" &&

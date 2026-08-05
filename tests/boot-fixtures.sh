@@ -386,7 +386,7 @@ target="$1"
 shift
 test "$target" = pi@fixture
 if test "${1-}" = uname && test "${2-}" = -r; then
-  printf '%s\n' "$HP2R_FIXTURE_RELEASE"
+  printf '%s\n' "${HP2R_FIXTURE_RUNNING_RELEASE:-$HP2R_FIXTURE_RELEASE}"
   exit
 fi
 if test "${1-}" = mktemp && test "${2-}" = -d; then
@@ -408,6 +408,11 @@ if test "${1-}" = rm && test "${2-}" = -rf; then
   exit
 fi
 if test "${1-}" = bash && test "${2-}" = -s; then
+  if test "${HP2R_FIXTURE_FAIL_INACTIVE_AUTH:-}" = 1 && \
+    test "${4-}" = authorize-inactive-stage; then
+    : > "$HP2R_FIXTURE_ROOT/tmp/inactive-authorization-attempted"
+    exit 91
+  fi
   shift
   if test "${HP2R_FIXTURE_DROP_EMPTY_SSH_ARGS:-}" = 1; then
     filtered=()
@@ -433,6 +438,11 @@ if test "${1-}" = bash && { [[ "${2-}" == /tmp/hp2r-tryboot-stage.*/* ]] || [[ "
   fi
   if test "${HP2R_FIXTURE_ACCEPTED_CONTROLLER:-}" = 1; then
     printf '%s\n' "$@" > "$HP2R_FIXTURE_ROOT/tmp/accepted-controller-remote-command"
+    if test "${HP2R_FIXTURE_CAPTURE_ACCEPTED_PREPARE:-}" = 1 && \
+      test "${1-}" = prepare-new-accepted; then
+      : > "$HP2R_FIXTURE_ROOT/tmp/accepted-prepare-command-captured"
+      exit 92
+    fi
   fi
   setpriv --reuid=65534 --regid=65534 --clear-groups \
     env HP2R_INSTALL_ROOT="$HP2R_FIXTURE_ROOT" PATH="$PATH" \
@@ -1047,6 +1057,80 @@ run_accepted_remote() {
     bash "$repo_root/scripts/lifecycle-remote.sh" "$@"
 }
 
+prepare_inactive_authorization_target() {
+  local state_dir="$root/var/lib/hyperpixel2r-kms"
+  local receipt="$state_dir/accepted-state"
+  local transition="$state_dir/accepted-transition"
+  local prior_config="$state_dir/accepted-transition-prior-config.txt"
+  local candidate_release='6.18.39+rpt-rpi-v8'
+  local candidate_revision='cccccccccccccccccccccccccccccccccccccccc'
+  local release_tag candidate_kernel candidate_initramfs prior_normal_sha
+  local prior_backlight_existed prior_backlight_sha
+
+  new_target
+  run_stage >/dev/null
+  install_live_hardware
+  run_controller commit-boot.sh >/dev/null
+  run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" >/dev/null
+  mkdir -p "$state_dir"
+  cp "$root/boot/firmware/config.txt" "$prior_config"
+  chown root:root "$prior_config"
+  chmod 0600 "$prior_config"
+  prior_normal_sha="$(sha256sum "$prior_config" | awk '{ print $1 }')"
+  test "$prior_normal_sha" = "$(awk -F= '$1 == "normal_config_sha256" { print $2 }' "$receipt")" ||
+    fail 'inactive authorization fixture did not retain the accepted prior config'
+  prior_backlight_existed="$(awk -F= '$1 == "prior_backlight_rule_existed" { print $2 }' "$receipt")"
+  prior_backlight_sha="$(awk -F= '$1 == "prior_backlight_rule_sha256" { print $2 }' "$receipt")"
+  authorization_target_identity_sha256='9999999999999999999999999999999999999999999999999999999999999999'
+  release_tag="$(printf %s "$candidate_release" | sha256sum | awk '{ print substr($1, 1, 12) }')"
+  candidate_kernel="hp2r-${candidate_revision:0:12}-${release_tag}-kernel.img"
+  candidate_initramfs="hp2r-${candidate_revision:0:12}-${release_tag}-initramfs.img"
+  {
+    printf 'schema_version=6\n'
+    printf 'kind=new\n'
+    printf 'phase=prepared\n'
+    printf 'prior_driver_version=%s\n' "$(awk -F= '$1 == "driver_version" { print $2 }' "$receipt")"
+    printf 'prior_source_revision=%s\n' "$(awk -F= '$1 == "source_revision" { print $2 }' "$receipt")"
+    printf 'prior_kernel_release=%s\n' "$(awk -F= '$1 == "kernel_release" { print $2 }' "$receipt")"
+    printf 'candidate_driver_version=0.1.2\n'
+    printf 'candidate_source_revision=%s\n' "$candidate_revision"
+    printf 'candidate_kernel_release=%s\n' "$candidate_release"
+    printf 'candidate_manifest_sha256=%s\n' "$(printf a%.0s {1..64})"
+    printf 'candidate_module_file=hyperpixel2r_kms.ko\n'
+    printf 'candidate_module_sha256=%s\n' "$(printf b%.0s {1..64})"
+    printf 'candidate_overlay_file=hyperpixel2r-kms-cccccccccccc.dtbo\n'
+    printf 'candidate_overlay_sha256=%s\n' "$(printf d%.0s {1..64})"
+    printf 'prior_normal_config_sha256=%s\n' "$prior_normal_sha"
+    printf 'candidate_normal_config_sha256=%s\n' "$(printf e%.0s {1..64})"
+    printf 'tryboot_config_sha256=%s\n' "$(printf e%.0s {1..64})"
+    printf 'prior_dkms_status=registered\n'
+    printf 'candidate_dkms_inventory_sha256=pending\n'
+    printf 'candidate_backlight_rule_file=70-planeradar-backlight.rules\n'
+    printf 'candidate_backlight_rule_sha256=%s\n' "$(printf f%.0s {1..64})"
+    printf 'prior_backlight_rule_existed=%s\n' "$prior_backlight_existed"
+    printf 'prior_backlight_rule_sha256=%s\n' "$prior_backlight_sha"
+    printf 'prior_tryboot_existed=false\n'
+    printf 'prior_tryboot_sha256=none\n'
+    printf 'target_identity_sha256=%s\n' "$authorization_target_identity_sha256"
+    printf 'boot_transition=inactive-kernel\n'
+    printf 'prior_normal_kernel_sha256=%s\n' "$(printf 1%.0s {1..64})"
+    printf 'prior_normal_initramfs_sha256=%s\n' "$(printf 2%.0s {1..64})"
+    printf 'candidate_kernel_file=%s\n' "$candidate_kernel"
+    printf 'candidate_kernel_sha256=%s\n' "$(printf 3%.0s {1..64})"
+    printf 'candidate_initramfs_file=%s\n' "$candidate_initramfs"
+    printf 'candidate_initramfs_sha256=%s\n' "$(printf 4%.0s {1..64})"
+    printf 'candidate_base_dtb_sha256=%s\n' "$(printf 5%.0s {1..64})"
+    printf 'candidate_vc4_overlay_sha256=%s\n' "$(printf 6%.0s {1..64})"
+    printf 'explicit_normal_config_sha256=pending\n'
+    printf 'normalized_normal_config_sha256=pending\n'
+  } > "$transition"
+  chown root:root "$transition"
+  chmod 0600 "$transition"
+  authorization_candidate_release="$candidate_release"
+  authorization_candidate_kernel="$candidate_kernel"
+  authorization_candidate_initramfs="$candidate_initramfs"
+}
+
 run_accepted_controller() {
   PATH="$bin:$PATH" \
     HP2R_FIXTURE_ROOT="$root" \
@@ -1060,6 +1144,32 @@ run_accepted_controller() {
       --driver-version 0.1.1 \
       --source-revision "$source_revision" \
       --kernel-release "$release"
+}
+
+run_accepted_prepare_controller() {
+  local manifest="$repo_root/dist/artifacts/$release/manifest.txt"
+
+  PATH="$bin:$PATH" \
+    HP2R_FIXTURE_ROOT="$root" \
+    HP2R_FIXTURE_RELEASE="$release" \
+    HP2R_FIXTURE_LOG="$log" \
+    HP2R_FIXTURE_REPO_ROOT="$repo_root" \
+    HP2R_FIXTURE_ACCEPTED_CONTROLLER=1 \
+    HP2R_TARGET=pi@fixture \
+    "$repo_root/scripts/accepted-lifecycle.sh" \
+      --action prepare-new \
+      --driver-version 0.1.2 \
+      --source-revision "$source_revision" \
+      --kernel-release "$release" \
+      --kernel-target "$repo_root/dist/kernel-target" \
+      --target-identity-sha256 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+      --manifest-sha256 "$(sha256sum "$manifest" | awk '{ print $1 }')" \
+      --module-file hyperpixel2r_kms.ko \
+      --module-sha256 "$(awk -F '\t' '$1 == "module_sha256" { print $2 }' "$manifest")" \
+      --overlay-file "$overlay_file" \
+      --overlay-sha256 "$(awk -F '\t' '$1 == "overlay_sha256" { print $2 }' "$manifest")" \
+      --backlight-rule-file "$backlight_rule_file" \
+      --backlight-rule-sha256 "$(awk -F '\t' '$1 == "backlight_rule_sha256" { print $2 }' "$manifest")"
 }
 
 prepare_recoverable_record_orphan() {
@@ -1243,7 +1353,7 @@ run_verify() {
     HP2R_FIXTURE_LOG="$log" \
     HP2R_FIXTURE_REPO_ROOT="$repo_root" \
     HP2R_TARGET=pi@fixture \
-    "$repo_root/scripts/verify-boot.sh" --expect-tryboot --json
+    "$repo_root/scripts/verify-boot.sh" --expect-tryboot --json "$@"
 }
 
 assert_verify_rejects_binding() {
@@ -4128,6 +4238,149 @@ assert_absent "$root/usr/src/hyperpixel2r-kms-0.1.1"
 assert_file "$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release/manifest.txt"
 if run_stage >/dev/null 2>&1; then fail 'inactive stored artifact was silently replaced'; fi
 assert_file "$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release/manifest.txt"
+
+# A future schema-6 authority is readable now, before Task 4 owns writing it.
+# The real remote action must return a fixed target-bound authorization tuple.
+prepare_inactive_authorization_target
+authorization_tuple="$(run_accepted_remote authorize-inactive-stage)" ||
+  fail 'read-only inactive authorization rejected an otherwise exact schema-6 fixture'
+test "$(awk -F '\t' 'NF == 9 { count++ } END { print count + 0 }' <<<"$authorization_tuple")" = 1 ||
+  fail 'inactive authorization did not return the target identity in its fixed tuple'
+IFS=$'\t' read -r authorized_release authorized_identity authorized_kernel authorized_kernel_sha \
+  authorized_initramfs authorized_initramfs_sha authorized_base_dtb_sha authorized_vc4_sha \
+  authorized_transition_sha <<<"$authorization_tuple"
+test "$authorized_release" = "$authorization_candidate_release" &&
+  test "$authorized_identity" = "$authorization_target_identity_sha256" &&
+  test "$authorized_kernel" = "$authorization_candidate_kernel" &&
+  test "$authorized_initramfs" = "$authorization_candidate_initramfs" &&
+  [[ "$authorized_kernel_sha" =~ ^[0-9a-f]{64}$ ]] &&
+  [[ "$authorized_initramfs_sha" =~ ^[0-9a-f]{64}$ ]] &&
+  [[ "$authorized_base_dtb_sha" =~ ^[0-9a-f]{64}$ ]] &&
+  [[ "$authorized_vc4_sha" =~ ^[0-9a-f]{64}$ ]] &&
+  test "$authorized_transition_sha" = \
+    "$(sha256sum "$root/var/lib/hyperpixel2r-kms/accepted-transition" | awk '{ print $1 }')" ||
+  fail 'inactive authorization tuple did not exactly bind the candidate authority'
+
+# The remote authority is intentionally fail-closed before the controller can
+# allocate or upload an inactive firmware payload. Exercise malformed rows and
+# every accepted-state binding through the production remote action.
+for authorization_mutation in wrong-target wrong-prior wrong-config duplicate unknown malformed unsafe-name; do
+  prepare_inactive_authorization_target
+  case "$authorization_mutation" in
+    wrong-target)
+      sed -i 's/^target_identity_sha256=.*/target_identity_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+      ;;
+    wrong-prior)
+      sed -i 's/^prior_driver_version=.*/prior_driver_version=9.9.9/' "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+      ;;
+    wrong-config)
+      sed -i 's/^prior_normal_config_sha256=.*/prior_normal_config_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+      ;;
+    duplicate)
+      sed -i 's/^candidate_manifest_sha256=/target_identity_sha256=/' "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+      ;;
+    unknown)
+      sed -i 's/^candidate_manifest_sha256=/unknown_authority=/' "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+      ;;
+    malformed)
+      sed -i 's/^candidate_manifest_sha256=.*/candidate_manifest_sha256=bad=field/' "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+      ;;
+    unsafe-name)
+      sed -i 's|^candidate_kernel_file=.*|candidate_kernel_file=../kernel.img|' "$root/var/lib/hyperpixel2r-kms/accepted-transition"
+      ;;
+  esac
+  if test "$authorization_mutation" = wrong-target; then
+    wrong_target_tmp="$fixture/wrong-target-controller-tmp"
+    mkdir -p "$wrong_target_tmp"
+    rm -f -- "$log"
+    if HP2R_FIXTURE_RUNNING_RELEASE='6.18.33+rpt-rpi-v8' \
+      TMPDIR="$wrong_target_tmp" \
+      run_stage --kernel-release "$release" \
+        --kernel-target "$repo_root/dist/kernel-target" \
+        --target-identity-sha256 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+        --stage-only >/dev/null 2>&1
+    then
+      fail 'inactive stage accepted an authority for a different target identity'
+    fi
+    test -z "$(find "$wrong_target_tmp" -mindepth 1 -print -quit)" ||
+      fail 'wrong target authority allocated a payload before rejection'
+    test ! -e "$log" || ! grep -q '^scp ' "$log" ||
+      fail 'wrong target authority uploaded before rejection'
+  elif run_accepted_remote authorize-inactive-stage >/dev/null 2>&1; then
+    fail "inactive authorization accepted $authorization_mutation authority"
+  fi
+done
+
+# The controller must ask the real remote authority before it creates a local
+# payload or starts a transfer. The fake SSH endpoint fails only that action.
+prepare_inactive_authorization_target
+controller_tmp="$fixture/inactive-authority-controller-tmp"
+mkdir -p "$controller_tmp"
+rm -f -- "$log"
+if HP2R_FIXTURE_RUNNING_RELEASE='6.18.33+rpt-rpi-v8' \
+  HP2R_FIXTURE_FAIL_INACTIVE_AUTH=1 TMPDIR="$controller_tmp" \
+  run_stage --kernel-release "$release" \
+    --kernel-target "$repo_root/dist/kernel-target" \
+    --target-identity-sha256 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+    --stage-only >/dev/null 2>&1
+then
+  fail 'inactive stage accepted a rejected remote authority'
+fi
+assert_file "$root/tmp/inactive-authorization-attempted"
+test -z "$(find "$controller_tmp" -mindepth 1 -print -quit)" ||
+  fail 'inactive stage allocated payload before remote authorization'
+test ! -e "$log" || ! grep -q '^scp ' "$log" ||
+  fail 'inactive stage uploaded before remote authorization'
+
+# Cross-kernel accepted preparation forwards one fixed, typed provenance tuple
+# to the remote writer. Capture the real controller command before the fake
+# receiver writes any transition; Task 4 remains the owner of schema-6 writes.
+prepare_inactive_authorization_target
+if HP2R_FIXTURE_RUNNING_RELEASE='6.18.33+rpt-rpi-v8' \
+  HP2R_FIXTURE_CAPTURE_ACCEPTED_PREPARE=1 \
+  run_accepted_prepare_controller >/dev/null 2>&1
+then
+  fail 'accepted prepare fixture did not stop at the remote command capture'
+fi
+assert_file "$root/tmp/accepted-prepare-command-captured"
+prepare_command="$root/tmp/accepted-controller-remote-command"
+prepare_target_manifest="$repo_root/dist/kernel-target/$release/target.txt"
+test "$(sed -n '1p' "$prepare_command")" = prepare-new-accepted &&
+  test "$(sed -n '12p' "$prepare_command")" = \
+    bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb &&
+  test "$(sed -n '13p' "$prepare_command")" = \
+    "$(awk -F '\t' '$1 == "kernel_image_sha256" { print $2 }' "$prepare_target_manifest")" &&
+  test "$(sed -n '14p' "$prepare_command")" = \
+    "$(awk -F '\t' '$1 == "initramfs_sha256" { print $2 }' "$prepare_target_manifest")" &&
+  test "$(sed -n '15p' "$prepare_command")" = \
+    "$(awk -F '\t' '$1 == "base_dtb_sha256" { print $2 }' "$prepare_target_manifest")" &&
+  test "$(sed -n '16p' "$prepare_command")" = \
+    "$(awk -F '\t' '$1 == "vc4_overlay_sha256" { print $2 }' "$prepare_target_manifest")" &&
+  test "$(awk 'END { print NR }' "$prepare_command")" = 16 ||
+  fail 'accepted prepare did not forward fixed inactive target provenance'
+
+# Supplying inactive-only flags for the running kernel is rejected by the
+# production controller before it can create a stage payload or transfer it.
+new_target
+rm -f -- "$log"
+if run_stage --kernel-release "$release" \
+  --kernel-target "$repo_root/dist/kernel-target" \
+  --target-identity-sha256 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  --stage-only >/dev/null 2>&1
+then
+  fail 'same-kernel stage accepted inactive target authority'
+fi
+test ! -e "$log" || ! grep -q '^scp ' "$log" ||
+  fail 'same-kernel inactive flags reached payload upload'
+
+# Verify must bind an explicitly requested kernel release to a fresh remote
+# uname result, rather than trusting the local candidate state.
+new_target
+run_stage >/dev/null
+install_live_hardware
+if run_verify --expect-kernel-release '6.18.39+rpt-rpi-v8' >/dev/null 2>&1; then
+  fail 'verify accepted a fresh uname kernel-release mismatch'
+fi
 
 # Uninstall must parse overlay declarations structurally: parameters do not
 # make an owned generic overlay safe to ignore.

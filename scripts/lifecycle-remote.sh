@@ -98,6 +98,15 @@ accepted_transition_keys_v5=(
   "${accepted_transition_keys_v4[@]}" prior_tryboot_existed
   prior_tryboot_sha256
 )
+# Schema 6 is deliberately read-only in this release. Task 4 will write it,
+# but target identity is part of the authority contract now.
+accepted_transition_keys_v6=(
+  "${accepted_transition_keys_v5[@]}" target_identity_sha256 boot_transition
+  prior_normal_kernel_sha256 prior_normal_initramfs_sha256
+  candidate_kernel_file candidate_kernel_sha256 candidate_initramfs_file
+  candidate_initramfs_sha256 candidate_base_dtb_sha256 candidate_vc4_overlay_sha256
+  explicit_normal_config_sha256 normalized_normal_config_sha256
+)
 accepted_uninstall_keys_v2=(
   schema_version phase driver_version source_revision kernel_release
   manifest_sha256 module_file module_sha256 overlay_file overlay_sha256
@@ -2319,7 +2328,7 @@ identity() {
 
 authorize_inactive_stage() {
   local schema key count candidate_release candidate_revision release_tag expected_kernel_file
-  local expected_initramfs_file transition_sha
+  local expected_initramfs_file transition_sha target_identity prior_status accepted_schema
   local -a keys=()
 
   assert_accepted_state || die 'accepted driver state is missing or unsafe'
@@ -2329,13 +2338,7 @@ authorize_inactive_stage() {
     die 'accepted candidate prior config is missing or unsafe'
   schema="$(accepted_transition_value schema_version)"
   test "$schema" = 6 || die 'inactive stage requires schema-6 accepted authority'
-  keys=(
-    "${accepted_transition_keys_v5[@]}"
-    boot_transition prior_normal_kernel_sha256 prior_normal_initramfs_sha256
-    candidate_kernel_file candidate_kernel_sha256 candidate_initramfs_file
-    candidate_initramfs_sha256 candidate_base_dtb_sha256 candidate_vc4_overlay_sha256
-    explicit_normal_config_sha256 normalized_normal_config_sha256
-  )
+  keys=("${accepted_transition_keys_v6[@]}")
   test "$(sudo awk 'END { print NR }' "$accepted_transition")" = "${#keys[@]}" ||
     die 'schema-6 accepted authority has an invalid row count'
   sudo awk -F= 'NF != 2 || $1 == "" || $2 == "" { exit 1 }' "$accepted_transition" ||
@@ -2348,6 +2351,32 @@ authorize_inactive_stage() {
     test "$(accepted_transition_value phase)" = prepared &&
     test "$(accepted_transition_value boot_transition)" = inactive-kernel ||
     die 'schema-6 accepted authority is not a prepared inactive candidate'
+  target_identity="$(accepted_transition_value target_identity_sha256)"
+  [[ "$target_identity" =~ ^[0-9a-f]{64}$ ]] ||
+    die 'schema-6 accepted authority has an unsafe target identity'
+  test "$(accepted_transition_value prior_driver_version)" = "$(accepted_value driver_version)" &&
+    test "$(accepted_transition_value prior_source_revision)" = "$(accepted_value source_revision)" &&
+    test "$(accepted_transition_value prior_kernel_release)" = "$(accepted_value kernel_release)" ||
+    die 'schema-6 accepted authority does not bind the current accepted identity'
+  test "$(accepted_transition_value prior_normal_config_sha256)" = \
+    "$(accepted_value normal_config_sha256)" &&
+    test "$(sha "$accepted_transition_prior_config")" = \
+      "$(accepted_value normal_config_sha256)" &&
+    assert_owned_regular "$normal_config" boot &&
+    test "$(sha "$normal_config")" = "$(accepted_value normal_config_sha256)" ||
+    die 'schema-6 accepted authority does not bind the current accepted config'
+  accepted_schema="$(accepted_value schema_version)"
+  test "$accepted_schema" = 3 ||
+    die 'schema-6 accepted authority requires current backlight identity'
+  test "$(accepted_transition_value prior_backlight_rule_existed)" = \
+    "$(accepted_value prior_backlight_rule_existed)" &&
+    test "$(accepted_transition_value prior_backlight_rule_sha256)" = \
+      "$(accepted_value prior_backlight_rule_sha256)" ||
+    die 'schema-6 accepted authority does not bind current accepted backlight identity'
+  prior_status="$(validate_dkms_status "$(accepted_value driver_version)")" ||
+    die 'schema-6 accepted authority cannot validate current accepted DKMS state'
+  test "$(accepted_transition_value prior_dkms_status)" = "$prior_status" ||
+    die 'schema-6 accepted authority does not bind current accepted DKMS state'
   candidate_release="$(accepted_transition_value candidate_kernel_release)"
   candidate_revision="$(accepted_transition_value candidate_source_revision)"
   [[ "$candidate_release" =~ ^[A-Za-z0-9._+-]+$ ]] &&
@@ -2355,8 +2384,20 @@ authorize_inactive_stage() {
     die 'schema-6 accepted authority has an unsafe candidate identity'
   test "$candidate_release" != "$(accepted_value kernel_release)" ||
     die 'schema-6 accepted authority is not cross-kernel'
-  for key in \
-    prior_normal_kernel_sha256 prior_normal_initramfs_sha256 candidate_kernel_sha256 \
+  [[ "$(accepted_transition_value candidate_driver_version)" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] &&
+    [[ "$(accepted_transition_value candidate_manifest_sha256)" =~ ^[0-9a-f]{64}$ ]] &&
+    test "$(accepted_transition_value candidate_module_file)" = hyperpixel2r_kms.ko &&
+    [[ "$(accepted_transition_value candidate_module_sha256)" =~ ^[0-9a-f]{64}$ ]] &&
+    test "$(accepted_transition_value candidate_overlay_file)" = \
+      "hyperpixel2r-kms-${candidate_revision:0:12}.dtbo" &&
+    [[ "$(accepted_transition_value candidate_overlay_sha256)" =~ ^[0-9a-f]{64}$ ]] &&
+    [[ "$(accepted_transition_value candidate_normal_config_sha256)" =~ ^[0-9a-f]{64}$ ]] &&
+    [[ "$(accepted_transition_value tryboot_config_sha256)" =~ ^[0-9a-f]{64}$ ]] &&
+    test "$(accepted_transition_value candidate_dkms_inventory_sha256)" = pending &&
+    test "$(accepted_transition_value candidate_backlight_rule_file)" = 70-planeradar-backlight.rules &&
+    [[ "$(accepted_transition_value candidate_backlight_rule_sha256)" =~ ^[0-9a-f]{64}$ ]] ||
+    die 'schema-6 accepted authority has an unsafe candidate binding'
+  for key in prior_normal_kernel_sha256 prior_normal_initramfs_sha256 candidate_kernel_sha256 \
     candidate_initramfs_sha256 candidate_base_dtb_sha256 candidate_vc4_overlay_sha256; do
     [[ "$(accepted_transition_value "$key")" =~ ^[0-9a-f]{64}$ ]] ||
       die 'schema-6 accepted authority has an unsafe digest'
@@ -2371,8 +2412,8 @@ authorize_inactive_stage() {
     test "$(accepted_transition_value candidate_initramfs_file)" = "$expected_initramfs_file" ||
     die 'schema-6 accepted authority has non-deterministic firmware names'
   transition_sha="$(sha "$accepted_transition")" || die 'failed to hash accepted authority'
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$candidate_release" "$expected_kernel_file" \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$candidate_release" "$target_identity" "$expected_kernel_file" \
     "$(accepted_transition_value candidate_kernel_sha256)" "$expected_initramfs_file" \
     "$(accepted_transition_value candidate_initramfs_sha256)" \
     "$(accepted_transition_value candidate_base_dtb_sha256)" \
@@ -4224,10 +4265,27 @@ prepare_new_accepted() {
   local overlay_sha="$8"
   local backlight_rule_file="$9"
   local backlight_rule_sha="${10}"
+  local target_identity_sha256="${11-}"
+  local candidate_kernel_sha256="${12-}"
+  local candidate_initramfs_sha256="${13-}"
+  local candidate_base_dtb_sha256="${14-}"
+  local candidate_vc4_overlay_sha256="${15-}"
   local prior_version prior_status workspace prior_snapshot stock candidate stock_sha
   local prior_artifact prior_tryboot_existed prior_tryboot_sha prior_tryboot_snapshot=''
 
   assert_accepted_state || die 'accepted driver state is missing or unsafe'
+  case "$#" in
+    10) ;;
+    15)
+      [[ "$target_identity_sha256" =~ ^[0-9a-f]{64}$ ]] &&
+        [[ "$candidate_kernel_sha256" =~ ^[0-9a-f]{64}$ ]] &&
+        [[ "$candidate_initramfs_sha256" =~ ^[0-9a-f]{64}$ ]] &&
+        [[ "$candidate_base_dtb_sha256" =~ ^[0-9a-f]{64}$ ]] &&
+        [[ "$candidate_vc4_overlay_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+        die 'unsafe inactive target provenance'
+      ;;
+    *) die 'unexpected accepted preparation provenance' ;;
+  esac
   test ! -L "$accepted_transition" && test ! -e "$accepted_transition" ||
     die 'an accepted driver transition is already active'
   test ! -L "$accepted_transition_prior_config" && test ! -e "$accepted_transition_prior_config" ||
