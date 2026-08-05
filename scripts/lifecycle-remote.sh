@@ -1127,6 +1127,7 @@ assert_artifact_tree() {
   allowed["$applied_dtb_file"]=1
   allowed[dkms-source]=1
   allowed[dkms-prior-state]=1
+  allowed[dkms-candidate-state]=1
   allowed[prior-dkms]=1
   if test "$manifest_schema" = 2; then
     backlight_rule_file="$(manifest_value "$manifest" backlight_rule_file)"
@@ -1146,7 +1147,7 @@ assert_artifact_tree() {
       assert_source_tree_shape "$entry" || return
     elif test "$name" = prior-dkms; then
       assert_source_tree_shape "$entry" || return
-    elif test "$name" = dkms-prior-state; then
+    elif test "$name" = dkms-prior-state || test "$name" = dkms-candidate-state; then
       assert_owned_regular "$entry" 600 || return
     elif test "$name" = prior-tryboot.txt || test "$name" = prior-backlight-rule; then
       assert_owned_regular "$entry" 600 || return
@@ -2247,7 +2248,7 @@ remove_artifact_tree() {
     sudo rm -f -- "$artifact_dir/$backlight_rule_file" \
       "$artifact_dir/prior-backlight-rule" || return
   fi
-  sudo rm -f -- "$artifact_dir/dkms-prior-state" || return
+  sudo rm -f -- "$artifact_dir/dkms-prior-state" "$artifact_dir/dkms-candidate-state" || return
   if test "$prior" = true; then sudo rm -f -- "$artifact_dir/prior-tryboot.txt" || return; fi
   sudo rmdir -- "$artifact_dir" || return
   sudo rmdir -- "$(dirname "$artifact_dir")" 2>/dev/null || true
@@ -2784,6 +2785,8 @@ stage() {
     capture_dkms_inventory "$driver_version" "$candidate_dkms_inventory" "$rollback_tmp" ||
       die 'failed to capture candidate DKMS inventory'
     candidate_dkms_inventory_sha="$(sha "$candidate_dkms_inventory")" || die 'failed to hash candidate DKMS inventory'
+    atomic_copy "$candidate_dkms_inventory" "$artifact_dir/dkms-candidate-state" 600 \
+      "$candidate_dkms_inventory_sha" || die 'failed to persist candidate DKMS inventory'
   fi
   sudo depmod -a "$release" || die 'failed to refresh candidate module resolution'
   if "$inactive_stage"; then
@@ -5275,6 +5278,9 @@ assert_accepted_transition() {
   case "$(accepted_transition_value prior_dkms_status)" in absent|unregistered|registered) ;; *) return 1;; esac
   candidate_artifact="$artifact_root/$candidate_version/$candidate_revision/$candidate_release"
   marker="$candidate_artifact/dkms-prior-state"
+  if test "$schema" = 6 && test "$(accepted_transition_value candidate_dkms_inventory_sha256)" != pending; then
+    marker="$candidate_artifact/dkms-candidate-state"
+  fi
   if test "$schema" = 3 || test "$schema" = 4 || test "$schema" = 5 || test "$schema" = 6; then
     if test "$(accepted_transition_value candidate_dkms_inventory_sha256)" = pending; then
       test "$kind:$phase" = new:prepared || return
