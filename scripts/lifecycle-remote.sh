@@ -2366,10 +2366,11 @@ stage() {
   firmware_initramfs_path=''
   created_firmware_kernel=false
   created_firmware_initramfs=false
+  phase_published=false
 
   stage_cleanup() {
     local status=$?
-    if test "$status" -ne 0 && ! "$stage_complete"; then
+    if test "$status" -ne 0 && ! "$stage_complete" && ! "$phase_published"; then
       if "$published_state"; then sudo rm -f -- "$state_file" || true; fi
       if "$published_tryboot"; then
         if "$prior_existed"; then atomic_copy "$prior_tryboot" "$tryboot_config" 644 "$prior_sha" true || true
@@ -2841,15 +2842,26 @@ stage() {
         die 'generic stage prior tryboot binding failed validation'
       fi
     fi
+    # Every fallible candidate activation has completed before the durable
+    # prepared -> staged rewrite.  A post-publication interruption therefore
+    # leaves the complete staged state intact instead of a staged journal with
+    # compensated-away leaves.
+    if "$inactive_stage"; then
+      sudo depmod -a "$release" || die 'failed to finalize candidate module dependency map'
+      sudo sync || die 'failed to synchronize inactive candidate before staging journal'
+    fi
     if ! set_accepted_transition_phase prepared staged '' "$prior_dkms_inventory_sha"; then
       schema5_staged_authority_allow_prepared=false
       die 'failed to mark accepted candidate staged'
     fi
     schema5_staged_authority_allow_prepared=false
+    phase_published=true
     fixture_interrupt_after candidate-staged-published
   fi
-  sudo depmod -a "$release"
-  sudo sync
+  if ! "$inactive_stage"; then
+    sudo depmod -a "$release"
+    sudo sync
+  fi
   stage_complete=true
   remove_transaction_workspace "$rollback_tmp" || return 1
   rollback_tmp=''
@@ -3027,6 +3039,8 @@ commit() {
   }
 
   transaction="$(assert_transaction_state)" || die 'candidate transaction is not safe to commit'
+  test "$(state_value schema_version)" != 5 ||
+    die 'inactive-kernel tryboot promotion is not implemented'
   IFS=$'\t' read -r driver_version revision release artifact_dir <<<"$transaction"
   if test "$(state_value schema_version)" = 4; then
     reload_backlight_permissions true || die 'candidate backlight permissions are not operational'
@@ -6736,6 +6750,11 @@ if test "${1-}" != rollback; then
     die 'an unresolved durable rollback blocks this lifecycle action'
   fi
 fi
+
+# These guards are strictly intra-process validation state.  A remote caller
+# must never be able to preseed them through its environment and weaken the
+# schema-5 proof before dispatch reaches a lifecycle action.
+unset schema5_staged_authority_asserting schema5_staged_authority_allow_prepared
 
 case "${1-}" in
   stage) shift; stage "$@" ;;

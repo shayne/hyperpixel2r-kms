@@ -3425,6 +3425,28 @@ exercise_inactive_kernel_prepare() {
     fi
     exit 0
   fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-commit-rejected; then
+    cp "$root/boot/firmware/config.txt" "$fixture/commit-normal-before"
+    cp "$root/boot/firmware/tryboot.txt" "$fixture/commit-tryboot-before"
+    cp "$state_dir/tryboot-state" "$fixture/commit-state-before"
+    cp "$state_dir/accepted-transition" "$fixture/commit-journal-before"
+    cp "$root/boot/firmware/$kernel_name" "$fixture/commit-kernel-before"
+    cp "$root/boot/firmware/$initramfs_name" "$fixture/commit-initramfs-before"
+    if run_controller commit-boot.sh >/dev/null 2>&1; then
+      fail 'generic commit promoted an inactive schema-5 transaction'
+    fi
+    for pair in \
+      "$root/boot/firmware/config.txt:$fixture/commit-normal-before" \
+      "$root/boot/firmware/tryboot.txt:$fixture/commit-tryboot-before" \
+      "$state_dir/tryboot-state:$fixture/commit-state-before" \
+      "$state_dir/accepted-transition:$fixture/commit-journal-before" \
+      "$root/boot/firmware/$kernel_name:$fixture/commit-kernel-before" \
+      "$root/boot/firmware/$initramfs_name:$fixture/commit-initramfs-before"
+    do
+      cmp -s "${pair%%:*}" "${pair#*:}" || fail 'rejected inactive commit changed durable state'
+    done
+    exit 0
+  fi
   if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-rollback; then
     run_controller rollback-boot.sh >/dev/null
     cmp -s "$normal_before" "$root/boot/firmware/config.txt" ||
@@ -3508,7 +3530,7 @@ case "${HP2R_FIXTURE_CASE:-}" in
     exercise_inactive_kernel_prepare
     exit 0
     ;;
-  inactive-kernel-phase-authority-drift|inactive-kernel-stale-authority)
+  inactive-kernel-phase-authority-drift|inactive-kernel-stale-authority|inactive-kernel-commit-rejected)
     exercise_inactive_kernel_prepare
     exit 0
     ;;
