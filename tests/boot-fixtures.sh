@@ -460,6 +460,7 @@ if test "${1-}" = bash && test "${2-}" = -s; then
     HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH:-}" \
     HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH:-}" \
     HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH:-}" \
+    HP2R_FIXTURE_FAIL_AFTER_STAGED_PUBLICATION="${HP2R_FIXTURE_FAIL_AFTER_STAGED_PUBLICATION:-}" \
     HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY="${HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY:-}" \
     schema5_staged_authority_asserting="${schema5_staged_authority_asserting:-}" \
     schema5_staged_authority_allow_prepared="${schema5_staged_authority_allow_prepared:-}" \
@@ -499,6 +500,7 @@ if test "${1-}" = bash && { [[ "${2-}" == /tmp/hp2r-tryboot-stage.*/* ]] || [[ "
     HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH:-}" \
     HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH:-}" \
     HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH:-}" \
+    HP2R_FIXTURE_FAIL_AFTER_STAGED_PUBLICATION="${HP2R_FIXTURE_FAIL_AFTER_STAGED_PUBLICATION:-}" \
     HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY="${HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY:-}" \
     schema5_staged_authority_asserting="${schema5_staged_authority_asserting:-}" \
     schema5_staged_authority_allow_prepared="${schema5_staged_authority_allow_prepared:-}" \
@@ -1139,6 +1141,7 @@ run_stage() {
   local fixture_release="${HP2R_FIXTURE_RELEASE_OVERRIDE:-$release}"
   local fixture_artifact="${HP2R_FIXTURE_ARTIFACT_DIR_OVERRIDE:-$repo_root/dist/artifacts/$release}"
   local fixture_source_root="${HP2R_FIXTURE_SOURCE_ROOT_OVERRIDE:-$repo_root}"
+  local fixture_stage_repo="${HP2R_FIXTURE_STAGE_REPO_OVERRIDE:-$repo_root}"
   local fixture_replace_overlay="${HP2R_FIXTURE_REPLACE_OVERLAY-vc4-kms-dpi-hyperpixel2r}"
   local result
 
@@ -1149,7 +1152,7 @@ run_stage() {
     HP2R_FIXTURE_REPO_ROOT="$fixture_source_root" \
     HP2R_RELEASE_SOURCE_ROOT="${HP2R_RELEASE_SOURCE_ROOT:-}" \
     HP2R_TARGET=pi@fixture \
-    "$repo_root/scripts/stage-tryboot.sh" \
+    "$fixture_stage_repo/scripts/stage-tryboot.sh" \
       --artifact-dir "$fixture_artifact" \
       --replace-overlay "$fixture_replace_overlay" \
       "$@"; then
@@ -3045,6 +3048,7 @@ inactive_mutate_companion() {
 
 exercise_inactive_kernel_prepare() {
   local candidate_release='6.18.39+rpt-rpi-v8'
+  local candidate_driver_version=0.1.1
   if test "${HP2R_FIXTURE_HOSTILE:-}" = config-generated-output-overlong; then
     candidate_release="6.18.39+rpt-rpi-v8-$(printf x%.0s {1..70})"
   fi
@@ -3063,6 +3067,7 @@ exercise_inactive_kernel_prepare() {
   local prior_kernel_before="$fixture/inactive-prior-kernel-before"
   local prior_initramfs_before="$fixture/inactive-prior-initramfs-before"
   local revision12 release_tag kernel_name initramfs_name companion prepared_in_hostile=false accepted_pre_stage_sha
+  local candidate_stage_repo=''
 
   new_target
   if [[ "${HP2R_FIXTURE_INTERRUPT_AFTER:-}" == candidate-* ]]; then
@@ -3093,6 +3098,14 @@ exercise_inactive_kernel_prepare() {
   cp "$candidate_target/root/boot/firmware/overlays/vc4-kms-v3d.dtbo" \
     "$root/boot/firmware/overlays/vc4-kms-v3d.dtbo"
   cp -a "$repo_root/dist/artifacts/$release" "$candidate_artifact"
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-driver-upgrade; then
+    candidate_driver_version=0.1.2
+    replace_manifest_value "$artifact_manifest" driver_version "$candidate_driver_version"
+    candidate_stage_repo="$fixture/inactive-upgrade-stage-source"
+    cp -a "$repo_root" "$candidate_stage_repo"
+    sed -i 's/^HP2R_DRIVER_VERSION="0\.1\.1"$/HP2R_DRIVER_VERSION="0.1.2"/' \
+      "$candidate_stage_repo/scripts/common.sh"
+  fi
   replace_manifest_value "$artifact_manifest" kernel_release "$candidate_release"
   replace_manifest_value "$artifact_manifest" module_vermagic "$candidate_release fixture"
   replace_manifest_value "$candidate_manifest" kernel_release "$candidate_release"
@@ -3115,7 +3128,7 @@ exercise_inactive_kernel_prepare() {
       HP2R_TARGET=pi@fixture \
       scripts/accepted-lifecycle.sh \
         --action prepare-new \
-        --driver-version 0.1.1 \
+        --driver-version "$candidate_driver_version" \
         --source-revision "$source_revision" \
         --kernel-release "$candidate_release" \
         --kernel-target "$candidate_parent" \
@@ -3129,7 +3142,9 @@ exercise_inactive_kernel_prepare() {
         --backlight-rule-sha256 "$(awk -F '\t' '$1 == "backlight_rule_sha256" { print $2 }' "$artifact_manifest")"
   }
   run_inactive_stage() {
-    HP2R_FIXTURE_REPLACE_OVERLAY="$overlay_file" run_stage \
+    HP2R_FIXTURE_REPLACE_OVERLAY="$overlay_file" \
+      HP2R_FIXTURE_STAGE_REPO_OVERRIDE="${candidate_stage_repo:-$repo_root}" \
+      HP2R_FIXTURE_SOURCE_ROOT_OVERRIDE="${candidate_stage_repo:-$repo_root}" run_stage \
       --stage-only \
       --artifact-dir "$candidate_artifact" \
       --kernel-target "$candidate_parent" \
@@ -3408,6 +3423,18 @@ exercise_inactive_kernel_prepare() {
       fail 'setter snapshot did not publish staged authority'
     exit 0
   fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-post-phase-failure; then
+    if HP2R_FIXTURE_FAIL_AFTER_STAGED_PUBLICATION=1 run_inactive_stage >/dev/null 2>&1; then
+      fail 'post-phase fixture did not fail after staged publication'
+    fi
+    grep -Fxq 'phase=staged' "$state_dir/accepted-transition" ||
+      fail 'post-phase failure did not retain staged authority'
+    assert_file "$state_dir/tryboot-state"
+    assert_file "$root/boot/firmware/tryboot.txt"
+    assert_file "$root/boot/firmware/$kernel_name"
+    assert_file "$root/boot/firmware/$initramfs_name"
+    exit 0
+  fi
   if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-foreign-firmware; then
     printf 'foreign inactive firmware leaf\n' > "$root/boot/firmware/$kernel_name"
     chmod 0644 "$root/boot/firmware/$kernel_name"
@@ -3464,7 +3491,7 @@ exercise_inactive_kernel_prepare() {
     fail 'inactive stage did not install the candidate module in its release tree'
   assert_file "$root/boot/firmware/overlays/$overlay_file"
   assert_file "$root/etc/udev/rules.d/$backlight_rule_file"
-  assert_file "$root/usr/src/hyperpixel2r-kms-0.1.1/dkms.conf"
+  assert_file "$root/usr/src/hyperpixel2r-kms-$candidate_driver_version/dkms.conf"
   grep -Fxq "depmod -a $candidate_release" "$log" ||
     fail 'inactive stage did not run depmod for the candidate release'
   grep -Fxq "modinfo -k $candidate_release -F none hyperpixel2r_kms" "$log" ||
@@ -3562,6 +3589,67 @@ exercise_inactive_kernel_prepare() {
     assert_absent "$root/boot/firmware/$initramfs_name"
     assert_absent "$root/lib/modules/$candidate_release/extra/hyperpixel2r_kms.ko"
   fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-driver-upgrade; then
+    local upgrade_artifact="$root/usr/lib/hyperpixel2r-kms/$candidate_driver_version/$source_revision/$candidate_release"
+    test "$candidate_driver_version" != 0.1.1 || fail 'upgrade fixture did not change candidate driver version'
+    assert_file "$upgrade_artifact/dkms-prior-state"
+    assert_file "$upgrade_artifact/dkms-candidate-state"
+    test "$(sed -n '1,3p' "$upgrade_artifact/dkms-prior-state")" = "$(printf '%s\n' \
+      'schema_version=2' 'source_state=absent' 'kernel_count=0')" ||
+      fail 'upgrade rollback inventory was not the exact absent candidate-version pre-state'
+    test "$(sed -n '1,3p' "$upgrade_artifact/dkms-candidate-state")" = "$(printf '%s\n' \
+      'schema_version=2' 'source_state=added' 'kernel_count=0')" ||
+      fail 'upgrade candidate inventory was not the exact post-registration state'
+    grep -Fxq "candidate_driver_version=$candidate_driver_version" "$state_dir/accepted-transition" ||
+      fail 'upgrade staged authority did not bind candidate driver version'
+    run_controller rollback-boot.sh >/dev/null || fail 'upgrade rollback failed'
+    assert_absent "$root/usr/src/hyperpixel2r-kms-$candidate_driver_version"
+    assert_file "$root/usr/src/hyperpixel2r-kms-0.1.1/dkms.conf"
+    exit 0
+  fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-retirement-one; then
+    local foreign="$root/boot/firmware/hp2r-foreign-retirement.img"
+    printf 'foreign firmware must survive retirement\n' > "$foreign"
+    chmod 0644 "$foreign"
+    if HP2R_FIXTURE_INTERRUPT_AFTER="$HP2R_FIXTURE_RETIRE_BOUNDARY" \
+      HP2R_FIXTURE_PRESERVE_MUTATIONS=1 run_controller rollback-boot.sh >/dev/null 2>&1; then
+      fail "inactive retirement ignored interruption: $HP2R_FIXTURE_RETIRE_BOUNDARY"
+    fi
+    assert_file "$state_dir/rollback-state"
+    case "$HP2R_FIXTURE_RETIRE_BOUNDARY" in
+      rollback-retirement-phase-published|rollback-retirement-kernel-removed|rollback-retirement-initramfs-removed)
+        grep -Fxq 'phase=retiring-firmware' "$state_dir/rollback-state" ||
+          fail 'retirement journal did not retain firmware phase'
+        ;;
+      rollback-retirement-before-state-retired|rollback-retirement-state-retired)
+        grep -Fxq 'phase=retiring-state' "$state_dir/rollback-state" ||
+          fail 'retirement journal did not retain generic-state phase'
+        ;;
+    esac
+    # The interruption hook models an abrupt process death by disabling the
+    # remote EXIT trap.  Retire that fixture-only private workspace explicitly
+    # before the fresh process resumes; the durable rollback journal is the
+    # only replay authority, and the normal controller invariant remains that
+    # no private workspace is silently carried into another operation.
+    find "$state_dir" -mindepth 1 -maxdepth 1 -type d -name '.hp2r-transaction.*' \
+      -exec rm -rf -- {} +
+    assert_no_private_workspaces
+    run_controller rollback-boot.sh >/dev/null ||
+      fail "inactive retirement did not resume: $HP2R_FIXTURE_RETIRE_BOUNDARY"
+    cmp -s "$normal_before" "$root/boot/firmware/config.txt" ||
+      fail 'retirement resume changed prior normal config'
+    cmp -s "$prior_kernel_before" "$root$prior_kernel" ||
+      fail 'retirement resume changed prior conventional kernel'
+    cmp -s "$prior_initramfs_before" "$root$prior_initramfs" ||
+      fail 'retirement resume changed prior conventional initramfs'
+    assert_absent "$root/boot/firmware/$kernel_name"
+    assert_absent "$root/boot/firmware/$initramfs_name"
+    assert_absent "$state_dir/tryboot-state"
+    assert_absent "$state_dir/rollback-state"
+    grep -Fxq 'foreign firmware must survive retirement' "$foreign" ||
+      fail 'retirement removed unrelated foreign firmware'
+    exit 0
+  fi
 }
 
 exercise_inactive_kernel_matrix() {
@@ -3610,6 +3698,26 @@ exercise_inactive_kernel_interruptions() {
   test "$count" = 9 || fail 'inactive interruption inventory drifted'
 }
 
+exercise_inactive_kernel_retirement_interruptions() {
+  local boundary count=0
+
+  for boundary in \
+    rollback-retirement-phase-published \
+    rollback-retirement-kernel-removed \
+    rollback-retirement-initramfs-removed \
+    rollback-retirement-before-state-retired \
+    rollback-retirement-state-retired
+  do
+    if HP2R_FIXTURE_CASE=inactive-kernel-retirement-one \
+      HP2R_FIXTURE_RETIRE_BOUNDARY="$boundary" bash "${BASH_SOURCE[0]}" >/dev/null; then
+      count=$((count + 1))
+    else
+      fail "inactive retirement fixture failed: $boundary"
+    fi
+  done
+  test "$count" = 5 || fail 'inactive retirement interruption inventory drifted'
+}
+
 case "${HP2R_FIXTURE_CASE:-}" in
   inactive-kernel)
     exercise_inactive_kernel_prepare
@@ -3628,6 +3736,22 @@ case "${HP2R_FIXTURE_CASE:-}" in
     exit 0
     ;;
   inactive-kernel-rollback)
+    exercise_inactive_kernel_prepare
+    exit 0
+    ;;
+  inactive-kernel-post-phase-failure)
+    exercise_inactive_kernel_prepare
+    exit 0
+    ;;
+  inactive-kernel-retirement-interruptions)
+    exercise_inactive_kernel_retirement_interruptions
+    exit 0
+    ;;
+  inactive-kernel-retirement-one)
+    exercise_inactive_kernel_prepare
+    exit 0
+    ;;
+  inactive-kernel-driver-upgrade)
     exercise_inactive_kernel_prepare
     exit 0
     ;;

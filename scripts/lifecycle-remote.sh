@@ -141,6 +141,10 @@ rollback_keys_v2=(
   "${rollback_keys[@]}" backlight_rule_file backlight_rule_sha256
   prior_backlight_rule_existed prior_backlight_rule_sha256
 )
+rollback_keys_v3=(
+  "${rollback_keys_v2[@]}" candidate_kernel_file candidate_kernel_sha256
+  candidate_initramfs_file candidate_initramfs_sha256
+)
 
 die() {
   printf '%s\n' "$*" >&2
@@ -2415,10 +2419,17 @@ stage() {
   created_firmware_kernel=false
   created_firmware_initramfs=false
   phase_published=false
+  # Set by set_accepted_transition_phase immediately after its atomic write.
+  # It is deliberately distinct from the caller's post-write bookkeeping: a
+  # failed workspace cleanup or assertion after that write must never make the
+  # EXIT trap compensate a transaction whose durable authority is already
+  # staged.
+  inactive_phase_committed=false
 
   stage_cleanup() {
     local status=$?
-    if test "$status" -ne 0 && ! "$stage_complete" && ! "$phase_published"; then
+    if test "$status" -ne 0 && ! "$stage_complete" && ! "$phase_published" &&
+      ! "$inactive_phase_committed"; then
       if "$published_state"; then sudo rm -f -- "$state_file" || true; fi
       if "$published_tryboot"; then
         if "$prior_existed"; then atomic_copy "$prior_tryboot" "$tryboot_config" 644 "$prior_sha" true || true
@@ -2594,7 +2605,12 @@ stage() {
     firmware_kernel_path="${root}/boot/firmware/$candidate_kernel_file"
     firmware_initramfs_path="${root}/boot/firmware/$candidate_initramfs_file"
     accepted_prior_dkms_state="$(accepted_transition_value prior_dkms_status)"
-    if test "$accepted_prior_dkms_state" != "$prior_dkms_state"; then
+    # A real driver upgrade has two independent DKMS namespaces: the accepted
+    # predecessor inventory belongs to prior_driver_version, while
+    # dkms-prior-state is the rollback pre-state for candidate_driver_version.
+    # Do not force those inventories to compare equal.
+    if test "$(accepted_transition_value prior_driver_version)" = "$driver_version" &&
+      test "$accepted_prior_dkms_state" != "$prior_dkms_state"; then
       case "$accepted_prior_dkms_state:$prior_dkms_state" in
         registered:added|registered:built|registered:installed) ;;
         *) die 'inactive accepted authority differs from staged DKMS precondition' ;;
@@ -2624,7 +2640,8 @@ stage() {
         "$(sha "$candidate")" ||
       die 'accepted candidate journal differs from staged preconditions'
     accepted_prior_dkms_state="$(accepted_transition_value prior_dkms_status)"
-    if test "$accepted_prior_dkms_state" != "$prior_dkms_state"; then
+    if test "$(accepted_transition_value prior_driver_version)" = "$driver_version" &&
+      test "$accepted_prior_dkms_state" != "$prior_dkms_state"; then
       case "$accepted_prior_dkms_state:$prior_dkms_state" in
         registered:added|registered:built|registered:installed) ;;
         *) die 'accepted candidate journal differs from staged preconditions' ;;
@@ -2923,6 +2940,9 @@ stage() {
     schema5_staged_authority_allow_prepared=false
     phase_published=true
     fixture_interrupt_after candidate-staged-published
+    if test "${HP2R_FIXTURE_FAIL_AFTER_STAGED_PUBLICATION:-}" = 1; then
+      die 'fixture failure after staged authority publication'
+    fi
   fi
   if ! "$inactive_stage"; then
     sudo depmod -a "$release"
@@ -3196,7 +3216,7 @@ assert_rollback_module_state() {
       prepared:true:false|prepared:false:true) ;;
       candidate-held:false:true) ;;
       prior-restored:false:true|prior-restored:true:false) ;;
-      boot-restored:true:false|depmod-verified:true:false) ;;
+      boot-restored:true:false|depmod-verified:true:false|retiring-firmware:true:false|retiring-state:true:false) ;;
       *) echo 'forward shared-module rollback state is ambiguous' >&2; return 1 ;;
     esac
   else
@@ -3204,7 +3224,7 @@ assert_rollback_module_state() {
       prepared:true:false|prepared:false:true) ;;
       candidate-held:false:true) ;;
       prior-restored:false:true|prior-restored:false:false) ;;
-      boot-restored:false:false|depmod-verified:false:false) ;;
+      boot-restored:false:false|depmod-verified:false:false|retiring-firmware:false:false|retiring-state:false:false) ;;
       *) echo 'forward rollback module and hold state is ambiguous' >&2; return 1 ;;
     esac
   fi
@@ -3319,7 +3339,7 @@ assert_rollback_boot_state() {
       }
       test "$rule_candidate" = true || test "$rule_prior" = true || return 1
       ;;
-    boot-restored|depmod-verified)
+    boot-restored|depmod-verified|retiring-firmware|retiring-state)
       test "$tryboot_prior:$overlay_prior:$rule_prior" = true:true:true || {
         echo 'forward rollback restored boot state drifted' >&2
         return 1
@@ -3341,6 +3361,7 @@ assert_rollback_journal() {
   case "$schema" in
     1) expected_keys=("${rollback_keys[@]}") ;;
     2) expected_keys=("${rollback_keys_v2[@]}") ;;
+    3) expected_keys=("${rollback_keys_v3[@]}") ;;
     *) return 1 ;;
   esac
   test "$(sudo awk 'END { print NR }' "$rollback_state")" = "${#expected_keys[@]}" ||
@@ -3355,7 +3376,7 @@ assert_rollback_journal() {
   phase="$(rollback_value phase)"
   case "$mode" in rollback|compensate) ;; *) return 1 ;; esac
   case "$phase" in
-    prepared|candidate-held|prior-restored|boot-restored|depmod-verified) ;;
+    prepared|candidate-held|prior-restored|boot-restored|depmod-verified|retiring-firmware|retiring-state) ;;
     *) return 1 ;;
   esac
   version="$(rollback_value driver_version)"
@@ -3400,7 +3421,7 @@ assert_rollback_journal() {
   test "$(manifest_value "$manifest" overlay_file)" = "$overlay_file" || return
   test "$(manifest_value "$manifest" overlay_sha256)" = "$overlay_sha" || return
   test "$(sha "$artifact/dkms-prior-state")" = "$prior_inventory_sha" || return
-  if test "$schema" = 2; then
+  if test "$schema" = 2 || test "$schema" = 3; then
     rb_backlight_rule_file="$(rollback_value backlight_rule_file)"
     rb_backlight_rule_sha="$(rollback_value backlight_rule_sha256)"
     rb_prior_backlight_rule_existed="$(rollback_value prior_backlight_rule_existed)"
@@ -3424,6 +3445,19 @@ assert_rollback_journal() {
     rb_prior_backlight_rule_sha=none
   fi
 
+  if test "$schema" = 3; then
+    rb_firmware_kernel_file="$(rollback_value candidate_kernel_file)"
+    rb_firmware_kernel_sha="$(rollback_value candidate_kernel_sha256)"
+    rb_firmware_initramfs_file="$(rollback_value candidate_initramfs_file)"
+    rb_firmware_initramfs_sha="$(rollback_value candidate_initramfs_sha256)"
+    IFS=$'\t' read -r expected_kernel_file expected_initramfs_file <<<"$(
+      inactive_candidate_boot_names "$revision" "$release"
+    )" || return
+    test "$rb_firmware_kernel_file" = "$expected_kernel_file" &&
+      test "$rb_firmware_initramfs_file" = "$expected_initramfs_file" &&
+      [[ "$rb_firmware_kernel_sha" =~ ^[0-9a-f]{64}$ ]] &&
+      [[ "$rb_firmware_initramfs_sha" =~ ^[0-9a-f]{64}$ ]] || return
+  fi
   if sudo test -L "$state_file"; then
     return 1
   elif sudo test -e "$state_file"; then
@@ -3435,7 +3469,7 @@ assert_rollback_journal() {
     test "$(state_value module_sha256)" = "$module_sha" || return
     test "$(state_value overlay_sha256)" = "$overlay_sha" || return
   else
-    test "$mode:$phase" = rollback:depmod-verified || return
+    test "$mode:$phase" = rollback:retiring-state || return
     finalizing=true
   fi
   if test "$mode:$phase" = compensate:depmod-verified; then
@@ -3453,6 +3487,31 @@ assert_rollback_journal() {
   rb_overlay_existed="$(rollback_value overlay_existed)"
   rb_overlay_path="${root}/boot/firmware/overlays/$overlay_file"
   rb_overlay_sha="$overlay_sha"
+  if test "$schema" = 3; then
+    rb_inactive=true
+    rb_firmware_kernel_path="${root}/boot/firmware/$rb_firmware_kernel_file"
+    rb_firmware_initramfs_path="${root}/boot/firmware/$rb_firmware_initramfs_file"
+    case "$phase" in
+      retiring-firmware|retiring-state)
+        for rb_firmware_path_sha in \
+          "$rb_firmware_kernel_path:$rb_firmware_kernel_sha" \
+          "$rb_firmware_initramfs_path:$rb_firmware_initramfs_sha"; do
+          rb_firmware_path="${rb_firmware_path_sha%%:*}"
+          rb_firmware_sha="${rb_firmware_path_sha#*:}"
+          if sudo test -e "$rb_firmware_path" || sudo test -L "$rb_firmware_path"; then
+            assert_owned_regular "$rb_firmware_path" boot || return
+            test "$(sha "$rb_firmware_path")" = "$rb_firmware_sha" || return
+          fi
+        done
+        ;;
+      *)
+        assert_owned_regular "$rb_firmware_kernel_path" boot &&
+          test "$(sha "$rb_firmware_kernel_path")" = "$rb_firmware_kernel_sha" &&
+          assert_owned_regular "$rb_firmware_initramfs_path" boot &&
+          test "$(sha "$rb_firmware_initramfs_path")" = "$rb_firmware_initramfs_sha" || return
+        ;;
+    esac
+  fi
   assert_rollback_module_state || return
 
   if "$finalizing" || "$auxiliaries_optional"; then
@@ -3486,12 +3545,14 @@ write_rollback_journal() {
 
   case "$mode" in rollback|compensate) ;; *) return 1 ;; esac
   case "$phase" in
-    prepared|candidate-held|prior-restored|boot-restored|depmod-verified) ;;
+    prepared|candidate-held|prior-restored|boot-restored|depmod-verified|retiring-firmware|retiring-state) ;;
     *) return 1 ;;
   esac
   temporary="$(private_file "$rb_workspace" rollback-state)" || return
   {
-    if test -n "${rb_backlight_rule_file:-}"; then
+    if "$rb_inactive"; then
+      printf 'schema_version=3\n'
+    elif test -n "${rb_backlight_rule_file:-}"; then
       printf 'schema_version=2\n'
     else
       printf 'schema_version=1\n'
@@ -3518,6 +3579,12 @@ write_rollback_journal() {
       printf 'backlight_rule_sha256=%s\n' "$rb_backlight_rule_sha"
       printf 'prior_backlight_rule_existed=%s\n' "$rb_prior_backlight_rule_existed"
       printf 'prior_backlight_rule_sha256=%s\n' "$rb_prior_backlight_rule_sha"
+    fi
+    if "$rb_inactive"; then
+      printf 'candidate_kernel_file=%s\n' "$(basename "$rb_firmware_kernel_path")"
+      printf 'candidate_kernel_sha256=%s\n' "$rb_firmware_kernel_sha"
+      printf 'candidate_initramfs_file=%s\n' "$(basename "$rb_firmware_initramfs_path")"
+      printf 'candidate_initramfs_sha256=%s\n' "$rb_firmware_initramfs_sha"
     fi
   } | sudo tee "$temporary" >/dev/null || return
   assert_owned_regular "$temporary" 600 || return
@@ -3546,7 +3613,8 @@ load_rollback_journal() {
   rb_tryboot_existed="$(rollback_value tryboot_existed)"
   rb_module_existed="$(rollback_value module_existed)"
   rb_overlay_existed="$(rollback_value overlay_existed)"
-  if test "$(rollback_value schema_version)" = 2; then
+  if test "$(rollback_value schema_version)" = 2 ||
+    test "$(rollback_value schema_version)" = 3; then
     rb_backlight_rule_file="$(rollback_value backlight_rule_file)"
     rb_backlight_rule_sha="$(rollback_value backlight_rule_sha256)"
     rb_prior_backlight_rule_existed="$(rollback_value prior_backlight_rule_existed)"
@@ -3562,6 +3630,13 @@ load_rollback_journal() {
   rb_module_hold="${rb_module_path}.hp2r-rollback-hold"
   rb_overlay_path="${root}/boot/firmware/overlays/$rb_overlay_file"
   rb_dkms_dir="$dkms_root/hyperpixel2r-kms-$rb_version"
+  if test "$(rollback_value schema_version)" = 3; then
+    rb_inactive=true
+    rb_firmware_kernel_sha="$(rollback_value candidate_kernel_sha256)"
+    rb_firmware_initramfs_sha="$(rollback_value candidate_initramfs_sha256)"
+    rb_firmware_kernel_path="${root}/boot/firmware/$(rollback_value candidate_kernel_file)"
+    rb_firmware_initramfs_path="${root}/boot/firmware/$(rollback_value candidate_initramfs_file)"
+  fi
 }
 
 assert_inventory_restored() {
@@ -4010,28 +4085,69 @@ rollback() {
     fixture_interrupt_after rollback-depmod-verified
   fi
 
-  test "$rb_phase" = depmod-verified ||
-    die 'durable rollback reached an invalid phase'
-  verify_prior_module_resolution ||
-    die 'prior module resolution drifted before transaction retirement'
-  assert_rollback_boot_state ||
-    die 'restored boot state drifted before transaction retirement'
-  if "$rb_inactive"; then
-    assert_owned_regular "$rb_firmware_kernel_path" boot &&
-      test "$(sha "$rb_firmware_kernel_path")" = "$rb_firmware_kernel_sha" &&
-      assert_owned_regular "$rb_firmware_initramfs_path" boot &&
-      test "$(sha "$rb_firmware_initramfs_path")" = "$rb_firmware_initramfs_sha" ||
-      die 'inactive candidate firmware leaves drifted before retirement'
-    sudo rm -- "$rb_firmware_kernel_path" "$rb_firmware_initramfs_path" ||
-      die 'failed to remove journal-owned inactive candidate firmware leaves'
+  case "$rb_phase" in
+    depmod-verified|retiring-firmware|retiring-state) ;;
+    *) die 'durable rollback reached an invalid phase' ;;
+  esac
+  if test "$rb_phase" = depmod-verified; then
+    verify_prior_module_resolution ||
+      die 'prior module resolution drifted before transaction retirement'
+    assert_rollback_boot_state ||
+      die 'restored boot state drifted before transaction retirement'
+    if "$rb_inactive"; then
+      # Publish this ownership record before any candidate firmware or generic
+      # transaction state is retired.  It is the only authority needed to
+      # resume after an interruption when the generic schema-5 state is gone.
+      rb_phase=retiring-firmware
+      write_rollback_journal rollback "$rb_phase" ||
+        die 'failed to publish inactive firmware retirement phase'
+      rb_finalizing=true
+      fixture_interrupt_after rollback-retirement-phase-published
+    fi
   fi
-  rb_finalizing=true
-  if sudo test -e "$state_file"; then
-    test "$(sha "$state_file")" = "$rb_transaction_sha" ||
-      die 'active transaction drifted before retirement'
-    sudo rm -f -- "$state_file" ||
-      die 'failed to retire rolled-back transaction'
-    sudo sync
+  if test "$rb_phase" = retiring-firmware; then
+    rb_finalizing=true
+    if sudo test -e "$rb_firmware_kernel_path" || sudo test -L "$rb_firmware_kernel_path"; then
+      assert_owned_regular "$rb_firmware_kernel_path" boot &&
+        test "$(sha "$rb_firmware_kernel_path")" = "$rb_firmware_kernel_sha" ||
+        die 'inactive candidate kernel firmware drifted before retirement'
+      sudo rm -- "$rb_firmware_kernel_path" ||
+        die 'failed to remove journal-owned inactive candidate kernel firmware leaf'
+    fi
+    fixture_interrupt_after rollback-retirement-kernel-removed
+    if sudo test -e "$rb_firmware_initramfs_path" || sudo test -L "$rb_firmware_initramfs_path"; then
+      assert_owned_regular "$rb_firmware_initramfs_path" boot &&
+        test "$(sha "$rb_firmware_initramfs_path")" = "$rb_firmware_initramfs_sha" ||
+        die 'inactive candidate initramfs firmware drifted before retirement'
+      sudo rm -- "$rb_firmware_initramfs_path" ||
+        die 'failed to remove journal-owned inactive candidate initramfs firmware leaf'
+    fi
+    fixture_interrupt_after rollback-retirement-initramfs-removed
+    rb_phase=retiring-state
+    write_rollback_journal rollback "$rb_phase" ||
+      die 'failed to publish inactive generic-state retirement phase'
+  fi
+  if test "$rb_phase" = retiring-state; then
+    rb_finalizing=true
+    fixture_interrupt_after rollback-retirement-before-state-retired
+    if sudo test -e "$state_file" || sudo test -L "$state_file"; then
+      assert_owned_regular "$state_file" 600 &&
+        test "$(sha "$state_file")" = "$rb_transaction_sha" ||
+        die 'active transaction drifted before retirement'
+      sudo rm -- "$state_file" ||
+        die 'failed to retire rolled-back transaction'
+      sudo sync
+    fi
+    fixture_interrupt_after rollback-retirement-state-retired
+  elif test "$rb_phase" = depmod-verified; then
+    rb_finalizing=true
+    if sudo test -e "$state_file"; then
+      test "$(sha "$state_file")" = "$rb_transaction_sha" ||
+        die 'active transaction drifted before retirement'
+      sudo rm -f -- "$state_file" ||
+        die 'failed to retire rolled-back transaction'
+      sudo sync
+    fi
   fi
   fixture_interrupt_after rollback-transaction-retired-unpublished
   sudo rm -f -- "$rollback_candidate_tryboot" "$rollback_candidate_inventory" ||
@@ -4989,6 +5105,10 @@ set_accepted_transition_phase() {
   fi
   state_sha="$(sha "$state_tmp")" || return
   atomic_copy "$state_tmp" "$accepted_transition" 600 "$state_sha" || return
+  # This is the commit point for the caller.  Nothing after it may trigger
+  # stage_cleanup's pre-phase compensation; the on-disk staged journal owns a
+  # complete coherent candidate even if local workspace retirement fails.
+  inactive_phase_committed=true
   remove_transaction_workspace "$workspace" || return
   accepted_workspace=''
   assert_accepted_transition
