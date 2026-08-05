@@ -669,6 +669,10 @@ hp2r_validate_inactive_target_manifest() {
   local path_key
   local sha_key
   local path
+  local relative
+  local component
+  local current
+  local -a components
 
   hp2r_validate_schema2_target_manifest "$manifest" || return
   test -d "$root" && test ! -L "$root" || {
@@ -688,11 +692,36 @@ hp2r_validate_inactive_target_manifest() {
       vc4_overlay_path) sha_key=vc4_overlay_sha256 ;;
     esac
     path="$(hp2r_manifest_value "$manifest" "$path_key")"
+    relative="${path#/}"
+    current="$root"
+    IFS=/ read -r -a components <<< "$relative"
+    for component in "${components[@]}"; do
+      current="$current/$component"
+      test ! -L "$current" || {
+        echo "inactive target export path contains a symlink: $path" >&2
+        return 1
+      }
+    done
     hp2r_verify_sha256 \
       "$root$path" \
       "$(hp2r_manifest_value "$manifest" "$sha_key")" \
       "exported ${path_key%_path}" || return
   done
+}
+
+hp2r_require_target_identity() {
+  local manifest="$1"
+  local expected_identity_sha256="$2"
+
+  [[ "$expected_identity_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "requested target identity is not lowercase SHA-256" >&2
+    return 1
+  }
+  test "$(hp2r_manifest_value "$manifest" target_identity_sha256)" = \
+    "$expected_identity_sha256" || {
+    echo "target export identity does not match requested target" >&2
+    return 1
+  }
 }
 
 hp2r_validate_host_tools_manifest() {

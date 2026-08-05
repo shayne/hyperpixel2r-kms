@@ -163,7 +163,10 @@ initramfs_path="/boot/initrd.img-$release"
 if "$inactive_export"; then
   require_root_regular() {
     test ! -L "$1" && test -f "$1" &&
-      test "$(stat -c '%u:%g' "$1")" = 0:0
+      test "$(stat -c '%u:%g' "$1")" = 0:0 || {
+      echo "target boot source is not a root:root regular file: $1" >&2
+      return 1
+    }
   }
   for path in \
     "$kernel_image_path" \
@@ -449,7 +452,10 @@ base_dtb_sha256="$4"
 vc4_overlay_sha256="$5"
 require_root_regular() {
   test ! -L "$1" && test -f "$1" &&
-    test "$(stat -c '%u:%g' "$1")" = 0:0
+    test "$(stat -c '%u:%g' "$1")" = 0:0 || {
+    echo "target boot source is not a root:root regular file: $1" >&2
+    return 1
+  }
 }
 verify() {
   path="$1"

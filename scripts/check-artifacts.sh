@@ -13,6 +13,7 @@ Validate an exact-kernel HyperPixel 2 Round driver artifact bundle.
 Options:
   --target TARGET           SSH target (or set HP2R_TARGET)
   --kernel-release RELEASE  Validate an already-exported target release
+  --target-identity-sha256 SHA256  Bind an explicit release to this target
   --kernel-target DIR       Exported kernel target parent (default: dist/kernel-target)
   --output DIR              Artifact parent (default: dist/artifacts)
   -h, --help                Show this help
@@ -22,6 +23,7 @@ USAGE
 target="${HP2R_TARGET:-}"
 release=""
 explicit_release=false
+target_identity_sha256=""
 kernel_target_parent="$repo_root/dist/kernel-target"
 artifact_parent="$repo_root/dist/artifacts"
 while test "$#" -gt 0; do
@@ -41,6 +43,14 @@ while test "$#" -gt 0; do
       }
       release="$2"
       explicit_release=true
+      shift 2
+      ;;
+    --target-identity-sha256)
+      test "$#" -ge 2 || {
+        echo "--target-identity-sha256 requires a value" >&2
+        exit 64
+      }
+      target_identity_sha256="$2"
       shift 2
       ;;
     --kernel-target)
@@ -76,6 +86,19 @@ if test -z "$release"; then
   release="$(ssh "$target" uname -r)"
 fi
 hp2r_validate_release "$release"
+if "$explicit_release"; then
+  [[ "$target_identity_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "--kernel-release requires --target-identity-sha256 as lowercase SHA-256" >&2
+    exit 64
+  }
+  target_dir="$(hp2r_release_path "$kernel_target_parent" "$release")"
+  target_file="$target_dir/target.txt"
+  hp2r_validate_inactive_target_manifest "$target_file" "$target_dir/root"
+  hp2r_require_target_identity "$target_file" "$target_identity_sha256"
+elif test -n "$target_identity_sha256"; then
+  echo "--target-identity-sha256 requires --kernel-release" >&2
+  exit 64
+fi
 
 cd "$repo_root"
 test -d "$artifact_parent" || {
@@ -126,6 +149,7 @@ target_dir="$(hp2r_release_path "$target_parent" "$release")"
 target_file="$target_dir/target.txt"
 if "$explicit_release"; then
   hp2r_validate_inactive_target_manifest "$target_file" "$target_dir/root"
+  hp2r_require_target_identity "$target_file" "$target_identity_sha256"
 fi
 hp2r_validate_artifact_provenance "$manifest" "$target_file" "$artifact_dir"
 

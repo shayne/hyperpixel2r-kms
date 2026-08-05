@@ -40,7 +40,7 @@ if ! grep -q 'HP2R_TARGET' "${required_scripts[@]/#/$repo_root/}"; then
 fi
 
 help_output="$("$repo_root/scripts/build-driver.sh" --help)"
-for option in --target --kernel-release --kernel-target --source-revision --output; do
+for option in --target --kernel-release --target-identity-sha256 --kernel-target --source-revision --output; do
   if [[ "$help_output" != *"$option"* ]]; then
     printf 'build-driver.sh --help must document %s\n' "$option" >&2
     exit 1
@@ -48,10 +48,12 @@ for option in --target --kernel-release --kernel-target --source-revision --outp
 done
 
 check_help_output="$("$repo_root/scripts/check-artifacts.sh" --help)"
-if [[ "$check_help_output" != *"--kernel-target"* ]]; then
-  printf 'check-artifacts.sh --help must document --kernel-target\n' >&2
-  exit 1
-fi
+for option in --kernel-target --target-identity-sha256; do
+  if [[ "$check_help_output" != *"$option"* ]]; then
+    printf 'check-artifacts.sh --help must document %s\n' "$option" >&2
+    exit 1
+  fi
+done
 
 stage_help_output="$("$repo_root/scripts/stage-tryboot.sh" --help)"
 for option in --kernel-target --stage-only; do
@@ -251,7 +253,7 @@ for mutation in \
   malformed-identity-digest \
   mismatched-release-path \
   symlink-source \
-  wrong-owner \
+  intermediate-directory-symlink \
   wrong-architecture \
   kernel-hash-drift \
   initramfs-hash-drift \
@@ -286,11 +288,9 @@ do
       rm "$invalid_target_root$kernel_image_path"
       ln -s /dev/null "$invalid_target_root$kernel_image_path"
       ;;
-    wrong-owner)
-      # A non-root fixture cannot chown; retain an owner assertion through the
-      # exported metadata contract rather than depending on host privileges.
-      sed -i.bak 's/^kernel_arch\t.*/kernel_arch\troot:staff/' "$invalid_target_manifest"
-      rm -f "$invalid_target_manifest.bak"
+    intermediate-directory-symlink)
+      mv "$invalid_target_root/boot" "$invalid_target_root/boot-real"
+      ln -s boot-real "$invalid_target_root/boot"
       ;;
     wrong-architecture)
       sed -i.bak 's/^kernel_arch\t.*/kernel_arch\tarmv7l/' "$invalid_target_manifest"
@@ -311,7 +311,7 @@ do
   esac
   if validate_target_manifest "$invalid_target_manifest" >/dev/null 2>&1; then
     case "$mutation" in
-      symlink-source|kernel-hash-drift|initramfs-hash-drift|base-dtb-hash-drift|vc4-overlay-hash-drift)
+      symlink-source|intermediate-directory-symlink|kernel-hash-drift|initramfs-hash-drift|base-dtb-hash-drift|vc4-overlay-hash-drift)
         ;;
       *)
         printf 'target manifest validator accepted %s data\n' "$mutation" >&2
@@ -326,6 +326,33 @@ do
     printf 'inactive target manifest validator accepted %s data\n' "$mutation" >&2
     exit 1
   fi
+done
+
+foreign_identity_sha256='dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
+candidate_target_parent="$temporary_dir/candidate-target"
+candidate_target_dir="$candidate_target_parent/$target_release"
+mkdir -p "$candidate_target_dir"
+cp -R "$target_root" "$candidate_target_dir/root"
+cp "$schema2_target_manifest" "$candidate_target_dir/target.txt"
+for command in scripts/build-driver.sh scripts/check-artifacts.sh; do
+  identity_error="$temporary_dir/$(basename "$command").identity-error"
+  if "$repo_root/$command" \
+    --target fixture-target \
+    --kernel-release "$target_release" \
+    --target-identity-sha256 "$foreign_identity_sha256" \
+    --kernel-target "$candidate_target_parent" \
+    --output "$temporary_dir/candidate-artifacts" \
+    >"$identity_error" 2>&1
+  then
+    printf '%s accepted a foreign target identity\n' "$command" >&2
+    exit 1
+  fi
+  grep -Fq 'target export identity does not match requested target' "$identity_error" || {
+    cat "$identity_error" >&2
+    printf '%s did not reject the foreign target identity at the candidate boundary\n' \
+      "$command" >&2
+    exit 1
+  }
 done
 
 if ! awk '
@@ -506,6 +533,7 @@ running_release='6.18.34+rpt-rpi-v8'
 requested_identity_sha256='cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
 mkdir -p \
   "$fake_bin" \
+  "$fake_remote_root/lib/modules/$requested_release" \
   "$fake_remote_root/usr/src/linux-headers-$requested_release/include/config" \
   "$fake_remote_root/usr/src/linux-headers-6.18.39+rpt-common-rpi/include" \
   "$fake_remote_root/usr/lib/linux-kbuild-6.18.39+rpt/scripts" \
@@ -516,6 +544,12 @@ printf 'CONFIG_DRM_PANEL=y\n' > \
   "$fake_remote_root/usr/src/linux-headers-$requested_release/.config"
 printf 'fixture symbols\n' > \
   "$fake_remote_root/usr/src/linux-headers-$requested_release/Module.symvers"
+printf 'include %s/usr/src/linux-headers-6.18.39+rpt-common-rpi/Makefile\n' \
+  "$fake_remote_root" > "$fake_remote_root/usr/src/linux-headers-$requested_release/Makefile"
+printf 'fixture common Makefile\n' > \
+  "$fake_remote_root/usr/src/linux-headers-6.18.39+rpt-common-rpi/Makefile"
+ln -s "../../../usr/src/linux-headers-$requested_release" \
+  "$fake_remote_root/lib/modules/$requested_release/build"
 printf 'fixture kernel\n' > \
   "$fake_remote_root/boot/vmlinuz-$requested_release"
 printf 'fixture initramfs\n' > \
@@ -538,36 +572,15 @@ shift
 printf '%s\n' "$target $*" >> "$HP2R_FAKE_SSH_LOG"
 case "$1" in
   bash)
-    inactive_export="${5-}"
     program="$(cat)"
     printf '%s\n' "$program" >> "$HP2R_FAKE_SSH_LOG"
-    invocation_file="$HP2R_FAKE_SSH_LOG.invocations"
-    invocation=0
-    test ! -f "$invocation_file" || invocation="$(cat "$invocation_file")"
-    invocation=$((invocation + 1))
-    printf '%s\n' "$invocation" > "$invocation_file"
-    if test "$invocation" = 1; then
-      printf 'kernel_release\t%s\n' "$HP2R_FAKE_REQUESTED_RELEASE"
-      printf 'kernel_arch\taarch64\n'
-      printf 'header_path\t/usr/src/linux-headers-%s\n' "$HP2R_FAKE_REQUESTED_RELEASE"
-      printf 'common_header_path\t/usr/src/linux-headers-6.18.39+rpt-common-rpi\n'
-      printf 'kbuild_path\t/usr/lib/linux-kbuild-6.18.39+rpt\n'
-      printf 'kernel_source_package\tlinux\n'
-      printf 'kernel_source_version\t1:6.18.39-1+rpt1\n'
-      printf 'kernel_source_deb_package\tlinux-source-6.18\n'
-      printf 'kernel_source_deb_filename\tpool/main/l/linux/linux-source-6.18_6.18.39-1_all.deb\n'
-      printf 'kernel_source_deb_sha256\t%s\n' "$HP2R_FAKE_SOURCE_DEB_SHA256"
-      printf 'base_dtb_path\t/boot/firmware/bcm2710-rpi-zero-2-w.dtb\n'
-      printf 'base_dtb_sha256\t%s\n' "$HP2R_FAKE_BASE_DTB_SHA256"
-      if "$inactive_export"; then
-        printf 'kernel_image_path\t/boot/vmlinuz-%s\n' "$HP2R_FAKE_REQUESTED_RELEASE"
-        printf 'kernel_image_sha256\t%s\n' "$HP2R_FAKE_KERNEL_IMAGE_SHA256"
-        printf 'initramfs_path\t/boot/initrd.img-%s\n' "$HP2R_FAKE_REQUESTED_RELEASE"
-        printf 'initramfs_sha256\t%s\n' "$HP2R_FAKE_INITRAMFS_SHA256"
-        printf 'vc4_overlay_path\t/boot/firmware/overlays/vc4-kms-v3d.dtbo\n'
-        printf 'vc4_overlay_sha256\t%s\n' "$HP2R_FAKE_VC4_OVERLAY_SHA256"
-      fi
-    fi
+    transformed_program="$(printf '%s\n' "$program" | sed \
+      "s|/lib/modules|$HP2R_FAKE_REMOTE_ROOT/lib/modules|g; s|/boot|$HP2R_FAKE_REMOTE_ROOT/boot|g")"
+    output="$(
+      printf '%s\n' "$transformed_program" |
+        PATH="$HP2R_FAKE_BIN:$PATH" bash -s -- "${@:4}"
+    )"
+    printf '%s\n' "$output" | sed "s|$HP2R_FAKE_REMOTE_ROOT||g"
     ;;
   tar)
     while test "$1" != --; do shift; done
@@ -580,6 +593,69 @@ case "$1" in
     ;;
 esac
 FAKE_SSH
+cat > "$fake_bin/readlink" <<'FAKE_READLINK'
+#!/usr/bin/env bash
+set -euo pipefail
+test "$1" = -f
+case "$2" in
+  "$HP2R_FAKE_REMOTE_ROOT"/lib/modules/*/build)
+    printf '%s/usr/src/linux-headers-%s\n' \
+      "$HP2R_FAKE_REMOTE_ROOT" "$HP2R_FAKE_REQUESTED_RELEASE"
+    ;;
+  "$HP2R_FAKE_REMOTE_ROOT"/usr/src/linux-headers-*/scripts)
+    printf '%s/usr/lib/linux-kbuild-6.18.39+rpt/scripts\n' \
+      "$HP2R_FAKE_REMOTE_ROOT"
+    ;;
+  *) exit 64 ;;
+esac
+FAKE_READLINK
+cat > "$fake_bin/uname" <<'FAKE_UNAME'
+#!/usr/bin/env bash
+printf 'uname %s\n' "$*" >> "$HP2R_FAKE_SSH_LOG"
+case "${1-}" in
+  -m) printf 'aarch64\n' ;;
+  -r) printf '%s\n' "$HP2R_FAKE_RUNNING_RELEASE" ;;
+  *) exit 64 ;;
+esac
+FAKE_UNAME
+cat > "$fake_bin/modinfo" <<'FAKE_MODINFO'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'modinfo %s\n' "$*" >> "$HP2R_FAKE_SSH_LOG"
+test "$1" = -k
+test "$2" = "$HP2R_FAKE_REQUESTED_RELEASE"
+test "$3" = -F
+test "$4" = vermagic
+test "$5" = vc4
+printf '%s SMP preempt\n' "$2"
+FAKE_MODINFO
+cat > "$fake_bin/dpkg-query" <<'FAKE_DPKG_QUERY'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *'-S '*) printf 'linux-kbuild-6.18.39: fixture\n' ;;
+  *'source:Package'*) printf 'linux\n' ;;
+  *'source:Version'*) printf '1:6.18.39-1+rpt1\n' ;;
+  *) exit 64 ;;
+esac
+FAKE_DPKG_QUERY
+cat > "$fake_bin/apt-cache" <<'FAKE_APT_CACHE'
+#!/usr/bin/env bash
+set -euo pipefail
+test "$1" = show
+printf '%s\n' \
+  'Architecture: all' \
+  'Filename: pool/main/l/linux/linux-source-6.18_6.18.39-1_all.deb' \
+  "SHA256: $HP2R_FAKE_SOURCE_DEB_SHA256"
+FAKE_APT_CACHE
+cat > "$fake_bin/stat" <<'FAKE_STAT'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'stat %s\n' "$*" >> "$HP2R_FAKE_SSH_LOG"
+test "$1" = -c
+test "$2" = %u:%g
+printf '%s\n' "$HP2R_FAKE_OWNER"
+FAKE_STAT
 cat > "$fake_bin/curl" <<'FAKE_CURL'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -596,10 +672,14 @@ done
 test -n "$output"
 cp "$HP2R_FAKE_SOURCE_DEB" "$output"
 FAKE_CURL
-chmod +x "$fake_bin/ssh" "$fake_bin/curl"
+chmod +x "$fake_bin/ssh" "$fake_bin/curl" "$fake_bin/readlink" "$fake_bin/uname" "$fake_bin/modinfo" \
+  "$fake_bin/dpkg-query" "$fake_bin/apt-cache" "$fake_bin/stat"
 PATH="$fake_bin:$PATH" \
   HP2R_FAKE_SSH_LOG="$fake_ssh_log" \
   HP2R_FAKE_REMOTE_ROOT="$fake_remote_root" \
+  HP2R_FAKE_BIN="$fake_bin" \
+  HP2R_FAKE_RUNNING_RELEASE="$running_release" \
+  HP2R_FAKE_OWNER='0:0' \
   HP2R_FAKE_REQUESTED_RELEASE="$requested_release" \
   HP2R_FAKE_SOURCE_DEB="$fake_source_deb" \
   HP2R_FAKE_SOURCE_DEB_SHA256="$fake_source_deb_sha256" \
@@ -629,15 +709,60 @@ grep -Fq 'modinfo -k "$release" -F vermagic vc4' "$fake_ssh_log"
 grep -Fq '"/boot/vmlinuz-$release"' "$fake_ssh_log"
 grep -Fq '"/boot/initrd.img-$release"' "$fake_ssh_log"
 grep -Fq '/boot/firmware/overlays/vc4-kms-v3d.dtbo' "$fake_ssh_log"
+grep -Fq "modinfo -k $requested_release -F vermagic vc4" "$fake_ssh_log"
+grep -Fq "stat -c %u:%g $fake_remote_root/boot/vmlinuz-$requested_release" \
+  "$fake_ssh_log"
+test "$(grep -Fc "stat -c %u:%g $fake_remote_root/boot/vmlinuz-$requested_release" "$fake_ssh_log")" \
+  = 2 || {
+  printf 'inactive export did not revalidate the kernel image on the target\n' >&2
+  exit 1
+}
 if grep -Fq "$running_release" "$fake_ssh_log"; then
   printf 'inactive export substituted the running release for the requested release\n' >&2
   exit 1
 fi
 
+owner_error="$temporary_dir/wrong-owner-export.error"
+set +e
+PATH="$fake_bin:$PATH" \
+  HP2R_FAKE_SSH_LOG="$fake_ssh_log" \
+  HP2R_FAKE_REMOTE_ROOT="$fake_remote_root" \
+  HP2R_FAKE_BIN="$fake_bin" \
+  HP2R_FAKE_RUNNING_RELEASE="$running_release" \
+  HP2R_FAKE_OWNER='501:20' \
+  HP2R_FAKE_REQUESTED_RELEASE="$requested_release" \
+  HP2R_FAKE_SOURCE_DEB="$fake_source_deb" \
+  HP2R_FAKE_SOURCE_DEB_SHA256="$fake_source_deb_sha256" \
+  HP2R_FAKE_KERNEL_IMAGE_SHA256="$fake_kernel_image_sha256" \
+  HP2R_FAKE_INITRAMFS_SHA256="$fake_initramfs_sha256" \
+  HP2R_FAKE_BASE_DTB_SHA256="$fake_base_dtb_sha256" \
+  HP2R_FAKE_VC4_OVERLAY_SHA256="$fake_vc4_overlay_sha256" \
+  "$repo_root/scripts/export-target-kbuild.sh" \
+    --target fixture-target \
+    --kernel-release "$requested_release" \
+    --target-identity-sha256 "$requested_identity_sha256" \
+    --output "$temporary_dir/wrong-owner-target" \
+  >"$owner_error" 2>&1
+owner_status=$?
+set -e
+test "$owner_status" -ne 0 || {
+  printf 'inactive export accepted a wrong-owner boot source\n' >&2
+  exit 1
+}
+grep -Fq "target boot source is not a root:root regular file: $fake_remote_root/boot/vmlinuz-$requested_release" \
+  "$owner_error" || {
+  cat "$owner_error" >&2
+  printf 'wrong-owner export did not reach the root-owner guard\n' >&2
+  exit 1
+}
+
 rm -f "$fake_ssh_log.invocations"
 PATH="$fake_bin:$PATH" \
   HP2R_FAKE_SSH_LOG="$fake_ssh_log" \
   HP2R_FAKE_REMOTE_ROOT="$fake_remote_root" \
+  HP2R_FAKE_BIN="$fake_bin" \
+  HP2R_FAKE_RUNNING_RELEASE="$running_release" \
+  HP2R_FAKE_OWNER='0:0' \
   HP2R_FAKE_REQUESTED_RELEASE="$requested_release" \
   HP2R_FAKE_SOURCE_DEB="$fake_source_deb" \
   HP2R_FAKE_SOURCE_DEB_SHA256="$fake_source_deb_sha256" \
@@ -648,13 +773,14 @@ PATH="$fake_bin:$PATH" \
   "$repo_root/scripts/export-target-kbuild.sh" \
     --target fixture-target \
     --output "$fake_export_parent"
-test "$(awk 'END { print NR }' "$fake_export_dir/target.txt")" = 13
-if grep -Eq '^schema_version\t' "$fake_export_dir/target.txt"; then
+legacy_export_dir="$fake_export_parent/$running_release"
+test "$(awk 'END { print NR }' "$legacy_export_dir/target.txt")" = 13
+if grep -Eq '^schema_version\t' "$legacy_export_dir/target.txt"; then
   printf 'same-kernel export unexpectedly changed the legacy target manifest\n' >&2
   exit 1
 fi
-test ! -e "$fake_export_dir/root/boot/vmlinuz-$requested_release"
-test ! -e "$fake_export_dir/root/boot/initrd.img-$requested_release"
+test ! -e "$legacy_export_dir/root/boot/vmlinuz-$running_release"
+test ! -e "$legacy_export_dir/root/boot/initrd.img-$running_release"
 
 for script in scripts/build-driver.sh scripts/check-artifacts.sh; do
   if ! grep -Fq 'explicit_release=true' "$repo_root/$script" ||
