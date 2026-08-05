@@ -2305,8 +2305,8 @@ assert_inactive_final_stage_boundary() {
   local expected_version="$1" expected_release="$2" expected_revision="$3" expected_module_file="$4"
   local expected_module_sha="$5" expected_overlay_file="$6" expected_overlay_sha="$7"
   local expected_rule_file="$8" expected_rule_sha="$9" expected_normal_sha="${10}"
-  local expected_tryboot_sha="${11}" expected_transition_sha="${12}"
-  local transaction resolved vermagic dkms_status
+  local expected_tryboot_sha="${11}" expected_transition_sha="${12}" expected_inventory_sha="${13}"
+  local transaction resolved vermagic dkms_status live_inventory
 
   # assert_transaction_state proves the private schema-5 state, artifact tree,
   # manifest, DKMS inventory, installed module/overlay/rule, and staged
@@ -2326,10 +2326,14 @@ assert_inactive_final_stage_boundary() {
     test "$(sha "$backlight_rule_path")" = "$expected_rule_sha" || return
   test "$(state_value accepted_transition_sha256)" = "$expected_transition_sha" &&
     test "$(sha "$accepted_transition")" = "$expected_transition_sha" || return
+  [[ "$expected_inventory_sha" =~ ^[0-9a-f]{64}$ ]] || return
+  live_inventory="$(private_file "$rollback_tmp" final-candidate-dkms-inventory)" || return
+  capture_dkms_inventory "$expected_version" "$live_inventory" "$rollback_tmp" || return
+  test "$(sha "$live_inventory")" = "$expected_inventory_sha" || return
   resolved="$(sudo modinfo -k "$expected_release" -n hyperpixel2r_kms)" || return
   test "$resolved" = "${root}/lib/modules/$expected_release/extra/$expected_module_file" || return
   dkms_status="$(run_dkms status -m hyperpixel2r-kms -v "$expected_version")" || return
-  test "$dkms_status" = "hyperpixel2r-kms/$expected_version, $expected_release, aarch64: installed" || return
+  test "$dkms_status" = "hyperpixel2r-kms/$expected_version: added" || return
   vermagic="$(sudo modinfo -k "$expected_release" -F vermagic hyperpixel2r_kms)" || return
   case "$vermagic" in "$expected_release"*) ;; *) return 1;; esac
 }
@@ -2386,6 +2390,8 @@ stage() {
   prior_dkms_state=absent
   prior_dkms_snapshot=''
   prior_dkms_inventory_sha=''
+  candidate_dkms_inventory_sha=''
+  candidate_dkms_inventory=''
   dkms_added=false
   published_tryboot=false
   published_state=false
@@ -2773,6 +2779,12 @@ stage() {
     unregistered) run_dkms add -m hyperpixel2r-kms -v "$driver_version" || die 'failed to register DKMS source'; dkms_added=true ;;
     *) die 'invalid DKMS status result' ;;
   esac
+  if "$inactive_stage"; then
+    candidate_dkms_inventory="$(private_file "$rollback_tmp" candidate-dkms-inventory)" || die 'failed to allocate candidate DKMS inventory'
+    capture_dkms_inventory "$driver_version" "$candidate_dkms_inventory" "$rollback_tmp" ||
+      die 'failed to capture candidate DKMS inventory'
+    candidate_dkms_inventory_sha="$(sha "$candidate_dkms_inventory")" || die 'failed to hash candidate DKMS inventory'
+  fi
   sudo depmod -a "$release" || die 'failed to refresh candidate module resolution'
   if "$inactive_stage"; then
     resolved_path="$(sudo modinfo -k "$release" -n hyperpixel2r_kms)" ||
@@ -2882,7 +2894,7 @@ stage() {
       assert_inactive_final_stage_boundary "$driver_version" "$release" "$revision" "$module_file" \
         "$module_sha" "$overlay_file" "$overlay_sha" "$backlight_rule_file" \
         "$backlight_rule_sha" "$normal_sha" "$candidate_sha" \
-        "$expected_accepted_transition_sha" ||
+        "$expected_accepted_transition_sha" "$candidate_dkms_inventory_sha" ||
         die 'inactive final staged boundary validation failed'
     fi
     if test "$(accepted_transition_value schema_version)" = 5 ||
@@ -2900,7 +2912,7 @@ stage() {
       sudo depmod -a "$release" || die 'failed to finalize candidate module dependency map'
       sudo sync || die 'failed to synchronize inactive candidate before staging journal'
     fi
-    if ! set_accepted_transition_phase prepared staged '' "$prior_dkms_inventory_sha" \
+    if ! set_accepted_transition_phase prepared staged '' "$candidate_dkms_inventory_sha" \
       "$accepted_transition_prepared_snapshot" "$expected_accepted_transition_sha"; then
       schema5_staged_authority_allow_prepared=false
       die 'failed to mark accepted candidate staged'

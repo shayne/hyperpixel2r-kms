@@ -893,7 +893,7 @@ if test "${HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH:-}" = 1 && \
 fi
 if test "${HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH:-}" = 1 && \
   test "$destination" = "$HP2R_FIXTURE_ROOT/var/lib/hyperpixel2r-kms/tryboot-state"; then
-  printf 'added\n' > "$HP2R_FIXTURE_ROOT/var/lib/dkms/registered"
+  printf 'added\ncorrupt-live-row\n' > "$HP2R_FIXTURE_ROOT/var/lib/dkms/registered"
   : > "$HP2R_FIXTURE_ROOT/tmp/dkms-mutated-on-state-publish"
 fi
 SCRIPT
