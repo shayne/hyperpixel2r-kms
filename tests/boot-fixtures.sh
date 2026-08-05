@@ -474,6 +474,11 @@ case "$destination" in
   /tmp/hp2r-tryboot-stage.*/*|/tmp/hp2r-accepted.*/*) ;;
   *) exit 64 ;;
 esac
+if test "${HP2R_FIXTURE_STOP_AFTER_INACTIVE_AUTH_SCP:-}" = 1 && \
+  [[ "$destination" == /tmp/hp2r-tryboot-stage.*/* ]]; then
+  : > "$HP2R_FIXTURE_ROOT/tmp/inactive-authorization-scp-attempted"
+  exit 93
+fi
 mkdir -p "$HP2R_FIXTURE_ROOT$destination"
 cp -RP "${source%/.}/." "$HP2R_FIXTURE_ROOT$destination"
 chown -R 65534:65534 "$HP2R_FIXTURE_ROOT$destination"
@@ -1129,6 +1134,75 @@ prepare_inactive_authorization_target() {
   authorization_candidate_release="$candidate_release"
   authorization_candidate_kernel="$candidate_kernel"
   authorization_candidate_initramfs="$candidate_initramfs"
+}
+
+prepare_aligned_inactive_authorization_target() {
+  local candidate_release='6.18.39+rpt-rpi-v8'
+  local candidate_parent="$fixture/aligned-inactive-target"
+  local candidate_target="$candidate_parent/$candidate_release"
+  local candidate_artifact="$fixture/aligned-inactive-artifact"
+  local target_manifest="$candidate_target/target.txt"
+  local artifact_manifest="$candidate_artifact/manifest.txt"
+  local source_target="$repo_root/dist/kernel-target/$release"
+  local source_artifact="$repo_root/dist/artifacts/$release"
+  local old_kernel="/boot/vmlinuz-$release"
+  local old_initramfs="/boot/initrd.img-$release"
+  local candidate_kernel="/boot/vmlinuz-$candidate_release"
+  local candidate_initramfs="/boot/initrd.img-$candidate_release"
+  local release_tag candidate_kernel_file candidate_initramfs_file transition
+
+  prepare_inactive_authorization_target
+  rm -rf -- "$candidate_parent" "$candidate_artifact"
+  mkdir -p "$candidate_target"
+  cp -a "$source_target/root" "$candidate_target/root"
+  cp "$source_target/target.txt" "$target_manifest"
+  cp -a "$source_artifact" "$candidate_artifact"
+  cp "$candidate_target/root$old_kernel" "$candidate_target/root$candidate_kernel"
+  cp "$candidate_target/root$old_initramfs" "$candidate_target/root$candidate_initramfs"
+  replace_manifest_value "$artifact_manifest" kernel_release "$candidate_release"
+  replace_manifest_value "$artifact_manifest" module_vermagic "$candidate_release fixture"
+  replace_manifest_value "$target_manifest" target_identity_sha256 \
+    bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  replace_manifest_value "$target_manifest" kernel_release "$candidate_release"
+  replace_manifest_value "$target_manifest" kernel_image_path "$candidate_kernel"
+  replace_manifest_value "$target_manifest" initramfs_path "$candidate_initramfs"
+  replace_manifest_value "$target_manifest" kernel_image_sha256 \
+    "$(sha256sum "$candidate_target/root$candidate_kernel" | awk '{ print $1 }')"
+  replace_manifest_value "$target_manifest" initramfs_sha256 \
+    "$(sha256sum "$candidate_target/root$candidate_initramfs" | awk '{ print $1 }')"
+
+  transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  release_tag="$(printf %s "$candidate_release" | sha256sum | awk '{ print substr($1, 1, 12) }')"
+  candidate_kernel_file="hp2r-${source_revision:0:12}-${release_tag}-kernel.img"
+  candidate_initramfs_file="hp2r-${source_revision:0:12}-${release_tag}-initramfs.img"
+  replace_equals_value "$transition" target_identity_sha256 \
+    bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  replace_equals_value "$transition" candidate_driver_version 0.1.1
+  replace_equals_value "$transition" candidate_source_revision "$source_revision"
+  replace_equals_value "$transition" candidate_manifest_sha256 \
+    "$(sha256sum "$artifact_manifest" | awk '{ print $1 }')"
+  replace_equals_value "$transition" candidate_module_sha256 \
+    "$(awk -F '\t' '$1 == "module_sha256" { print $2 }' "$artifact_manifest")"
+  replace_equals_value "$transition" candidate_overlay_file "$overlay_file"
+  replace_equals_value "$transition" candidate_overlay_sha256 \
+    "$(awk -F '\t' '$1 == "overlay_sha256" { print $2 }' "$artifact_manifest")"
+  replace_equals_value "$transition" candidate_backlight_rule_sha256 \
+    "$(awk -F '\t' '$1 == "backlight_rule_sha256" { print $2 }' "$artifact_manifest")"
+  replace_equals_value "$transition" candidate_kernel_file "$candidate_kernel_file"
+  replace_equals_value "$transition" candidate_kernel_sha256 \
+    "$(awk -F '\t' '$1 == "kernel_image_sha256" { print $2 }' "$target_manifest")"
+  replace_equals_value "$transition" candidate_initramfs_file "$candidate_initramfs_file"
+  replace_equals_value "$transition" candidate_initramfs_sha256 \
+    "$(awk -F '\t' '$1 == "initramfs_sha256" { print $2 }' "$target_manifest")"
+  replace_equals_value "$transition" candidate_base_dtb_sha256 \
+    "$(awk -F '\t' '$1 == "base_dtb_sha256" { print $2 }' "$target_manifest")"
+  replace_equals_value "$transition" candidate_vc4_overlay_sha256 \
+    "$(awk -F '\t' '$1 == "vc4_overlay_sha256" { print $2 }' "$target_manifest")"
+  chown root:root "$transition"
+  chmod 0600 "$transition"
+  aligned_candidate_release="$candidate_release"
+  aligned_candidate_target_parent="$candidate_parent"
+  aligned_candidate_artifact="$candidate_artifact"
 }
 
 run_accepted_controller() {
@@ -2647,7 +2721,17 @@ exercise_accepted_prior_tryboot_authority() {
   assert_prior_tryboot_transition_rejected unknown-key
 }
 
+exercise_task3_aligned_authority() {
+  # ShellCheck cannot model this sourced fixture's intentionally shared state.
+  # shellcheck source=tests/task3-authority-fixture.sh
+  source "$repo_root/tests/task3-authority-fixture.sh"
+}
+
 case "${HP2R_FIXTURE_CASE:-}" in
+  task3-authority)
+    exercise_task3_aligned_authority
+    exit 0
+    ;;
   inactive-uninstall-backlight)
     exercise_inactive_uninstall_backlight_matrix
     exit 0
@@ -4264,12 +4348,9 @@ test "$authorized_release" = "$authorization_candidate_release" &&
 # The remote authority is intentionally fail-closed before the controller can
 # allocate or upload an inactive firmware payload. Exercise malformed rows and
 # every accepted-state binding through the production remote action.
-for authorization_mutation in wrong-target wrong-prior wrong-config duplicate unknown malformed unsafe-name; do
+for authorization_mutation in wrong-prior wrong-config duplicate unknown malformed unsafe-name; do
   prepare_inactive_authorization_target
   case "$authorization_mutation" in
-    wrong-target)
-      sed -i 's/^target_identity_sha256=.*/target_identity_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' "$root/var/lib/hyperpixel2r-kms/accepted-transition"
-      ;;
     wrong-prior)
       sed -i 's/^prior_driver_version=.*/prior_driver_version=9.9.9/' "$root/var/lib/hyperpixel2r-kms/accepted-transition"
       ;;
@@ -4289,27 +4370,12 @@ for authorization_mutation in wrong-target wrong-prior wrong-config duplicate un
       sed -i 's|^candidate_kernel_file=.*|candidate_kernel_file=../kernel.img|' "$root/var/lib/hyperpixel2r-kms/accepted-transition"
       ;;
   esac
-  if test "$authorization_mutation" = wrong-target; then
-    wrong_target_tmp="$fixture/wrong-target-controller-tmp"
-    mkdir -p "$wrong_target_tmp"
-    rm -f -- "$log"
-    if HP2R_FIXTURE_RUNNING_RELEASE='6.18.33+rpt-rpi-v8' \
-      TMPDIR="$wrong_target_tmp" \
-      run_stage --kernel-release "$release" \
-        --kernel-target "$repo_root/dist/kernel-target" \
-        --target-identity-sha256 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
-        --stage-only >/dev/null 2>&1
-    then
-      fail 'inactive stage accepted an authority for a different target identity'
-    fi
-    test -z "$(find "$wrong_target_tmp" -mindepth 1 -print -quit)" ||
-      fail 'wrong target authority allocated a payload before rejection'
-    test ! -e "$log" || ! grep -q '^scp ' "$log" ||
-      fail 'wrong target authority uploaded before rejection'
-  elif run_accepted_remote authorize-inactive-stage >/dev/null 2>&1; then
+  if run_accepted_remote authorize-inactive-stage >/dev/null 2>&1; then
     fail "inactive authorization accepted $authorization_mutation authority"
   fi
 done
+
+exercise_task3_aligned_authority
 
 # The controller must ask the real remote authority before it creates a local
 # payload or starts a transfer. The fake SSH endpoint fails only that action.
