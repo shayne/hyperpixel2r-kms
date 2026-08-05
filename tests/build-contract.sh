@@ -56,9 +56,17 @@ for option in --kernel-target --target-identity-sha256; do
 done
 
 stage_help_output="$("$repo_root/scripts/stage-tryboot.sh" --help)"
-for option in --kernel-target --stage-only; do
+for option in --kernel-target --kernel-release --target-identity-sha256 --stage-only; do
   if [[ "$stage_help_output" != *"$option"* ]]; then
     printf 'stage-tryboot.sh --help must document %s\n' "$option" >&2
+    exit 1
+  fi
+done
+
+accepted_help_output="$("$repo_root/scripts/accepted-lifecycle.sh" --help)"
+for option in --kernel-target --target-identity-sha256; do
+  if [[ "$accepted_help_output" != *"$option"* ]]; then
+    printf 'accepted-lifecycle.sh --help must document %s\n' "$option" >&2
     exit 1
   fi
 done
@@ -208,6 +216,65 @@ done
 test ! -e "$no_probe_log" || {
   cat "$no_probe_log" >&2
   printf 'candidate option validation opened an SSH connection\n' >&2
+  exit 1
+}
+
+inactive_stage_error="$temporary_dir/inactive-stage-without-authority-error"
+set +e
+PATH="$no_probe_bin:$PATH" \
+  HP2R_NO_PROBE_LOG="$no_probe_log" \
+  "$repo_root/scripts/stage-tryboot.sh" \
+    --target fixture-target \
+    --kernel-release 6.18.39+rpt-rpi-v8 \
+    --stage-only \
+    >"$inactive_stage_error" 2>&1
+inactive_stage_status=$?
+set -e
+test "$inactive_stage_status" = 64 || {
+  cat "$inactive_stage_error" >&2
+  printf 'inactive stage did not reject a bare generic release override\n' >&2
+  exit 1
+}
+grep -Fq -- '--kernel-release requires --target-identity-sha256' "$inactive_stage_error" || {
+  cat "$inactive_stage_error" >&2
+  printf 'inactive stage did not report the missing authority\n' >&2
+  exit 1
+}
+test ! -e "$no_probe_log" || {
+  cat "$no_probe_log" >&2
+  printf 'bare inactive stage opened an SSH connection\n' >&2
+  exit 1
+}
+
+accepted_missing_identity_error="$temporary_dir/accepted-missing-identity-error"
+set +e
+PATH="$no_probe_bin:$PATH" \
+  HP2R_NO_PROBE_LOG="$no_probe_log" \
+  "$repo_root/scripts/accepted-lifecycle.sh" \
+    --target fixture-target \
+    --action prepare-new \
+    --driver-version 0.1.1 \
+    --source-revision 0000000000000000000000000000000000000000 \
+    --kernel-release 6.18.39+rpt-rpi-v8 \
+    --manifest-sha256 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    --module-file hyperpixel2r_kms.ko \
+    --module-sha256 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+    --overlay-file hyperpixel2r-kms-000000000000.dtbo \
+    --overlay-sha256 cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+    --backlight-rule-file 70-planeradar-backlight.rules \
+    --backlight-rule-sha256 dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+    --kernel-target "$temporary_dir/candidate-target" \
+    >"$accepted_missing_identity_error" 2>&1
+accepted_missing_identity_status=$?
+set -e
+test "$accepted_missing_identity_status" = 64 || {
+  cat "$accepted_missing_identity_error" >&2
+  printf 'accepted prepare did not reject an explicit target export without identity\n' >&2
+  exit 1
+}
+grep -Fq -- '--kernel-target requires --target-identity-sha256' "$accepted_missing_identity_error" || {
+  cat "$accepted_missing_identity_error" >&2
+  printf 'accepted prepare did not report the target authority pairing error\n' >&2
   exit 1
 }
 

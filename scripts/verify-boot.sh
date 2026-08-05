@@ -6,7 +6,7 @@ source "$repo_root/scripts/common.sh"
 
 usage() {
   cat <<'USAGE'
-Usage: verify-boot.sh [--target TARGET] [--expect-tryboot|--expect-normal] [--expect-driver-version VERSION] [--expect-overlay-file FILE] [--json]
+Usage: verify-boot.sh [--target TARGET] [--expect-tryboot|--expect-normal] [--expect-kernel-release RELEASE] [--expect-driver-version VERSION] [--expect-overlay-file FILE] [--json]
 
 Verify the live HyperPixel driver, generic compatible binding, DRM/input path,
 and current-boot SDL renderer evidence.  --json is a versioned stable result.
@@ -17,12 +17,14 @@ target="${HP2R_TARGET:-}"
 expected_boot=tryboot
 expected_driver_version=''
 expected_overlay_file=''
+expected_kernel_release=''
 json=false
 while test "$#" -gt 0; do
   case "$1" in
     --target) test "$#" -ge 2 || { echo '--target requires a value' >&2; exit 64; }; target="$2"; shift 2 ;;
     --expect-tryboot) expected_boot=tryboot; shift ;;
     --expect-normal) expected_boot=normal; shift ;;
+    --expect-kernel-release) test "$#" -ge 2 || { echo '--expect-kernel-release requires a value' >&2; exit 64; }; expected_kernel_release="$2"; shift 2 ;;
     --expect-driver-version) test "$#" -ge 2 || { echo '--expect-driver-version requires a value' >&2; exit 64; }; expected_driver_version="$2"; shift 2 ;;
     --expect-overlay-file) test "$#" -ge 2 || { echo '--expect-overlay-file requires a value' >&2; exit 64; }; expected_overlay_file="$2"; shift 2 ;;
     --json) json=true; shift ;;
@@ -34,13 +36,19 @@ done
 hp2r_validate_target "$target"
 if test -n "$expected_driver_version"; then [[ "$expected_driver_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'unsafe expected driver version' >&2; exit 64; }; fi
 if test -n "$expected_overlay_file"; then [[ "$expected_overlay_file" =~ ^hyperpixel2r-kms-[0-9a-f]{12}\.dtbo$ ]] || { echo 'unsafe expected overlay file' >&2; exit 64; }; fi
+if test -n "$expected_kernel_release"; then hp2r_validate_release "$expected_kernel_release"; fi
 ssh_options=(-o BatchMode=yes -o ConnectTimeout=8 -o ConnectionAttempts=1)
 release="$(ssh "${ssh_options[@]}" "$target" uname -r)"
 hp2r_validate_release "$release"
+if test -n "$expected_kernel_release" && test "$release" != "$expected_kernel_release"; then
+  echo 'running kernel release does not match the expected candidate' >&2
+  exit 1
+fi
+remote_expected_kernel_release="${expected_kernel_release:-$release}"
 remote_expected_driver_version="${expected_driver_version:-none}"
 remote_expected_overlay_file="${expected_overlay_file:-none}"
 
-ssh "${ssh_options[@]}" "$target" bash -s -- "$expected_boot" "$release" "$json" "$remote_expected_driver_version" "$remote_expected_overlay_file" <<'REMOTE'
+ssh "${ssh_options[@]}" "$target" bash -s -- "$expected_boot" "$remote_expected_kernel_release" "$json" "$remote_expected_driver_version" "$remote_expected_overlay_file" <<'REMOTE'
 set -euo pipefail
 expected_boot="$1"
 release="$2"

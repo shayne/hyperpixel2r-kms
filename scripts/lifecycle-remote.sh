@@ -2314,7 +2314,69 @@ identity() {
   transaction="$(assert_transaction_state)" || die 'candidate transaction is not safe to inspect'
   IFS=$'\t' read -r driver_version revision release artifact_dir <<<"$transaction"
   overlay_file="$(state_value overlay_file)"
-  printf '%s\t%s\n' "$driver_version" "$overlay_file"
+  printf '%s\t%s\t%s\n' "$driver_version" "$overlay_file" "$release"
+}
+
+authorize_inactive_stage() {
+  local schema key count candidate_release candidate_revision release_tag expected_kernel_file
+  local expected_initramfs_file transition_sha
+  local -a keys=()
+
+  assert_accepted_state || die 'accepted driver state is missing or unsafe'
+  assert_owned_regular "$accepted_transition" 600 ||
+    die 'accepted candidate journal is missing or unsafe'
+  assert_owned_regular "$accepted_transition_prior_config" 600 ||
+    die 'accepted candidate prior config is missing or unsafe'
+  schema="$(accepted_transition_value schema_version)"
+  test "$schema" = 6 || die 'inactive stage requires schema-6 accepted authority'
+  keys=(
+    "${accepted_transition_keys_v5[@]}"
+    boot_transition prior_normal_kernel_sha256 prior_normal_initramfs_sha256
+    candidate_kernel_file candidate_kernel_sha256 candidate_initramfs_file
+    candidate_initramfs_sha256 candidate_base_dtb_sha256 candidate_vc4_overlay_sha256
+    explicit_normal_config_sha256 normalized_normal_config_sha256
+  )
+  test "$(sudo awk 'END { print NR }' "$accepted_transition")" = "${#keys[@]}" ||
+    die 'schema-6 accepted authority has an invalid row count'
+  sudo awk -F= 'NF != 2 || $1 == "" || $2 == "" { exit 1 }' "$accepted_transition" ||
+    die 'schema-6 accepted authority has malformed rows'
+  for key in "${keys[@]}"; do
+    count="$(sudo awk -F= -v wanted="$key" '$1 == wanted { count++ } END { print count + 0 }' "$accepted_transition")"
+    test "$count" = 1 || die 'schema-6 accepted authority has invalid keys'
+  done
+  test "$(accepted_transition_value kind)" = new &&
+    test "$(accepted_transition_value phase)" = prepared &&
+    test "$(accepted_transition_value boot_transition)" = inactive-kernel ||
+    die 'schema-6 accepted authority is not a prepared inactive candidate'
+  candidate_release="$(accepted_transition_value candidate_kernel_release)"
+  candidate_revision="$(accepted_transition_value candidate_source_revision)"
+  [[ "$candidate_release" =~ ^[A-Za-z0-9._+-]+$ ]] &&
+    [[ "$candidate_revision" =~ ^[0-9a-f]{40}$ ]] ||
+    die 'schema-6 accepted authority has an unsafe candidate identity'
+  test "$candidate_release" != "$(accepted_value kernel_release)" ||
+    die 'schema-6 accepted authority is not cross-kernel'
+  for key in \
+    prior_normal_kernel_sha256 prior_normal_initramfs_sha256 candidate_kernel_sha256 \
+    candidate_initramfs_sha256 candidate_base_dtb_sha256 candidate_vc4_overlay_sha256; do
+    [[ "$(accepted_transition_value "$key")" =~ ^[0-9a-f]{64}$ ]] ||
+      die 'schema-6 accepted authority has an unsafe digest'
+  done
+  test "$(accepted_transition_value explicit_normal_config_sha256)" = pending &&
+    test "$(accepted_transition_value normalized_normal_config_sha256)" = pending ||
+    die 'schema-6 accepted authority has advanced unexpectedly'
+  release_tag="$(printf %s "$candidate_release" | sha256sum | awk '{ print substr($1, 1, 12) }')"
+  expected_kernel_file="hp2r-${candidate_revision:0:12}-${release_tag}-kernel.img"
+  expected_initramfs_file="hp2r-${candidate_revision:0:12}-${release_tag}-initramfs.img"
+  test "$(accepted_transition_value candidate_kernel_file)" = "$expected_kernel_file" &&
+    test "$(accepted_transition_value candidate_initramfs_file)" = "$expected_initramfs_file" ||
+    die 'schema-6 accepted authority has non-deterministic firmware names'
+  transition_sha="$(sha "$accepted_transition")" || die 'failed to hash accepted authority'
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$candidate_release" "$expected_kernel_file" \
+    "$(accepted_transition_value candidate_kernel_sha256)" "$expected_initramfs_file" \
+    "$(accepted_transition_value candidate_initramfs_sha256)" \
+    "$(accepted_transition_value candidate_base_dtb_sha256)" \
+    "$(accepted_transition_value candidate_vc4_overlay_sha256)" "$transition_sha"
 }
 
 commit() {
@@ -5828,6 +5890,7 @@ fi
 case "${1-}" in
   stage) shift; stage "$@" ;;
   identity) identity ;;
+  authorize-inactive-stage) authorize_inactive_stage ;;
   commit) commit ;;
   rollback) rollback ;;
   record-accepted) shift; record_accepted "$@" ;;
@@ -5844,5 +5907,5 @@ case "${1-}" in
   retire-inactive) shift; retire_inactive_accepted "$@" ;;
   uninstall) uninstall ;;
   cleanup-legacy-planeradar) shift; cleanup_legacy_planeradar "$@" ;;
-  *) die 'usage: lifecycle-remote.sh {stage|identity|commit|rollback|record-accepted|recover-accepted-record|prepare-new-accepted|mark-committed-accepted|stage-retained|commit-retained|recover-accepted|mark-verified-accepted|finalize-accepted|uninstall-accepted|finalize-uninstall-accepted|retire-inactive|uninstall|cleanup-legacy-planeradar}' ;;
+  *) die 'usage: lifecycle-remote.sh {stage|identity|authorize-inactive-stage|commit|rollback|record-accepted|recover-accepted-record|prepare-new-accepted|mark-committed-accepted|stage-retained|commit-retained|recover-accepted|mark-verified-accepted|finalize-accepted|uninstall-accepted|finalize-uninstall-accepted|retire-inactive|uninstall|cleanup-legacy-planeradar}' ;;
 esac

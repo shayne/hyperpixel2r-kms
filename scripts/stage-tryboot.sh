@@ -15,6 +15,9 @@ Options:
   --target TARGET              SSH target (or set HP2R_TARGET)
   --artifact-dir DIR           Exact-kernel artifact directory
   --kernel-target DIR          Exported kernel target parent (default: dist/kernel-target)
+  --kernel-release RELEASE     Inactive candidate release (requires target identity)
+  --target-identity-sha256 SHA256
+                              Exact identity for the inactive target export
   --replace-overlay NAME       Replace exactly one declared overlay NAME
   --stage-only                 Stage the candidate without requesting a reboot
   -h, --help                   Show this help
@@ -24,6 +27,8 @@ USAGE
 target="${HP2R_TARGET:-}"
 artifact_dir=''
 kernel_target_parent="$repo_root/dist/kernel-target"
+requested_release=''
+target_identity_sha256=''
 replace_overlay=''
 stage_only=false
 while test "$#" -gt 0; do
@@ -31,6 +36,8 @@ while test "$#" -gt 0; do
     --target) test "$#" -ge 2 || { echo '--target requires a value' >&2; exit 64; }; target="$2"; shift 2 ;;
     --artifact-dir) test "$#" -ge 2 || { echo '--artifact-dir requires a value' >&2; exit 64; }; artifact_dir="$2"; shift 2 ;;
     --kernel-target) test "$#" -ge 2 || { echo '--kernel-target requires a value' >&2; exit 64; }; kernel_target_parent="$2"; shift 2 ;;
+    --kernel-release) test "$#" -ge 2 || { echo '--kernel-release requires a value' >&2; exit 64; }; requested_release="$2"; shift 2 ;;
+    --target-identity-sha256) test "$#" -ge 2 || { echo '--target-identity-sha256 requires a value' >&2; exit 64; }; target_identity_sha256="$2"; shift 2 ;;
     --replace-overlay) test "$#" -ge 2 || { echo '--replace-overlay requires a value' >&2; exit 64; }; replace_overlay="$2"; shift 2 ;;
     --stage-only) stage_only=true; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -39,11 +46,34 @@ while test "$#" -gt 0; do
 done
 : "${target:?set HP2R_TARGET or pass --target}"
 hp2r_validate_target "$target"
+if test -n "$requested_release"; then
+  hp2r_validate_release "$requested_release"
+  [[ "$target_identity_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+    echo '--kernel-release requires --target-identity-sha256 as lowercase SHA-256' >&2
+    exit 64
+  }
+elif test -n "$target_identity_sha256"; then
+  echo '--target-identity-sha256 requires --kernel-release' >&2
+  exit 64
+fi
 case "$replace_overlay" in ''|*[!A-Za-z0-9._+-]*) test -z "$replace_overlay" || { echo "unsafe replacement overlay: $replace_overlay" >&2; exit 1; } ;; esac
 
 ssh_options=(-o BatchMode=yes -o ConnectTimeout=8 -o ConnectionAttempts=1)
-release="$(ssh "${ssh_options[@]}" "$target" uname -r)"
-hp2r_validate_release "$release"
+running_release="$(ssh "${ssh_options[@]}" "$target" uname -r)"
+hp2r_validate_release "$running_release"
+if test -n "$requested_release"; then
+  test "$requested_release" != "$running_release" || {
+    echo 'same-kernel stage must not receive inactive target authority' >&2
+    exit 64
+  }
+  release="$requested_release"
+  target_dir="$(hp2r_release_path "$kernel_target_parent" "$release")"
+  target_manifest="$target_dir/target.txt"
+  hp2r_validate_inactive_target_manifest "$target_manifest" "$target_dir/root"
+  hp2r_require_target_identity "$target_manifest" "$target_identity_sha256"
+else
+  release="$running_release"
+fi
 if test -z "$artifact_dir"; then artifact_dir="$(hp2r_release_path "$repo_root/dist/artifacts" "$release")"; fi
 test ! -L "$artifact_dir" && test -d "$artifact_dir" || { echo "artifact directory is missing or a symlink: $artifact_dir" >&2; exit 1; }
 artifact_dir="$(cd "$artifact_dir" && pwd -P)"
@@ -78,6 +108,32 @@ hp2r_verify_sha256 "$artifact_dir/$overlay_file" "$(hp2r_manifest_value "$manife
 hp2r_verify_sha256 "$artifact_dir/$applied_dtb_file" "$(hp2r_manifest_value "$manifest" applied_dtb_sha256)" 'applied DTB'
 hp2r_validate_backlight_rule "$artifact_dir/$backlight_rule_file"
 hp2r_verify_sha256 "$artifact_dir/$backlight_rule_file" "$(hp2r_manifest_value "$manifest" backlight_rule_sha256)" 'backlight rule'
+
+if test -n "$requested_release"; then
+  candidate_kernel_sha256="$(hp2r_manifest_value "$target_manifest" kernel_image_sha256)"
+  candidate_initramfs_sha256="$(hp2r_manifest_value "$target_manifest" initramfs_sha256)"
+  candidate_base_dtb_sha256="$(hp2r_manifest_value "$target_manifest" base_dtb_sha256)"
+  candidate_vc4_overlay_sha256="$(hp2r_manifest_value "$target_manifest" vc4_overlay_sha256)"
+  release_tag="$(printf %s "$release" | sha256sum | awk '{ print substr($1, 1, 12) }')"
+  candidate_kernel_file="hp2r-${source_revision:0:12}-${release_tag}-kernel.img"
+  candidate_initramfs_file="hp2r-${source_revision:0:12}-${release_tag}-initramfs.img"
+  authorization="$(ssh "${ssh_options[@]}" "$target" bash -s -- authorize-inactive-stage < "$repo_root/scripts/lifecycle-remote.sh")"
+  IFS=$'\t' read -r authorized_release authorized_kernel_file authorized_kernel_sha \
+    authorized_initramfs_file authorized_initramfs_sha authorized_base_dtb_sha \
+    authorized_vc4_overlay_sha authorized_transition_sha extra <<<"$authorization"
+  test -z "${extra:-}" &&
+    test "$authorized_release" = "$release" &&
+    test "$authorized_kernel_file" = "$candidate_kernel_file" &&
+    test "$authorized_kernel_sha" = "$candidate_kernel_sha256" &&
+    test "$authorized_initramfs_file" = "$candidate_initramfs_file" &&
+    test "$authorized_initramfs_sha" = "$candidate_initramfs_sha256" &&
+    test "$authorized_base_dtb_sha" = "$candidate_base_dtb_sha256" &&
+    test "$authorized_vc4_overlay_sha" = "$candidate_vc4_overlay_sha256" &&
+    [[ "$authorized_transition_sha" =~ ^[0-9a-f]{64}$ ]] || {
+      echo 'inactive stage authorization does not match the local candidate authority' >&2
+      exit 1
+    }
+fi
 
 payload="$(mktemp -d "${TMPDIR:-/tmp}/hp2r-tryboot-payload.XXXXXX")"
 remote_stage=''

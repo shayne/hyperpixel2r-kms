@@ -23,6 +23,7 @@ payload=''
 identity=''
 driver_version=''
 overlay_file=''
+kernel_release=''
 cleanup() {
   local status=$?
   trap - EXIT
@@ -37,14 +38,16 @@ payload="$(mktemp -d "${TMPDIR:-/tmp}/hp2r-commit.XXXXXX")"
 install -m 0644 "$repo_root/scripts/lifecycle-remote.sh" "$payload/lifecycle-remote.sh"
 scp "${ssh_options[@]}" -rp "$payload/." "$target:$remote_stage/"
 identity="$(ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" identity)"
-[[ "$identity" =~ ^([0-9]+\.[0-9]+\.[0-9]+)$'\t'(hyperpixel2r-kms-[0-9a-f]{12}\.dtbo)$ ]] || {
+[[ "$identity" =~ ^([0-9]+\.[0-9]+\.[0-9]+)$'\t'(hyperpixel2r-kms-[0-9a-f]{12}\.dtbo)$'\t'([A-Za-z0-9._+-]+)$ ]] || {
   echo 'target returned an unsafe candidate identity' >&2
   exit 1
 }
 driver_version="${BASH_REMATCH[1]}"
 overlay_file="${BASH_REMATCH[2]}"
+kernel_release="${BASH_REMATCH[3]}"
 "$repo_root/scripts/verify-boot.sh" --target "$target" --expect-tryboot \
-  --expect-driver-version "$driver_version" --expect-overlay-file "$overlay_file" >/dev/null
+  --expect-kernel-release "$kernel_release" --expect-driver-version "$driver_version" \
+  --expect-overlay-file "$overlay_file" >/dev/null
 ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" commit
 ssh "${ssh_options[@]}" "$target" rm -rf -- "$remote_stage"
 remote_stage=''
