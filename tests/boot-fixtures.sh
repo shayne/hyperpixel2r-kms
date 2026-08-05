@@ -575,7 +575,7 @@ SCRIPT
 
   install -m 0755 /dev/stdin "$bin/uname" <<'SCRIPT'
 #!/usr/bin/env bash
-case "${1-}" in -r) printf '%s\n' "$HP2R_FIXTURE_RELEASE";; -m) printf 'aarch64\n';; *) exit 64;; esac
+case "${1-}" in -r) printf '%s\n' "${HP2R_FIXTURE_REMOTE_RUNNING_RELEASE:-$HP2R_FIXTURE_RELEASE}";; -m) printf 'aarch64\n';; *) exit 64;; esac
 SCRIPT
 
   install -m 0755 /dev/stdin "$bin/lsmod" <<'SCRIPT'
@@ -2809,6 +2809,7 @@ exercise_inactive_kernel_prepare() {
       source-hash) printf 'hash drift\n' >> "$root$candidate_kernel" ;;
       module-source-absent) rm -rf -- "$root/lib/modules/$candidate_release" ;;
       package-source-absent) rm -- "$root/var/lib/dpkg/info/linux-image-$candidate_release.list" ;;
+      running-third) export HP2R_FIXTURE_REMOTE_RUNNING_RELEASE='6.18.33+rpt-rpi-v8' ;;
       vc4-hash) printf 'vc4 drift\n' >> "$root/boot/firmware/overlays/vc4-kms-v3d.dtbo" ;;
       config-overlong) printf '%099d\n' 0 >> "$root/boot/firmware/config.txt" ;;
       config-duplicate) printf 'dtoverlay=hyperpixel2r-kms-aaaaaaaaaaaa.dtbo\n' >> "$root/boot/firmware/config.txt" ;;

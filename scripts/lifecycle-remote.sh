@@ -274,7 +274,7 @@ derive_normalized_normal_config() {
 }
 
 assert_no_boot_writers() {
-  local lock
+  local lock pid exe argv
 
   for lock in \
     "$root/var/lib/dpkg/lock" "$root/var/lib/dpkg/lock-frontend" \
@@ -287,6 +287,16 @@ assert_no_boot_writers() {
       command -v fuser >/dev/null 2>&1 || return
       sudo fuser -s -- "$lock" >/dev/null 2>&1 && return
     fi
+  done
+  for pid in /proc/[0-9]*; do
+    pid="${pid#/proc/}"
+    test "$pid" = "$$" || test "$pid" = "$PPID" || {
+      exe="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
+      argv="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+      case "${exe##*/}:$argv" in
+        apt:|apt-get:*|dpkg:*|unattended-upgrade:*|update-initramfs:*|mkinitramfs:*|kernel-install:*|dkms:*|depmod:*|flash-kernel:*|rpi-eeprom-update:*|lifecycle-remote.sh:*|accepted-lifecycle.sh:*|stage-tryboot.sh:*|*boot-selector*:*|*raspi-config*:* ) return 1 ;;
+      esac
+    }
   done
 }
 
@@ -4511,6 +4521,7 @@ prepare_new_accepted() {
   local base_dtb_path vc4_overlay_path prior_kernel_snapshot='' prior_initramfs_snapshot=''
   local candidate_kernel_snapshot='' candidate_initramfs_snapshot='' base_dtb_snapshot='' vc4_snapshot=''
   local explicit_normal='' normalized_normal='' transition_private_need=0 transition_firmware_need=0
+  local live_running_release
 
   assert_accepted_state || die 'accepted driver state is missing or unsafe'
   case "$#" in
@@ -4560,6 +4571,9 @@ prepare_new_accepted() {
     die 'candidate is already accepted'
   prior_version="$(accepted_value driver_version)"
   prior_release="$(accepted_value kernel_release)"
+  live_running_release="$(uname -r)" || die 'failed to read running kernel release'
+  test "$live_running_release" = "$prior_release" ||
+    die 'running kernel release differs from accepted receipt'
   prior_status="$(validate_dkms_status "$prior_version")" ||
     die 'accepted prior DKMS status is invalid'
   case "$prior_status" in absent|unregistered|registered) ;; *) die 'accepted prior DKMS status is invalid';; esac
@@ -4660,6 +4674,7 @@ prepare_new_accepted() {
       test "$(sha "$base_dtb_path")" = "$(sha "$base_dtb_snapshot")" &&
       test "$(sha "$vc4_overlay_path")" = "$(sha "$vc4_snapshot")" ||
       die 'inactive live source changed while capturing authority'
+    assert_no_boot_writers || die 'a boot/package writer started during capture'
     IFS=$'\t' read -r inactive_kernel_name inactive_initramfs_name <<<"$(
       inactive_candidate_boot_names "$revision" "$release"
     )" || die 'failed to derive inactive firmware names'
