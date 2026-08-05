@@ -19,6 +19,7 @@ accepted_transition_prior_kernel="$state_dir/accepted-transition-prior-kernel.im
 accepted_transition_prior_initramfs="$state_dir/accepted-transition-prior-initramfs.img"
 accepted_transition_candidate_kernel="$state_dir/accepted-transition-candidate-kernel.img"
 accepted_transition_candidate_initramfs="$state_dir/accepted-transition-candidate-initramfs.img"
+accepted_transition_prepared_anchor="$state_dir/accepted-transition-prepared.sha256"
 accepted_uninstall="$state_dir/accepted-uninstall"
 accepted_uninstall_stock="$state_dir/accepted-uninstall-stock.txt"
 accepted_prior_backlight_rule="$state_dir/accepted-prior-backlight-rule"
@@ -153,6 +154,8 @@ die() {
 
 accepted_workspace=''
 accepted_prior_published=false
+accepted_prepared_anchor_published=false
+accepted_transition_journal_published=false
 cleanup_accepted_workspace() {
   local status=$?
   trap - EXIT
@@ -161,6 +164,10 @@ cleanup_accepted_workspace() {
   fi
   if test "$status" -ne 0 && "$accepted_prior_published"; then
     sudo rm -f -- "$accepted_prior_backlight_rule" 2>/dev/null || true
+  fi
+  if test "$status" -ne 0 && "$accepted_prepared_anchor_published" &&
+    ! "$accepted_transition_journal_published"; then
+    sudo rm -f -- "$accepted_transition_prepared_anchor" 2>/dev/null || true
   fi
   exit "$status"
 }
@@ -181,6 +188,12 @@ fixture_mutate_setter_authority() {
   sudo sed -i 's/^target_identity_sha256=.*/target_identity_sha256=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/' \
     "$accepted_transition"
   : > "$root/tmp/setter-authority-mutated"
+}
+
+fixture_mutate_normalization_bound_leaf() {
+  test "${HP2R_FIXTURE_MUTATE_NORMALIZATION_BOUND_LEAF:-}" = 1 || return 0
+  printf 'fixture normalization bound leaf drift\n' | sudo tee -a "$accepted_transition_candidate_kernel" >/dev/null
+  : > "$root/tmp/normalization-bound-leaf-mutated"
 }
 
 dkms_available() {
@@ -362,16 +375,23 @@ assert_no_boot_writers() {
         *) return 1 ;;
       esac
     }
-    trusted_prepare_controller_ancestor() {
-      local ancestor index
+    trusted_accepted_controller_ancestor() {
+      local ancestor index action=''
       for ancestor in "${caller_ancestors[@]}"; do test "$pid" = "$ancestor" && break; done
       test "$pid" = "$ancestor" || return 1
       test "${argv[0]##*/}" = bash || return 1
       test "${argv[1]##*/}" = accepted-lifecycle.sh || return 1
-      for ((index = 2; index + 1 < ${#argv[@]}; index++)); do
-        test "${argv[index]}" = --action && test "${argv[index + 1]}" = prepare-new && return 0
+      for ((index = 2; index < ${#argv[@]}; index++)); do
+        test "${argv[index]}" = --action || continue
+        ((index + 1 < ${#argv[@]})) || return 1
+        test -z "$action" || return 1
+        action="${argv[index + 1]}"
+        index=$((index + 1))
       done
-      return 1
+      case "$action" in
+        prepare-new|mark-explicit-normal-verified|normalize-inactive-kernel|mark-normalized-verified) return 0 ;;
+        *) return 1 ;;
+      esac
     }
 
     for proc in /proc/[0-9]*; do
@@ -395,7 +415,7 @@ assert_no_boot_writers() {
       ((${#argv[@]} == 0)) && continue
       exe="$(readlink "$proc/exe" 2>/dev/null)" || exit 1
       known_tool "${exe##*/}" && exit 1
-      trusted_prepare_controller_ancestor && continue
+      trusted_accepted_controller_ancestor && continue
       known_script "${argv[0]}" && exit 1
       interpreter_script && exit 1
     done
@@ -433,10 +453,13 @@ clear_inactive_transition_companions() {
 
   assert_inactive_companions "$prior_kernel_sha" "$prior_initramfs_sha" \
     "$candidate_kernel_sha" "$candidate_initramfs_sha" || return
+  assert_owned_regular "$accepted_transition_prepared_anchor" 600 || return
   sudo rm -- "$accepted_transition_prior_kernel" "$accepted_transition_prior_initramfs" \
-    "$accepted_transition_candidate_kernel" "$accepted_transition_candidate_initramfs" || return
+    "$accepted_transition_candidate_kernel" "$accepted_transition_candidate_initramfs" \
+    "$accepted_transition_prepared_anchor" || return
   for companion in "$accepted_transition_prior_kernel" "$accepted_transition_prior_initramfs" \
-    "$accepted_transition_candidate_kernel" "$accepted_transition_candidate_initramfs"; do
+    "$accepted_transition_candidate_kernel" "$accepted_transition_candidate_initramfs" \
+    "$accepted_transition_prepared_anchor"; do
     test ! -L "$companion" && test ! -e "$companion" || return
   done
 }
@@ -454,6 +477,8 @@ recover_inactive_orphan_companions() {
   local index
 
   test ! -L "$accepted_transition" && test ! -e "$accepted_transition" || return
+  test ! -L "$accepted_transition_prepared_anchor" && \
+    test ! -e "$accepted_transition_prepared_anchor" || return
   if sudo test -L "$accepted_transition_prior_config"; then
     return
   elif sudo test -e "$accepted_transition_prior_config"; then
@@ -694,6 +719,280 @@ remove_transaction_workspace() {
   sudo rm -rf -- "$workspace" || return
   if sudo test -L "$workspace"; then return 1; fi
   sudo test ! -e "$workspace"
+}
+
+find_inactive_replay_workspace() {
+  local entry entries count=0
+
+  inactive_replay_workspace=''
+  entries="$(mktemp "${TMPDIR:-/tmp}/hp2r-inactive-workspaces.XXXXXX")" || return
+  if ! sudo find -P "$state_dir" -mindepth 1 -maxdepth 1 \
+    -name '.hp2r-transaction.*' -print0 > "$entries"; then
+    rm -f -- "$entries"
+    return 1
+  fi
+  while IFS= read -r -d '' entry; do
+    count=$((count + 1))
+    test "$count" = 1 || {
+      echo 'more than one inactive replay workspace exists' >&2
+      rm -f -- "$entries"
+      return 1
+    }
+    transaction_workspace_path "$entry" && assert_private_workspace "$entry" || {
+      echo 'inactive replay workspace is unsafe' >&2
+      rm -f -- "$entries"
+      return 1
+    }
+    inactive_replay_workspace="$entry"
+  done < "$entries"
+  rm -f -- "$entries"
+}
+
+inactive_replay_transition_sha() {
+  local kind="$1" prior_phase='' reset_explicit=false reset_normalized=false
+
+  case "$kind" in
+    explicit|normalization-initramfs|normalization-pair|normalization-config)
+      sha "$accepted_transition"
+      return
+      ;;
+    explicit-published)
+      prior_phase=staged
+      reset_explicit=true
+      ;;
+    normalization-initramfs-published)
+      prior_phase=explicit_normal_verified
+      ;;
+    normalization-pair-published)
+      prior_phase=canonical_initramfs_published
+      ;;
+    normalization-config-published)
+      prior_phase=canonical_pair_published
+      reset_normalized=true
+      ;;
+    *) return 1 ;;
+  esac
+  sudo awk -F= -v prior_phase="$prior_phase" \
+    -v reset_explicit="$reset_explicit" -v reset_normalized="$reset_normalized" '
+      $1 == "phase" { print "phase=" prior_phase; next }
+      $1 == "explicit_normal_config_sha256" && reset_explicit == "true" {
+        print "explicit_normal_config_sha256=pending"; next
+      }
+      $1 == "normalized_normal_config_sha256" && reset_normalized == "true" {
+        print "normalized_normal_config_sha256=pending"; next
+      }
+      { print }
+    ' "$accepted_transition" | sha256sum | awk '{ print $1 }'
+}
+
+inactive_replay_proposed_transition_sha() {
+  local kind="$1" next_phase='' explicit_sha='' normalized_sha=''
+
+  case "$kind" in
+    explicit)
+      next_phase=explicit_normal_published
+      explicit_sha="$(accepted_transition_value candidate_normal_config_sha256)" || return
+      ;;
+    normalization-initramfs)
+      next_phase=canonical_initramfs_published
+      ;;
+    normalization-pair)
+      next_phase=canonical_pair_published
+      ;;
+    normalization-config)
+      next_phase=normalized_config_published
+      normalized_sha="$(sudo awk -F= \
+        '$1 == "normalized_normal_config_sha256" { print $2 }' \
+        "$accepted_transition_prepared_anchor")" || return
+      ;;
+    verification-explicit)
+      next_phase=explicit_normal_verified
+      ;;
+    verification-normalized)
+      next_phase=normalized_verified
+      ;;
+    *) return 1 ;;
+  esac
+  [[ "$next_phase" =~ ^[a-z_]+$ ]] || return
+  test -z "$explicit_sha" || [[ "$explicit_sha" =~ ^[0-9a-f]{64}$ ]] || return
+  test -z "$normalized_sha" || [[ "$normalized_sha" =~ ^[0-9a-f]{64}$ ]] || return
+  sudo awk -F= -v next_phase="$next_phase" -v explicit="$explicit_sha" \
+    -v normalized="$normalized_sha" '
+      $1 == "phase" { print "phase=" next_phase; next }
+      $1 == "explicit_normal_config_sha256" && explicit != "" {
+        print "explicit_normal_config_sha256=" explicit; next
+      }
+      $1 == "normalized_normal_config_sha256" && normalized != "" {
+        print "normalized_normal_config_sha256=" normalized; next
+      }
+      { print }
+    ' "$accepted_transition" | sha256sum | awk '{ print $1 }'
+}
+
+assert_inactive_replay_workspace() {
+  local kind="$1" entry relative suffix expected_sha entries actual_sha
+  local normal_count=0 candidate_count=0 transition_count=0 normalized_count=0 explicit_count=0 setter_count=0
+
+  inactive_replay_leaf_names=()
+  inactive_replay_leaf_shas=()
+  inactive_replay_transition_snapshot=''
+  find_inactive_replay_workspace || return
+  test -n "$inactive_replay_workspace" || return 0
+  entries="$(mktemp "${TMPDIR:-/tmp}/hp2r-inactive-leaves.XXXXXX")" || return
+  if ! sudo find -P "$inactive_replay_workspace" -mindepth 1 -maxdepth 1 -print0 > "$entries"; then
+    rm -f -- "$entries"
+    return 1
+  fi
+  while IFS= read -r -d '' entry; do
+    relative="${entry#"$inactive_replay_workspace"/}"
+    assert_owned_regular "$entry" 600 || { rm -f -- "$entries"; return 1; }
+    case "$kind:$relative" in
+      explicit:.hp2r-normal-backup.*|explicit-published:.hp2r-normal-backup.*)
+        suffix="${relative#.hp2r-normal-backup.}"
+        [[ "$suffix" =~ ^[A-Za-z0-9]+$ ]] || { rm -f -- "$entries"; return 1; }
+        expected_sha="$(accepted_transition_value prior_normal_config_sha256)"
+        normal_count=$((normal_count + 1))
+        ;;
+      explicit:.hp2r-candidate-backup.*|explicit-published:.hp2r-candidate-backup.*)
+        suffix="${relative#.hp2r-candidate-backup.}"
+        [[ "$suffix" =~ ^[A-Za-z0-9]+$ ]] || { rm -f -- "$entries"; return 1; }
+        expected_sha="$(accepted_transition_value tryboot_config_sha256)"
+        candidate_count=$((candidate_count + 1))
+        ;;
+      explicit:.hp2r-commit-transition.*|explicit-published:.hp2r-commit-transition.*)
+        suffix="${relative#.hp2r-commit-transition.}"
+        [[ "$suffix" =~ ^[A-Za-z0-9]+$ ]] || { rm -f -- "$entries"; return 1; }
+        expected_sha="$(inactive_replay_transition_sha "$kind")"
+        transition_count=$((transition_count + 1))
+        inactive_replay_transition_snapshot="$entry"
+        ;;
+      normalization-initramfs:.hp2r-normalization-transition.*|normalization-pair:.hp2r-normalization-transition.*|normalization-config:.hp2r-normalization-transition.*|normalization-initramfs-published:.hp2r-normalization-transition.*|normalization-pair-published:.hp2r-normalization-transition.*|normalization-config-published:.hp2r-normalization-transition.*)
+        suffix="${relative#.hp2r-normalization-transition.}"
+        [[ "$suffix" =~ ^[A-Za-z0-9]+$ ]] || { rm -f -- "$entries"; return 1; }
+        expected_sha="$(inactive_replay_transition_sha "$kind")"
+        transition_count=$((transition_count + 1))
+        inactive_replay_transition_snapshot="$entry"
+        ;;
+      normalization-config:normalized-normal|normalization-config-published:normalized-normal)
+        expected_sha="$(sudo awk -F= '$1 == "normalized_normal_config_sha256" { print $2 }' \
+          "$accepted_transition_prepared_anchor")"
+        normalized_count=$((normalized_count + 1))
+        ;;
+      normalization-config:.hp2r-explicit-normal-before-normalization.*|normalization-config-published:.hp2r-explicit-normal-before-normalization.*)
+        suffix="${relative#.hp2r-explicit-normal-before-normalization.}"
+        [[ "$suffix" =~ ^[A-Za-z0-9]+$ ]] || { rm -f -- "$entries"; return 1; }
+        expected_sha="$(accepted_transition_value explicit_normal_config_sha256)"
+        explicit_count=$((explicit_count + 1))
+        ;;
+      explicit:accepted-transition|normalization-initramfs:accepted-transition|normalization-pair:accepted-transition|normalization-config:accepted-transition)
+        expected_sha="$(inactive_replay_proposed_transition_sha "$kind")"
+        setter_count=$((setter_count + 1))
+        ;;
+      explicit-published:accepted-transition|normalization-initramfs-published:accepted-transition|normalization-pair-published:accepted-transition|normalization-config-published:accepted-transition)
+        expected_sha="$(sha "$accepted_transition")"
+        setter_count=$((setter_count + 1))
+        ;;
+      *)
+        printf 'unexpected inactive replay workspace leaf: %s\n' "$entry" >&2
+        rm -f -- "$entries"
+        return 1
+        ;;
+    esac
+    [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || { rm -f -- "$entries"; return 1; }
+    actual_sha="$(sha "$entry")" || { rm -f -- "$entries"; return 1; }
+    test "$actual_sha" = "$expected_sha" || { rm -f -- "$entries"; return 1; }
+    inactive_replay_leaf_names+=("$relative")
+    inactive_replay_leaf_shas+=("$actual_sha")
+  done < "$entries"
+  rm -f -- "$entries" || return
+  test "$setter_count" -le 1 || return
+  case "$kind" in
+    explicit|explicit-published)
+      test "$normal_count:$candidate_count:$transition_count:$normalized_count:$explicit_count" = 1:1:1:0:0
+      ;;
+    normalization-initramfs|normalization-pair|normalization-initramfs-published|normalization-pair-published)
+      test "$normal_count:$candidate_count:$transition_count:$normalized_count:$explicit_count" = 0:0:1:0:0
+      ;;
+    normalization-config|normalization-config-published)
+      test "$normal_count:$candidate_count:$transition_count:$normalized_count:$explicit_count" = 0:0:1:1:1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+assert_phase_setter_replay_workspace_sha() {
+  local expected_sha="$1" entry relative entries actual_sha count=0
+
+  inactive_replay_leaf_names=()
+  inactive_replay_leaf_shas=()
+  inactive_replay_transition_snapshot=''
+  find_inactive_replay_workspace || return
+  test -n "$inactive_replay_workspace" || return 1
+  [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || return
+  entries="$(mktemp "${TMPDIR:-/tmp}/hp2r-phase-setter-leaves.XXXXXX")" || return
+  if ! sudo find -P "$inactive_replay_workspace" -mindepth 1 -maxdepth 1 -print0 > "$entries"; then
+    rm -f -- "$entries"
+    return 1
+  fi
+  while IFS= read -r -d '' entry; do
+    count=$((count + 1))
+    relative="${entry#"$inactive_replay_workspace"/}"
+    test "$relative" = accepted-transition || { rm -f -- "$entries"; return 1; }
+    assert_owned_regular "$entry" 600 || { rm -f -- "$entries"; return 1; }
+    actual_sha="$(sha "$entry")" || { rm -f -- "$entries"; return 1; }
+    test "$actual_sha" = "$expected_sha" || { rm -f -- "$entries"; return 1; }
+    inactive_replay_leaf_names+=("$relative")
+    inactive_replay_leaf_shas+=("$actual_sha")
+  done < "$entries"
+  rm -f -- "$entries" || return
+  test "$count" = 1
+}
+
+assert_phase_setter_replay_workspace() {
+  local expected_sha
+
+  expected_sha="$(sha "$accepted_transition")" || return
+  assert_phase_setter_replay_workspace_sha "$expected_sha"
+}
+
+assert_proposed_phase_setter_replay_workspace() {
+  local kind="$1" expected_sha
+
+  expected_sha="$(inactive_replay_proposed_transition_sha "$kind")" || return
+  assert_phase_setter_replay_workspace_sha "$expected_sha"
+}
+
+assert_absent_or_proposed_phase_setter_workspace() {
+  local kind="$1"
+
+  find_inactive_replay_workspace || return
+  test -z "$inactive_replay_workspace" ||
+    assert_proposed_phase_setter_replay_workspace "$kind"
+}
+
+retire_verified_inactive_replay_workspace() {
+  local index entry entries count=0
+
+  test -n "$inactive_replay_workspace" || return 0
+  assert_private_workspace "$inactive_replay_workspace" || return
+  entries="$(mktemp "${TMPDIR:-/tmp}/hp2r-inactive-retire.XXXXXX")" || return
+  if ! sudo find -P "$inactive_replay_workspace" -mindepth 1 -maxdepth 1 -print0 > "$entries"; then
+    rm -f -- "$entries"
+    return 1
+  fi
+  while IFS= read -r -d '' entry; do count=$((count + 1)); done < "$entries"
+  rm -f -- "$entries" || return
+  test "$count" = "${#inactive_replay_leaf_names[@]}" || return
+  for index in "${!inactive_replay_leaf_names[@]}"; do
+    entry="$inactive_replay_workspace/${inactive_replay_leaf_names[$index]}"
+    assert_owned_regular "$entry" 600 &&
+      test "$(sha "$entry")" = "${inactive_replay_leaf_shas[$index]}" || return
+  done
+  remove_transaction_workspace "$inactive_replay_workspace" || return
+  inactive_replay_workspace=''
+  sudo sync
+  find_inactive_replay_workspace || return
+  test -z "$inactive_replay_workspace"
 }
 
 private_file() {
@@ -1229,13 +1528,165 @@ state_value() {
   sudo awk -F= -v wanted="$key" '$1 == wanted { print $2 }' "$state_file"
 }
 
-canonical_prepared_transition_sha() {
-  assert_owned_regular "$accepted_transition" 600 || return
-  sudo sed \
-    -e 's/^phase=staged$/phase=prepared/' \
-    -e 's/^candidate_dkms_inventory_sha256=.*/candidate_dkms_inventory_sha256=pending/' \
-    "$accepted_transition" | sha256sum | awk '{ print $1 }'
+canonical_prepared_transition_sha_from() {
+  local transition="$1" schema
+
+  assert_owned_regular "$transition" 600 || return
+  schema="$(sudo awk -F= '$1 == "schema_version" { print $2 }' "$transition")" || return
+  case "$schema" in
+    6)
+      # Every durable inactive-kernel phase is bound to the immutable bytes of
+      # its prepared journal.  Only the phase-local progress fields may vary.
+      sudo sed \
+        -e 's/^phase=.*/phase=prepared/' \
+        -e 's/^candidate_dkms_inventory_sha256=.*/candidate_dkms_inventory_sha256=pending/' \
+        -e 's/^explicit_normal_config_sha256=.*/explicit_normal_config_sha256=pending/' \
+        -e 's/^normalized_normal_config_sha256=.*/normalized_normal_config_sha256=pending/' \
+        "$transition"
+      ;;
+    5)
+      sudo sed \
+        -e 's/^phase=staged$/phase=prepared/' \
+        -e 's/^phase=explicit_normal_published$/phase=prepared/' \
+        -e 's/^candidate_dkms_inventory_sha256=.*/candidate_dkms_inventory_sha256=pending/' \
+        -e 's/^explicit_normal_config_sha256=.*/explicit_normal_config_sha256=pending/' \
+        "$transition"
+      ;;
+    *) return 1 ;;
+  esac | sha256sum | awk '{ print $1 }'
 }
+
+canonical_prepared_transition_sha() {
+  canonical_prepared_transition_sha_from "$accepted_transition"
+}
+
+assert_prepared_transition_anchor() {
+  local key count anchored_sha normalized_sha
+
+  assert_owned_regular "$accepted_transition_prepared_anchor" 600 || return
+  test "$(sudo awk 'END { print NR }' "$accepted_transition_prepared_anchor")" = 2 || return
+  sudo awk -F= 'NF != 2 || $1 == "" || $2 == "" { exit 1 }' \
+    "$accepted_transition_prepared_anchor" || return
+  for key in prepared_transition_sha256 normalized_normal_config_sha256; do
+    count="$(sudo awk -F= -v wanted="$key" \
+      '$1 == wanted { count++ } END { print count + 0 }' \
+      "$accepted_transition_prepared_anchor")"
+    test "$count" = 1 || return
+  done
+  anchored_sha="$(sudo awk -F= '$1 == "prepared_transition_sha256" { print $2 }' \
+    "$accepted_transition_prepared_anchor")" || return
+  normalized_sha="$(sudo awk -F= '$1 == "normalized_normal_config_sha256" { print $2 }' \
+    "$accepted_transition_prepared_anchor")" || return
+  [[ "$anchored_sha" =~ ^[0-9a-f]{64}$ ]] || return
+  [[ "$normalized_sha" =~ ^[0-9a-f]{64}$ ]] || return
+  test "$anchored_sha" = "$(canonical_prepared_transition_sha)" || return
+  case "$(accepted_transition_value phase)" in
+    normalized_config_published|normalized_verified|finalizing|receipt_published)
+      test "$(accepted_transition_value normalized_normal_config_sha256)" = \
+        "$normalized_sha"
+      ;;
+  esac
+}
+
+assert_schema5_explicit_resume_state() {
+  local release revision version artifact kernel_file initramfs_file key count expected_config_sha
+
+  assert_owned_regular "$accepted_transition" 600 &&
+    assert_owned_regular "$accepted_transition_prior_config" 600 || return
+  test "$(accepted_transition_value schema_version)" = 6 || return
+  case "$(accepted_transition_value phase)" in
+    staged|explicit_normal_published|explicit_normal_verified|canonical_initramfs_published|canonical_pair_published) ;;
+    *) return 1 ;;
+  esac
+  test "$(sudo awk 'END { print NR }' "$accepted_transition")" = "${#accepted_transition_keys_v6[@]}" || return
+  sudo awk -F= 'NF != 2 || $1 == "" || $2 == "" { exit 1 }' "$accepted_transition" || return
+  for key in "${accepted_transition_keys_v6[@]}"; do
+    count="$(sudo awk -F= -v wanted="$key" '$1 == wanted { count++ } END { print count + 0 }' "$accepted_transition")"
+    test "$count" = 1 || return
+  done
+  assert_state_schema || return
+  test "$(state_value schema_version)" = 5 &&
+    test "$(state_value boot_transition)" = inactive-kernel || return
+  release="$(accepted_transition_value candidate_kernel_release)"
+  revision="$(accepted_transition_value candidate_source_revision)"
+  version="$(accepted_transition_value candidate_driver_version)"
+  if test "$(accepted_transition_value phase)" = staged; then
+    expected_config_sha="$(accepted_transition_value candidate_normal_config_sha256)"
+  else
+    expected_config_sha="$(accepted_transition_value explicit_normal_config_sha256)"
+  fi
+  test "$(state_value kernel_release)" = "$release" &&
+    test "$(state_value source_revision)" = "$revision" &&
+    test "$(state_value driver_version)" = "$version" &&
+    test "$(state_value module_file)" = "$(accepted_transition_value candidate_module_file)" &&
+    test "$(state_value module_sha256)" = "$(accepted_transition_value candidate_module_sha256)" &&
+    test "$(state_value overlay_file)" = "$(accepted_transition_value candidate_overlay_file)" &&
+    test "$(state_value overlay_sha256)" = "$(accepted_transition_value candidate_overlay_sha256)" &&
+    test "$(state_value normal_config_sha256)" = "$(accepted_transition_value prior_normal_config_sha256)" &&
+    test "$(state_value candidate_config_sha256)" = "$expected_config_sha" &&
+    test "$(state_value accepted_transition_sha256)" = "$(canonical_prepared_transition_sha)" || return
+  artifact="$artifact_root/$version/$revision/$release"
+  assert_artifact_tree "$artifact" "$(state_value tryboot_existed)" || return
+  assert_owned_regular "${root}/lib/modules/$release/extra/$(state_value module_file)" 644 &&
+    test "$(sha "${root}/lib/modules/$release/extra/$(state_value module_file)")" = "$(state_value module_sha256)" &&
+    assert_owned_regular "${root}/boot/firmware/overlays/$(state_value overlay_file)" boot &&
+    test "$(sha "${root}/boot/firmware/overlays/$(state_value overlay_file)")" = "$(state_value overlay_sha256)" || return
+  kernel_file="$(accepted_transition_value candidate_kernel_file)"
+  initramfs_file="$(accepted_transition_value candidate_initramfs_file)"
+  assert_owned_regular "${root}/boot/firmware/$kernel_file" boot &&
+    test "$(sha "${root}/boot/firmware/$kernel_file")" = "$(accepted_transition_value candidate_kernel_sha256)" &&
+    assert_owned_regular "${root}/boot/firmware/$initramfs_file" boot &&
+    test "$(sha "${root}/boot/firmware/$initramfs_file")" = "$(accepted_transition_value candidate_initramfs_sha256)" || return
+  assert_inactive_companions \
+    "$(accepted_transition_value prior_normal_kernel_sha256)" \
+    "$(accepted_transition_value prior_normal_initramfs_sha256)" \
+    "$(accepted_transition_value candidate_kernel_sha256)" \
+    "$(accepted_transition_value candidate_initramfs_sha256)" || return
+  assert_owned_regular "${root}/boot/vmlinuz-$(accepted_transition_value prior_kernel_release)" boot &&
+    test "$(sha "${root}/boot/vmlinuz-$(accepted_transition_value prior_kernel_release)")" = "$(accepted_transition_value prior_normal_kernel_sha256)" &&
+    assert_owned_regular "${root}/boot/initrd.img-$(accepted_transition_value prior_kernel_release)" boot &&
+    test "$(sha "${root}/boot/initrd.img-$(accepted_transition_value prior_kernel_release)")" = "$(accepted_transition_value prior_normal_initramfs_sha256)"
+}
+
+assert_schema5_explicit_prephase_state() {
+  assert_schema5_explicit_resume_state || return
+  test "$(accepted_transition_value phase)" = staged || return
+  test "$(sha "$normal_config")" = \
+    "$(accepted_transition_value candidate_normal_config_sha256)" &&
+    validate_accepted_prior_tryboot \
+      "$(accepted_transition_value prior_tryboot_existed)" \
+      "$(accepted_transition_value prior_tryboot_sha256)" &&
+    assert_owned_regular "${root}/boot/firmware/kernel8.img" boot &&
+    test "$(sha "${root}/boot/firmware/kernel8.img")" = \
+      "$(accepted_transition_value prior_normal_kernel_sha256)" &&
+    assert_owned_regular "${root}/boot/firmware/initramfs8" boot &&
+    test "$(sha "${root}/boot/firmware/initramfs8")" = \
+      "$(accepted_transition_value prior_normal_initramfs_sha256)"
+}
+
+assert_schema5_explicit_config_prephase_state() {
+  assert_schema5_explicit_resume_state || return
+  test "$(accepted_transition_value phase)" = staged || return
+  test "$(sha "$normal_config")" = \
+    "$(accepted_transition_value candidate_normal_config_sha256)" &&
+    assert_owned_regular "$tryboot_config" boot &&
+    test "$(sha "$tryboot_config")" = \
+      "$(accepted_transition_value tryboot_config_sha256)" &&
+    assert_owned_regular "${root}/boot/firmware/kernel8.img" boot &&
+    test "$(sha "${root}/boot/firmware/kernel8.img")" = \
+      "$(accepted_transition_value prior_normal_kernel_sha256)" &&
+    assert_owned_regular "${root}/boot/firmware/initramfs8" boot &&
+    test "$(sha "${root}/boot/firmware/initramfs8")" = \
+      "$(accepted_transition_value prior_normal_initramfs_sha256)"
+}
+
+assert_schema5_explicit_resume_state_at() (
+  # The durable post-phase hold has the exact schema-5 bytes that would have
+  # lived at state_file.  Validate it without first moving it into place: a
+  # probe must never mutate replay authority merely to inspect it.
+  state_file="$1"
+  assert_schema5_explicit_resume_state
+)
 
 assert_schema5_staged_authority() (
   local release="$1" revision="$2" module_file="$3" module_sha="$4"
@@ -1255,8 +1706,12 @@ assert_schema5_staged_authority() (
     test "$(accepted_transition_value boot_transition)" = inactive-kernel || return
   case "$(accepted_transition_value phase)" in
     staged) ;;
+    explicit_normal_published)
+      test "$(accepted_transition_value explicit_normal_config_sha256)" = "$candidate_sha" &&
+        test "$(sha "$normal_config")" = "$candidate_sha" || return
+      ;;
     prepared) test "${schema5_staged_authority_allow_prepared:-false}" = true || return ;;
-    *) return ;;
+    *) return 1 ;;
   esac
   test "$(accepted_transition_value candidate_driver_version)" = "$(state_value driver_version)" &&
     test "$(accepted_transition_value candidate_kernel_release)" = "$release" &&
@@ -1265,8 +1720,11 @@ assert_schema5_staged_authority() (
     test "$(accepted_transition_value candidate_module_sha256)" = "$module_sha" &&
     test "$(accepted_transition_value candidate_overlay_file)" = "$overlay_file" &&
     test "$(accepted_transition_value candidate_overlay_sha256)" = "$overlay_sha" &&
-    test "$(accepted_transition_value prior_normal_config_sha256)" = "$normal_sha" &&
     test "$(accepted_transition_value tryboot_config_sha256)" = "$candidate_sha" || return
+  if test "$(accepted_transition_value phase)" = staged ||
+    test "$(accepted_transition_value phase)" = prepared; then
+    test "$(accepted_transition_value prior_normal_config_sha256)" = "$normal_sha" || return
+  fi
   IFS=$'\t' read -r expected_kernel_file expected_initramfs_file <<<"$(
     inactive_candidate_boot_names "$revision" "$release"
   )" || return
@@ -1351,7 +1809,13 @@ assert_transaction_state() {
   esac
   require_regular "$normal_config" || return
   require_regular "$tryboot_config" || return
-  test "$(sha "$normal_config")" = "$normal_sha" || { echo 'normal boot config changed since stage' >&2; return 1; }
+  if test "$schema" = 5 &&
+    test "$(accepted_transition_value schema_version 2>/dev/null || true)" = 6 &&
+    test "$(accepted_transition_value phase 2>/dev/null || true)" = explicit_normal_published; then
+    test "$(sha "$normal_config")" = "$candidate_sha" || { echo 'explicit normal boot config changed since stage' >&2; return 1; }
+  else
+    test "$(sha "$normal_config")" = "$normal_sha" || { echo 'normal boot config changed since stage' >&2; return 1; }
+  fi
   test "$(sha "$tryboot_config")" = "$candidate_sha" || { echo 'candidate tryboot config changed since stage' >&2; return 1; }
   artifact_dir="$artifact_root/$driver_version/$revision/$release"
   assert_artifact_tree "$artifact_dir" "$prior_existed" || return
@@ -2989,6 +3453,231 @@ identity() {
   printf '%s\t%s\t%s\n' "$driver_version" "$overlay_file" "$release"
 }
 
+explicit_commit_boot_expectation() {
+  local tryboot_flag="${root}/proc/device-tree/chosen/bootloader/tryboot" tryboot_hex=''
+
+  if sudo test -L "$tryboot_flag"; then
+    return 1
+  elif sudo test -e "$tryboot_flag"; then
+    require_regular "$tryboot_flag" || return
+    tryboot_hex="$(sudo od -An -tx1 -N4 "$tryboot_flag" | tr -d '[:space:]')" || return
+  fi
+  if test "$tryboot_hex" = 00000001; then printf 'tryboot\n'; else printf 'normal\n'; fi
+}
+
+assert_explicit_inactive_replay_leaves() {
+  local artifact candidate_release candidate_version candidate_revision phase selection_phase
+
+  assert_accepted_transition || return
+  test "$(accepted_transition_value schema_version)" = 6 || return
+  case "$(accepted_transition_value phase)" in
+    explicit_normal_published|explicit_normal_verified|canonical_initramfs_published|canonical_pair_published) ;;
+    *) return 1 ;;
+  esac
+  candidate_release="$(accepted_transition_value candidate_kernel_release)"
+  candidate_version="$(accepted_transition_value candidate_driver_version)"
+  candidate_revision="$(accepted_transition_value candidate_source_revision)"
+  phase="$(accepted_transition_value phase)"
+  selection_phase="${1:-$phase}"
+  case "$selection_phase" in
+    explicit_normal_published|explicit_normal_verified|canonical_initramfs_published|canonical_pair_published|normalized_config_published) ;;
+    *) return 1 ;;
+  esac
+  case "$selection_phase" in
+    normalized_config_published)
+      test "$(sha "$normal_config")" = "$(sudo awk -F= \
+        '$1 == "normalized_normal_config_sha256" { print $2 }' \
+        "$accepted_transition_prepared_anchor")" || return
+      ;;
+    *)
+      test "$(sha "$normal_config")" = \
+        "$(accepted_transition_value explicit_normal_config_sha256)" || return
+      ;;
+  esac
+  validate_accepted_prior_tryboot \
+    "$(accepted_transition_value prior_tryboot_existed)" \
+    "$(accepted_transition_value prior_tryboot_sha256)" || return
+  artifact="$artifact_root/$candidate_version/$candidate_revision/$candidate_release"
+  assert_artifact_tree "$artifact" "$(accepted_transition_value prior_tryboot_existed)" || return
+  assert_owned_regular "${root}/lib/modules/$candidate_release/extra/$(accepted_transition_value candidate_module_file)" 644 &&
+    test "$(sha "${root}/lib/modules/$candidate_release/extra/$(accepted_transition_value candidate_module_file)")" = "$(accepted_transition_value candidate_module_sha256)" &&
+    assert_owned_regular "${root}/boot/firmware/overlays/$(accepted_transition_value candidate_overlay_file)" boot &&
+    test "$(sha "${root}/boot/firmware/overlays/$(accepted_transition_value candidate_overlay_file)")" = "$(accepted_transition_value candidate_overlay_sha256)" &&
+    assert_owned_regular "${root}/boot/firmware/$(accepted_transition_value candidate_kernel_file)" boot &&
+    test "$(sha "${root}/boot/firmware/$(accepted_transition_value candidate_kernel_file)")" = "$(accepted_transition_value candidate_kernel_sha256)" &&
+    assert_owned_regular "${root}/boot/firmware/$(accepted_transition_value candidate_initramfs_file)" boot &&
+    test "$(sha "${root}/boot/firmware/$(accepted_transition_value candidate_initramfs_file)")" = "$(accepted_transition_value candidate_initramfs_sha256)" &&
+    assert_inactive_companions \
+      "$(accepted_transition_value prior_normal_kernel_sha256)" \
+      "$(accepted_transition_value prior_normal_initramfs_sha256)" \
+      "$(accepted_transition_value candidate_kernel_sha256)" \
+      "$(accepted_transition_value candidate_initramfs_sha256)" || return
+  assert_owned_regular "${root}/boot/firmware/kernel8.img" boot &&
+    assert_owned_regular "${root}/boot/firmware/initramfs8" boot || return
+  case "$selection_phase" in
+    explicit_normal_published|explicit_normal_verified)
+      test "$(sha "${root}/boot/firmware/kernel8.img")" = \
+        "$(accepted_transition_value prior_normal_kernel_sha256)" &&
+        test "$(sha "${root}/boot/firmware/initramfs8")" = \
+          "$(accepted_transition_value prior_normal_initramfs_sha256)"
+      ;;
+    canonical_initramfs_published)
+      test "$(sha "${root}/boot/firmware/kernel8.img")" = \
+        "$(accepted_transition_value prior_normal_kernel_sha256)" &&
+        test "$(sha "${root}/boot/firmware/initramfs8")" = \
+          "$(accepted_transition_value candidate_initramfs_sha256)"
+      ;;
+    canonical_pair_published|normalized_config_published)
+      test "$(sha "${root}/boot/firmware/kernel8.img")" = \
+        "$(accepted_transition_value candidate_kernel_sha256)" &&
+        test "$(sha "${root}/boot/firmware/initramfs8")" = \
+          "$(accepted_transition_value candidate_initramfs_sha256)"
+      ;;
+  esac
+}
+
+commit_probe() {
+  local transaction driver_version revision release artifact_dir overlay_file boot state_hold
+
+  if assert_accepted_transition explicit_normal_config_published &&
+    test "$(accepted_transition_value schema_version)" = 6 &&
+    test "$(accepted_transition_value phase)" = staged &&
+    assert_schema5_explicit_config_prephase_state; then
+    test ! -L "$state_dir/.inactive-explicit-state-hold" &&
+      test ! -e "$state_dir/.inactive-explicit-state-hold" ||
+      die 'inactive config-only replay has an ambiguous durable hold'
+    assert_inactive_replay_workspace explicit ||
+      die 'inactive config-only replay workspace is unsafe'
+    assert_no_boot_writers || die 'a boot/package writer is active during inactive config-only probe'
+    boot="$(explicit_commit_boot_expectation)" ||
+      die 'inactive config-only replay boot flag is unsafe'
+    printf 'explicit-config-reconcile\t%s\t%s\t%s\t%s\t%s\t%s\tactive\tnone\n' "$boot" \
+      "$(accepted_transition_value candidate_driver_version)" \
+      "$(accepted_transition_value candidate_overlay_file)" \
+      "$(accepted_transition_value candidate_kernel_release)" \
+      "$(accepted_transition_value candidate_module_file)" \
+      "$(accepted_transition_value candidate_module_sha256)"
+    return
+  fi
+  if assert_accepted_transition explicit_normal_published &&
+    test "$(accepted_transition_value schema_version)" = 6 &&
+    test "$(accepted_transition_value phase)" = staged &&
+    assert_schema5_explicit_prephase_state; then
+    test ! -L "$state_dir/.inactive-explicit-state-hold" &&
+      test ! -e "$state_dir/.inactive-explicit-state-hold" ||
+      die 'inactive pre-phase replay has an ambiguous durable hold'
+    assert_inactive_replay_workspace explicit ||
+      die 'inactive pre-phase replay workspace is unsafe'
+    assert_no_boot_writers || die 'a boot/package writer is active during inactive pre-phase probe'
+    boot="$(explicit_commit_boot_expectation)" ||
+      die 'inactive pre-phase replay boot flag is unsafe'
+    printf 'explicit-reconcile\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$boot" \
+      "$(accepted_transition_value candidate_driver_version)" \
+      "$(accepted_transition_value candidate_overlay_file)" \
+      "$(accepted_transition_value candidate_kernel_release)" \
+      "$(accepted_transition_value candidate_module_file)" \
+      "$(accepted_transition_value candidate_module_sha256)" \
+      "$(accepted_transition_value prior_tryboot_existed)" \
+      "$(accepted_transition_value prior_tryboot_sha256)"
+    return
+  fi
+  if assert_accepted_transition &&
+    test "$(accepted_transition_value schema_version)" = 6 &&
+    test "$(accepted_transition_value phase)" = explicit_normal_published; then
+    assert_explicit_inactive_replay_leaves ||
+      die 'inactive explicit replay authority is not safe to inspect'
+    state_hold="$state_dir/.inactive-explicit-state-hold"
+    if sudo test -e "$state_file" || sudo test -L "$state_file"; then
+      test ! -e "$state_hold" && test ! -L "$state_hold" ||
+        die 'inactive generic state and durable hold are ambiguous'
+      assert_schema5_explicit_resume_state_at "$state_file" ||
+        die 'inactive generic state drifted during commit probe'
+    elif sudo test -e "$state_hold" || sudo test -L "$state_hold"; then
+      assert_owned_regular "$state_hold" 600 ||
+        die 'inactive durable generic state hold is unsafe'
+      assert_schema5_explicit_resume_state_at "$state_hold" ||
+        die 'inactive durable generic state hold drifted during commit probe'
+    else
+      test ! -L "$state_file" && test ! -e "$state_file" &&
+        test ! -L "$state_hold" && test ! -e "$state_hold" ||
+        die 'inactive generic replay state is ambiguous'
+    fi
+    assert_inactive_replay_workspace explicit-published ||
+      die 'inactive explicit replay workspace is unsafe'
+    assert_no_boot_writers || die 'a boot/package writer is active during inactive commit probe'
+    boot="$(explicit_commit_boot_expectation)" ||
+      die 'inactive explicit replay boot flag is unsafe'
+    printf 'explicit-replay\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$boot" \
+      "$(accepted_transition_value candidate_driver_version)" \
+      "$(accepted_transition_value candidate_overlay_file)" \
+      "$(accepted_transition_value candidate_kernel_release)" \
+      "$(accepted_transition_value candidate_module_file)" \
+      "$(accepted_transition_value candidate_module_sha256)" \
+      "$(accepted_transition_value prior_tryboot_existed)" \
+      "$(accepted_transition_value prior_tryboot_sha256)"
+    return
+  fi
+  transaction="$(assert_transaction_state)" || die 'candidate transaction is not safe to inspect'
+  IFS=$'\t' read -r driver_version revision release artifact_dir <<<"$transaction"
+  overlay_file="$(state_value overlay_file)"
+  printf 'tryboot\ttryboot\t%s\t%s\t%s\t%s\t%s\tactive\tnone\n' \
+    "$driver_version" "$overlay_file" "$release" \
+    "$(state_value module_file)" "$(state_value module_sha256)"
+}
+
+accepted_normal_probe() {
+  local phase="$1" candidate_release prior_release boot actual_phase
+
+  case "$phase" in explicit_normal_published|normalized_config_published) ;; *) die 'unsafe accepted normal probe phase' ;; esac
+  assert_accepted_transition || die 'accepted normal probe authority is unsafe'
+  test "$(accepted_transition_value schema_version)" = 6 ||
+    die 'accepted normal probe requires schema-6 authority'
+  actual_phase="$(accepted_transition_value phase)"
+  case "$phase:$actual_phase" in
+    explicit_normal_published:explicit_normal_published)
+      assert_absent_or_proposed_phase_setter_workspace verification-explicit ||
+        die 'accepted normal verification requires completed caller replay'
+      ;;
+    normalized_config_published:normalized_config_published)
+      assert_absent_or_proposed_phase_setter_workspace verification-normalized ||
+        die 'accepted normal verification requires completed caller replay'
+      ;;
+    explicit_normal_published:explicit_normal_verified|normalized_config_published:normalized_verified)
+      assert_phase_setter_replay_workspace ||
+        die 'accepted normal probe phase replay workspace is unsafe'
+      ;;
+    *) die 'accepted normal probe phase does not match authority' ;;
+  esac
+  candidate_release="$(accepted_transition_value candidate_kernel_release)"
+  prior_release="$(accepted_transition_value prior_kernel_release)"
+  test "$(uname -r)" = "$candidate_release" ||
+    die 'running kernel does not match accepted normal candidate'
+  boot="$(explicit_commit_boot_expectation)" || die 'accepted normal boot flag is unsafe'
+  test "$boot" = normal || die 'accepted normal probe requires a normal boot'
+  case "$phase" in
+    explicit_normal_published)
+      test ! -e "$state_file" && test ! -L "$state_file" &&
+        test ! -e "$state_dir/.inactive-explicit-state-hold" &&
+        test ! -L "$state_dir/.inactive-explicit-state-hold" ||
+        die 'explicit normal verification requires retired generic state'
+      assert_explicit_inactive_replay_leaves || die 'explicit normal candidate leaves are unsafe'
+      ;;
+    normalized_config_published)
+      assert_owned_regular "${root}/boot/firmware/kernel8.img" boot &&
+        test "$(sha "${root}/boot/firmware/kernel8.img")" = "$(accepted_transition_value candidate_kernel_sha256)" &&
+        assert_owned_regular "${root}/boot/firmware/initramfs8" boot &&
+        test "$(sha "${root}/boot/firmware/initramfs8")" = "$(accepted_transition_value candidate_initramfs_sha256)" &&
+        test "$(sha "$normal_config")" = "$(accepted_transition_value normalized_normal_config_sha256)" ||
+        die 'normalized conventional boot selection is unsafe'
+      ;;
+  esac
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$phase" \
+    "$(accepted_transition_value candidate_driver_version)" \
+    "$(accepted_transition_value candidate_overlay_file)" "$candidate_release" \
+    "$(accepted_transition_value candidate_module_file)" \
+    "$(accepted_transition_value candidate_module_sha256)"
+}
+
 authorize_inactive_stage() {
   local schema key count candidate_release candidate_revision release_tag expected_kernel_file
   local expected_initramfs_file transition_sha target_identity prior_status accepted_schema
@@ -3101,15 +3790,18 @@ commit() {
   candidate_backup_sha=''
   prior_tmp=''
   state_hold=''
+  transition_snapshot=''
+  transition_snapshot_sha=''
   normal_published=false
   tryboot_restored=false
   state_moved=false
   state_deleted=false
   commit_complete=false
+  inactive_phase_committed=false
 
   cleanup_commit() {
     local status=$?
-    if test "$status" -ne 0 && ! "$commit_complete"; then
+    if test "$status" -ne 0 && ! "$commit_complete" && ! "$inactive_phase_committed"; then
       if "$state_moved" && require_regular "$state_hold"; then sudo mv -f "$state_hold" "$state_file" || true; fi
       if "$tryboot_restored"; then atomic_copy "$candidate_backup" "$tryboot_config" 644 "$candidate_backup_sha" true || true; fi
       if "$normal_published"; then atomic_copy "$normal_backup" "$normal_config" 644 "$normal_backup_sha" true || true; fi
@@ -3124,10 +3816,212 @@ commit() {
     exit "$status"
   }
 
+  if assert_accepted_transition explicit_normal_config_published &&
+    test "$(accepted_transition_value schema_version)" = 6 &&
+    test "$(accepted_transition_value phase)" = staged &&
+    assert_schema5_explicit_config_prephase_state; then
+    test ! -L "$state_dir/.inactive-explicit-state-hold" &&
+      test ! -e "$state_dir/.inactive-explicit-state-hold" ||
+      die 'inactive config-only replay has an ambiguous durable hold'
+    assert_inactive_replay_workspace explicit ||
+      die 'inactive config-only replay workspace is unsafe'
+    assert_no_boot_writers || die 'a boot/package writer is active during inactive config-only replay'
+    artifact_dir="$artifact_root/$(accepted_transition_value candidate_driver_version)/$(accepted_transition_value candidate_source_revision)/$(accepted_transition_value candidate_kernel_release)"
+    case "$(accepted_transition_value prior_tryboot_existed)" in
+      true)
+        atomic_copy "$artifact_dir/prior-tryboot.txt" "$tryboot_config" 644 \
+          "$(accepted_transition_value prior_tryboot_sha256)" true ||
+          die 'failed to restore prior tryboot config during config-only replay'
+        ;;
+      false)
+        sudo rm -- "$tryboot_config" ||
+          die 'failed to retire candidate tryboot config during config-only replay'
+        ;;
+      *) die 'inactive config-only replay has unsafe prior tryboot authority' ;;
+    esac
+    sudo sync
+    assert_schema5_explicit_prephase_state ||
+      die 'inactive config-only replay did not restore the exact retired tryboot state'
+    candidate_backup_sha="$(accepted_transition_value candidate_normal_config_sha256)"
+    if test -n "$inactive_replay_workspace"; then
+      transition_snapshot_sha="$(sha "$inactive_replay_transition_snapshot")" ||
+        die 'failed to hash inactive config-only replay snapshot'
+      set_accepted_transition_phase staged explicit_normal_published '' '' \
+        "$inactive_replay_transition_snapshot" "$transition_snapshot_sha" \
+        "$candidate_backup_sha" ||
+        die 'failed to reconcile config-only explicit normal transition phase'
+    else
+      set_accepted_transition_phase staged explicit_normal_published '' '' '' '' \
+        "$candidate_backup_sha" '' explicit_normal_published ||
+        die 'failed to reconcile config-only explicit normal transition phase'
+    fi
+    inactive_phase_committed=true
+    retire_verified_inactive_replay_workspace ||
+      die 'failed to retire verified config-only replay workspace'
+    assert_explicit_inactive_replay_leaves ||
+      die 'reconciled config-only explicit normal selection failed validation'
+    sudo rm -- "$state_file" ||
+      die 'failed to retire config-only inactive generic tryboot state'
+    sudo sync
+    printf 'reconciled inactive config-only explicit normal selection\n'
+    return
+  fi
+  if assert_accepted_transition explicit_normal_published &&
+    test "$(accepted_transition_value schema_version)" = 6 &&
+    test "$(accepted_transition_value phase)" = staged &&
+    assert_schema5_explicit_prephase_state; then
+    test ! -L "$state_dir/.inactive-explicit-state-hold" &&
+      test ! -e "$state_dir/.inactive-explicit-state-hold" ||
+      die 'inactive pre-phase replay has an ambiguous durable hold'
+    assert_no_boot_writers || die 'a boot/package writer is active during inactive pre-phase replay'
+    assert_inactive_replay_workspace explicit ||
+      die 'inactive pre-phase replay workspace is unsafe'
+    candidate_backup_sha="$(accepted_transition_value candidate_normal_config_sha256)"
+    if test -n "$inactive_replay_workspace"; then
+      transition_snapshot_sha="$(sha "$inactive_replay_transition_snapshot")" ||
+        die 'failed to hash inactive pre-phase replay snapshot'
+      set_accepted_transition_phase staged explicit_normal_published '' '' \
+        "$inactive_replay_transition_snapshot" "$transition_snapshot_sha" \
+        "$candidate_backup_sha" ||
+        die 'failed to reconcile explicit normal transition phase'
+    else
+      set_accepted_transition_phase staged explicit_normal_published '' '' '' '' \
+        "$candidate_backup_sha" '' explicit_normal_published ||
+        die 'failed to reconcile explicit normal transition phase'
+    fi
+    inactive_phase_committed=true
+    retire_verified_inactive_replay_workspace ||
+      die 'failed to retire verified inactive pre-phase replay workspace'
+    assert_explicit_inactive_replay_leaves ||
+      die 'reconciled explicit normal selection failed validation'
+    sudo rm -- "$state_file" ||
+      die 'failed to retire reconciled inactive generic tryboot state'
+    sudo sync
+    printf 'reconciled inactive explicit normal selection\n'
+    return
+  fi
+  if assert_accepted_transition &&
+    test "$(accepted_transition_value schema_version)" = 6 &&
+    test "$(accepted_transition_value phase)" = explicit_normal_published; then
+    test "$(sha "$normal_config")" = \
+      "$(accepted_transition_value explicit_normal_config_sha256)" &&
+      validate_accepted_prior_tryboot \
+        "$(accepted_transition_value prior_tryboot_existed)" \
+        "$(accepted_transition_value prior_tryboot_sha256)" ||
+      die 'inactive explicit normal selection drifted during commit replay'
+    assert_inactive_replay_workspace explicit-published ||
+      die 'inactive explicit replay workspace is unsafe'
+    assert_no_boot_writers || die 'a boot/package writer is active during inactive commit replay'
+    if sudo test -e "$state_file" || sudo test -L "$state_file"; then
+      test ! -e "$state_dir/.inactive-explicit-state-hold" &&
+        test ! -L "$state_dir/.inactive-explicit-state-hold" ||
+        die 'inactive generic state and durable hold are ambiguous'
+      assert_schema5_explicit_resume_state ||
+        die 'inactive generic state drifted during commit replay'
+      sudo rm -- "$state_file" || die 'failed to retire replayed inactive generic tryboot state'
+      sudo sync
+    elif sudo test -e "$state_dir/.inactive-explicit-state-hold" || \
+      sudo test -L "$state_dir/.inactive-explicit-state-hold"; then
+      assert_owned_regular "$state_dir/.inactive-explicit-state-hold" 600 ||
+        die 'inactive durable generic state hold is unsafe'
+      sudo mv -f "$state_dir/.inactive-explicit-state-hold" "$state_file" ||
+        die 'failed to restore inactive durable generic state hold'
+      assert_schema5_explicit_resume_state ||
+        die 'inactive durable generic state hold drifted during replay'
+      sudo rm -- "$state_file" || die 'failed to retire replayed inactive generic tryboot state'
+      sudo sync
+    fi
+    retire_verified_inactive_replay_workspace ||
+      die 'failed to retire verified inactive explicit replay workspace'
+    printf 'inactive explicit normal selection already committed\n'
+    return
+  fi
   transaction="$(assert_transaction_state)" || die 'candidate transaction is not safe to commit'
-  test "$(state_value schema_version)" != 5 ||
-    die 'inactive-kernel tryboot promotion is not implemented'
   IFS=$'\t' read -r driver_version revision release artifact_dir <<<"$transaction"
+  if test "$(state_value schema_version)" = 5; then
+    # Schema-5 is the generic transaction created by the schema-6 inactive
+    # authority.  Its tryboot config is the exact precomputed explicit normal
+    # config; never derive an overlay-only replacement here.
+    assert_schema5_staged_authority \
+      "$(state_value kernel_release)" "$(state_value source_revision)" \
+      "$(state_value module_file)" "$(state_value module_sha256)" \
+      "$(state_value overlay_file)" "$(state_value overlay_sha256)" \
+      "$(state_value normal_config_sha256)" "$(state_value candidate_config_sha256)" ||
+      die 'inactive generic transaction no longer matches accepted authority'
+    case "$(accepted_transition_value phase)" in
+      explicit_normal_published)
+        test "$(sha "$normal_config")" = \
+          "$(accepted_transition_value explicit_normal_config_sha256)" &&
+          validate_accepted_prior_tryboot \
+            "$(accepted_transition_value prior_tryboot_existed)" \
+            "$(accepted_transition_value prior_tryboot_sha256)" ||
+          die 'inactive explicit normal selection drifted before generic state retirement'
+        assert_no_boot_writers || die 'a boot/package writer is active during inactive state retirement'
+        sudo rm -- "$state_file" || die 'failed to retire completed inactive generic tryboot state'
+        sudo sync
+        printf 'retired inactive generic state %s\n' "$revision"
+        return
+        ;;
+      staged) ;;
+      *) die 'inactive accepted transition is not staged' ;;
+    esac
+    assert_no_boot_writers || die 'a boot/package writer is active during inactive commit'
+    workspace="$(new_transaction_workspace)" || die 'failed to create private inactive commit workspace'
+    trap cleanup_commit EXIT
+    normal_sha="$(state_value normal_config_sha256)"
+    normal_backup="$(privileged_snapshot "$normal_config" "$workspace" normal-backup)" || die 'failed to snapshot normal boot config for inactive commit'
+    candidate_backup="$(privileged_snapshot "$tryboot_config" "$workspace" candidate-backup)" || die 'failed to snapshot inactive tryboot config'
+    normal_backup_sha="$(sha "$normal_backup")" || die 'failed to hash inactive normal config snapshot'
+    candidate_backup_sha="$(sha "$candidate_backup")" || die 'failed to hash inactive tryboot config snapshot'
+    test "$candidate_backup_sha" = "$(state_value candidate_config_sha256)" &&
+      test "$candidate_backup_sha" = "$(accepted_transition_value candidate_normal_config_sha256)" ||
+      die 'inactive explicit normal config drifted before commit'
+    normal_tmp="$(prepare_copy "$candidate_backup" "$(dirname "$normal_config")" 644 "$workspace" true)" || die 'failed to prepare explicit normal config publication'
+    test ! -L "$state_dir/.inactive-explicit-state-hold" &&
+      test ! -e "$state_dir/.inactive-explicit-state-hold" ||
+      die 'stale inactive generic state hold exists'
+    state_hold="$state_dir/.inactive-explicit-state-hold"
+    transition_snapshot="$(privileged_snapshot "$accepted_transition" "$workspace" commit-transition)" || die 'failed to snapshot inactive transition authority'
+    transition_snapshot_sha="$(sha "$transition_snapshot")" || die 'failed to hash inactive transition authority'
+    test "$(sha "$normal_config")" = "$normal_sha" || die 'normal boot config changed after inactive commit validation'
+    sudo mv -f "$normal_tmp" "$normal_config" || die 'failed to publish explicit normal config'
+    normal_published=true
+    sudo sync
+    fixture_interrupt_after inactive-explicit-normal-config-published
+    if test "$(state_value tryboot_existed)" = true; then
+      prior_tmp="$(prepare_copy "$artifact_dir/prior-tryboot.txt" "$(dirname "$tryboot_config")" 644 "$workspace" true)" || die 'failed to prepare prior tryboot restoration'
+    else
+      prior_tmp=''
+    fi
+    if test -n "$prior_tmp"; then
+      sudo mv -f "$prior_tmp" "$tryboot_config" || die 'failed to restore prior tryboot config'
+    else
+      sudo rm -f -- "$tryboot_config" || die 'failed to remove inactive tryboot config'
+    fi
+    tryboot_restored=true
+    sudo sync
+    fixture_interrupt_after inactive-explicit-normal-files-published
+    fixture_interrupt_after inactive-explicit-normal-before-phase
+    set_accepted_transition_phase staged explicit_normal_published '' '' \
+      "$transition_snapshot" "$transition_snapshot_sha" \
+      "$candidate_backup_sha" || die 'failed to publish explicit normal transition phase'
+    inactive_phase_committed=true
+    fixture_interrupt_after inactive-explicit-normal-published
+    sudo mv -f "$state_file" "$state_hold" || die 'failed to move inactive commit state hold'
+    state_moved=true
+    fixture_interrupt_after inactive-explicit-normal-state-moved
+    sudo rm -f -- "$state_hold" || die 'failed to delete inactive generic tryboot state'
+    state_deleted=true
+    fixture_interrupt_after inactive-explicit-normal-state-deleted
+    sudo sync
+    sudo rm -f -- "$normal_tmp" "$prior_tmp" "$state_hold" || die 'failed to clean private inactive commit publications'
+    commit_complete=true
+    remove_transaction_workspace "$workspace" || return 1
+    workspace=''
+    trap - EXIT
+    printf 'committed inactive %s\n' "$revision"
+    return
+  fi
   if test "$(state_value schema_version)" = 4; then
     reload_backlight_permissions true || die 'candidate backlight permissions are not operational'
   fi
@@ -4140,6 +5034,9 @@ rollback() {
     fi
     fixture_interrupt_after rollback-retirement-state-retired
   elif test "$rb_phase" = depmod-verified; then
+    rb_phase=retiring-state
+    write_rollback_journal rollback "$rb_phase" ||
+      die 'failed to publish generic-state retirement phase'
     rb_finalizing=true
     if sudo test -e "$state_file"; then
       test "$(sha "$state_file")" = "$rb_transaction_sha" ||
@@ -4904,7 +5801,9 @@ publish_accepted_transition() {
   local candidate_initramfs_snapshot="${23:-}"
   local candidate_base_dtb_sha="${24:-}"
   local candidate_vc4_overlay_sha="${25:-}"
+  local normalized_normal_sha="${26:-}"
   local prior_sha candidate_sha state_tmp state_sha candidate_artifact candidate_inventory_sha
+  local prepared_anchor_tmp prepared_anchor_sha
   local accepted_schema transition_schema prior_backlight_rule_existed prior_backlight_rule_sha prior_rule_snapshot=''
   local prior_kernel_sha prior_initramfs_sha candidate_kernel_sha candidate_initramfs_sha
   local candidate_kernel_file candidate_initramfs_file
@@ -4928,8 +5827,10 @@ publish_accepted_transition() {
       candidate_initramfs_sha="$(sha "$candidate_initramfs_snapshot")" || return
       [[ "$candidate_base_dtb_sha" =~ ^[0-9a-f]{64}$ ]] || return
       [[ "$candidate_vc4_overlay_sha" =~ ^[0-9a-f]{64}$ ]] || return
+      [[ "$normalized_normal_sha" =~ ^[0-9a-f]{64}$ ]] || return
       transition_schema=6
     else
+      test -z "$normalized_normal_sha" || return
       transition_schema=5
     fi
     case "$prior_tryboot_existed" in
@@ -5039,10 +5940,24 @@ publish_accepted_transition() {
     fixture_interrupt_after accepted-transition-candidate-initramfs-published
     assert_inactive_companions "$prior_kernel_sha" "$prior_initramfs_sha" \
       "$candidate_kernel_sha" "$candidate_initramfs_sha" || return
+    test ! -L "$accepted_transition_prepared_anchor" && \
+      test ! -e "$accepted_transition_prepared_anchor" || return
+    prepared_anchor_tmp="$(private_file "$workspace" accepted-transition-prepared-anchor)" || return
+    prepared_anchor_sha="$(canonical_prepared_transition_sha_from "$state_tmp")" || return
+    {
+      printf 'prepared_transition_sha256=%s\n' "$prepared_anchor_sha"
+      printf 'normalized_normal_config_sha256=%s\n' "$normalized_normal_sha"
+    } | sudo tee "$prepared_anchor_tmp" >/dev/null || return
+    assert_owned_regular "$prepared_anchor_tmp" 600 || return
+    atomic_copy "$prepared_anchor_tmp" "$accepted_transition_prepared_anchor" 600 \
+      "$(sha "$prepared_anchor_tmp")" || return
+    accepted_prepared_anchor_published=true
     fixture_interrupt_after accepted-transition-before-journal-published
   fi
   atomic_copy "$state_tmp" "$accepted_transition" 600 "$state_sha" || return
+  accepted_transition_journal_published=true
   assert_accepted_transition || return
+  accepted_prepared_anchor_published=false
   accepted_prior_published=false
   fixture_interrupt_after accepted-transition-published
 }
@@ -5054,18 +5969,29 @@ set_accepted_transition_phase() {
   local inventory_sha="${4:-}"
   local prepared_snapshot="${5:-}"
   local expected_prepared_sha="${6:-}"
-  local schema workspace state_tmp state_sha transition_source="$accepted_transition"
-  local transition_schema transition_inventory
+  local explicit_normal_sha="${7:-}"
+  local normalized_normal_sha="${8:-}"
+  local current_selection_phase="${9:-}"
+  local standalone_replay_snapshot="${10:-}"
+  local schema workspace state_tmp state_sha transition_source="$accepted_transition" owns_workspace=true
+  local transition_schema transition_inventory replay_kind='' expected_replay_sha=''
+  local reused_prepared_setter=false reused_standalone_setter=false
 
-  assert_accepted_transition || return
-  test "$(accepted_transition_value phase)" = "$expected" || return
   if test -n "$prepared_snapshot" || test -n "$expected_prepared_sha"; then
     test -n "$prepared_snapshot" && [[ "$expected_prepared_sha" =~ ^[0-9a-f]{64}$ ]] || return
     assert_owned_regular "$prepared_snapshot" 600 || return
-    test "$(sha "$prepared_snapshot")" = "$expected_prepared_sha" || return
-    test "$(sha "$accepted_transition")" = "$expected_prepared_sha" || return
+    test "$(sha "$prepared_snapshot")" = "$expected_prepared_sha" &&
+      test "$(sha "$accepted_transition")" = "$expected_prepared_sha" || return
     transition_source="$prepared_snapshot"
+  else
+    assert_accepted_transition "$current_selection_phase" || return
+  fi
+  test "$(accepted_transition_value phase)" = "$expected" || return
+  test -z "$explicit_normal_sha" || [[ "$explicit_normal_sha" =~ ^[0-9a-f]{64}$ ]] || return
+  test -z "$normalized_normal_sha" || [[ "$normalized_normal_sha" =~ ^[0-9a-f]{64}$ ]] || return
+  if test -n "$prepared_snapshot"; then
     fixture_mutate_setter_authority
+    fixture_mutate_normalization_bound_leaf
   fi
   transition_schema="$(sudo awk -F= '$1 == "schema_version" { print $2 }' "$transition_source")"
   transition_inventory="$(sudo awk -F= '$1 == "candidate_dkms_inventory_sha256" { print $2 }' "$transition_source")"
@@ -5080,10 +6006,64 @@ set_accepted_transition_phase() {
       "$inventory_sha" || return
     inventory_sha=''
   fi
-  workspace="$(new_transaction_workspace)" || return
-  accepted_workspace="$workspace"
-  state_tmp="$(private_file "$workspace" accepted-transition)" || return
-  if test -n "$normal_sha" && test -n "$inventory_sha"; then
+  if test -n "$standalone_replay_snapshot"; then
+    test -z "$prepared_snapshot" && test -z "$expected_prepared_sha" &&
+      test -z "$normal_sha" && test -z "$inventory_sha" &&
+      test -z "$explicit_normal_sha" && test -z "$normalized_normal_sha" &&
+      test -z "$current_selection_phase" || return
+    case "$expected:$next" in
+      explicit_normal_published:explicit_normal_verified) replay_kind=verification-explicit ;;
+      normalized_config_published:normalized_verified) replay_kind=verification-normalized ;;
+      *) return 1 ;;
+    esac
+    workspace="$(dirname "$standalone_replay_snapshot")"
+    test "$standalone_replay_snapshot" = "$workspace/accepted-transition" || return
+    assert_private_workspace "$workspace" &&
+      assert_owned_regular "$standalone_replay_snapshot" 600 || return
+    expected_replay_sha="$(inactive_replay_proposed_transition_sha "$replay_kind")" || return
+    test "$(sha "$standalone_replay_snapshot")" = "$expected_replay_sha" || return
+    state_tmp="$standalone_replay_snapshot"
+    reused_standalone_setter=true
+  elif test -n "$prepared_snapshot"; then
+    workspace="$(dirname "$prepared_snapshot")"
+    assert_private_workspace "$workspace" || return
+    case "$prepared_snapshot" in "$workspace"/.hp2r-*) ;; *) return 1 ;; esac
+    owns_workspace=false
+  else
+    workspace="$(new_transaction_workspace)" || return
+    accepted_workspace="$workspace"
+  fi
+  if ! "$reused_standalone_setter"; then
+    state_tmp="$workspace/accepted-transition"
+  fi
+  if "$reused_standalone_setter"; then
+    :
+  elif ! "$owns_workspace" && { sudo test -e "$state_tmp" || sudo test -L "$state_tmp"; }; then
+    assert_owned_regular "$state_tmp" 600 || return
+    case "$expected:$next" in
+      staged:explicit_normal_published) replay_kind=explicit ;;
+      explicit_normal_verified:canonical_initramfs_published) replay_kind=normalization-initramfs ;;
+      canonical_initramfs_published:canonical_pair_published) replay_kind=normalization-pair ;;
+      canonical_pair_published:normalized_config_published) replay_kind=normalization-config ;;
+      *) return 1 ;;
+    esac
+    expected_replay_sha="$(inactive_replay_proposed_transition_sha "$replay_kind")" || return
+    test "$(sha "$state_tmp")" = "$expected_replay_sha" || return
+    reused_prepared_setter=true
+  else
+    state_tmp="$(private_file "$workspace" accepted-transition)" || return
+  fi
+  if "$reused_prepared_setter" || "$reused_standalone_setter"; then
+    :
+  elif test -n "$explicit_normal_sha" || test -n "$normalized_normal_sha"; then
+    sudo awk -F= -v expected="$expected" -v next_phase="$next" \
+      -v explicit="$explicit_normal_sha" -v normalized="$normalized_normal_sha" '
+        $1 == "phase" { print "phase=" next_phase; next }
+        $1 == "explicit_normal_config_sha256" && explicit != "" { print "explicit_normal_config_sha256=" explicit; next }
+        $1 == "normalized_normal_config_sha256" && normalized != "" { print "normalized_normal_config_sha256=" normalized; next }
+        { print }
+      ' "$transition_source" | sudo tee "$state_tmp" >/dev/null || return
+  elif test -n "$normal_sha" && test -n "$inventory_sha"; then
     sudo sed \
       -e "s/^phase=$expected\$/phase=$next/" \
       -e "s/^candidate_normal_config_sha256=.*/candidate_normal_config_sha256=$normal_sha/" \
@@ -5104,13 +6084,28 @@ set_accepted_transition_phase() {
       "$transition_source" | sudo tee "$state_tmp" >/dev/null || return
   fi
   state_sha="$(sha "$state_tmp")" || return
+  if test -n "$prepared_snapshot"; then
+    # Validate the exact proposed durable phase against the already-published
+    # leaves before it can become authoritative, then close the journal race.
+    ( accepted_transition="$state_tmp"; assert_accepted_transition ) || return
+    test "$(sha "$accepted_transition")" = "$expected_prepared_sha" || return
+  fi
+  fixture_interrupt_after accepted-transition-phase-prepared
+  fixture_interrupt_after "accepted-transition-${next}-phase-prepared"
   atomic_copy "$state_tmp" "$accepted_transition" 600 "$state_sha" || return
   # This is the commit point for the caller.  Nothing after it may trigger
   # stage_cleanup's pre-phase compensation; the on-disk staged journal owns a
   # complete coherent candidate even if local workspace retirement fails.
   inactive_phase_committed=true
-  remove_transaction_workspace "$workspace" || return
-  accepted_workspace=''
+  fixture_interrupt_after accepted-transition-phase-atomic
+  fixture_interrupt_after "accepted-transition-${next}-phase-atomic"
+  if "$owns_workspace"; then
+    remove_transaction_workspace "$workspace" || return
+    accepted_workspace=''
+  elif ! "$reused_prepared_setter"; then
+    sudo rm -- "$state_tmp" || return
+    test ! -L "$state_tmp" && test ! -e "$state_tmp" || return
+  fi
   assert_accepted_transition
 }
 
@@ -5136,7 +6131,8 @@ prepare_new_accepted() {
   local prior_kernel_path prior_initramfs_path candidate_kernel_path candidate_initramfs_path
   local base_dtb_path vc4_overlay_path prior_kernel_snapshot='' prior_initramfs_snapshot=''
   local candidate_kernel_snapshot='' candidate_initramfs_snapshot='' base_dtb_snapshot='' vc4_snapshot=''
-  local explicit_normal='' normalized_normal='' transition_private_need=0 transition_firmware_need=0
+  local explicit_normal='' normalized_normal='' normalized_normal_sha=''
+  local transition_private_need=0 transition_firmware_need=0
   local live_running_release
 
   assert_accepted_state || die 'accepted driver state is missing or unsafe'
@@ -5155,6 +6151,9 @@ prepare_new_accepted() {
   esac
   test ! -L "$accepted_transition" && test ! -e "$accepted_transition" ||
     die 'an accepted driver transition is already active'
+  test ! -L "$accepted_transition_prepared_anchor" && \
+    test ! -e "$accepted_transition_prepared_anchor" ||
+    die 'orphan accepted transition prepared anchor exists'
   if ! "$inactive"; then
     test ! -L "$accepted_transition_prior_config" && test ! -e "$accepted_transition_prior_config" ||
       die 'orphan accepted transition config exists'
@@ -5202,8 +6201,6 @@ prepare_new_accepted() {
       die 'inactive accepted preparation requires a different kernel release'
     assert_supported_inactive_config "$normal_config" ||
       die 'inactive accepted preparation requires one unconditional display selection'
-    test ! -L "$tryboot_config" && test ! -e "$tryboot_config" ||
-      die 'inactive accepted preparation requires no generic tryboot state'
     prior_module_path="${root}/lib/modules/$prior_release/extra/$(accepted_value module_file)"
     prior_overlay_path="${root}/boot/firmware/overlays/$(accepted_value overlay_file)"
     assert_owned_regular "$prior_module_path" 644 &&
@@ -5301,6 +6298,8 @@ prepare_new_accepted() {
     normalized_normal="$(private_file "$workspace" normalized-normal)" || die 'failed to allocate normalized inactive normal config'
     derive_normalized_normal_config "$prior_snapshot" "$overlay_file" "$normalized_normal" "$workspace" ||
       die 'failed to derive normalized inactive normal config'
+    normalized_normal_sha="$(sha "$normalized_normal")" ||
+      die 'failed to hash normalized inactive normal config'
   fi
   stock="$(private_file "$workspace" accepted-stock)" || die 'failed to allocate accepted stock'
   write_surgical_stock_config "$prior_snapshot" "$(accepted_value overlay_file)" "$stock" "$workspace" ||
@@ -5324,7 +6323,8 @@ prepare_new_accepted() {
     "$prior_tryboot_existed" "$prior_tryboot_sha" "$prior_tryboot_snapshot" \
     "$target_identity_sha256" "$prior_kernel_snapshot" "$prior_initramfs_snapshot" \
     "$candidate_kernel_snapshot" "$candidate_initramfs_snapshot" \
-    "$candidate_base_dtb_sha256" "$candidate_vc4_overlay_sha256" ||
+    "$candidate_base_dtb_sha256" "$candidate_vc4_overlay_sha256" \
+    "$normalized_normal_sha" ||
     die 'failed to publish accepted candidate journal'
   remove_transaction_workspace "$workspace" || die 'failed to remove accepted transition workspace'
   accepted_workspace=''
@@ -5348,9 +6348,357 @@ mark_committed_accepted() {
   printf 'marked committed %s\n' "$(accepted_transition_value candidate_source_revision)"
 }
 
+mark_explicit_normal_verified_accepted() {
+  local boot phase phase_replay_snapshot=''
+
+  assert_explicit_inactive_replay_leaves ||
+    die 'explicit normal candidate authority or leaves are unsafe'
+  phase="$(accepted_transition_value phase)"
+  case "$phase" in
+    explicit_normal_published|explicit_normal_verified) ;;
+    *) die 'accepted inactive transition is not awaiting explicit normal verification' ;;
+  esac
+  test "$(uname -r)" = "$(accepted_transition_value candidate_kernel_release)" ||
+    die 'running kernel does not match the explicit normal candidate'
+  boot="$(explicit_commit_boot_expectation)" ||
+    die 'explicit normal boot flag is unsafe'
+  test "$boot" = normal || die 'explicit normal verification requires a normal boot'
+  test ! -e "$state_file" && test ! -L "$state_file" &&
+    test ! -e "$state_dir/.inactive-explicit-state-hold" &&
+    test ! -L "$state_dir/.inactive-explicit-state-hold" ||
+    die 'explicit normal verification requires retired generic state'
+  if test "$phase" = explicit_normal_verified; then
+    assert_phase_setter_replay_workspace ||
+      die 'explicit normal verification replay workspace is unsafe'
+    retire_verified_inactive_replay_workspace ||
+      die 'failed to retire explicit normal verification replay workspace'
+    printf 'explicit normal verification already committed %s\n' \
+      "$(accepted_transition_value candidate_source_revision)"
+    return
+  fi
+  assert_absent_or_proposed_phase_setter_workspace verification-explicit ||
+    die 'explicit normal verification requires completed commit replay'
+  if test -n "$inactive_replay_workspace"; then
+    phase_replay_snapshot="$inactive_replay_workspace/accepted-transition"
+  fi
+  set_accepted_transition_phase explicit_normal_published explicit_normal_verified \
+    '' '' '' '' '' '' '' "$phase_replay_snapshot" ||
+    die 'failed to publish explicit normal verification phase'
+  assert_accepted_transition || die 'explicit normal verification binding failed validation'
+  printf 'marked explicit normal verified %s\n' "$(accepted_transition_value candidate_source_revision)"
+}
+
+normalize_inactive_kernel_accepted() {
+  local phase candidate_release prior_release candidate_kernel candidate_initramfs
+  local candidate_kernel_sha candidate_initramfs_sha workspace normalized normalized_sha normal_tmp boot
+  local transition_snapshot transition_snapshot_sha
+  local normalization_target='' normalization_restore='' normalization_restore_sha='' normalization_phase_committed=true
+  local reconciliation_selection='' orphan_kind='' orphan_phase_published=false
+
+  cleanup_normalization() {
+    local status=$?
+    if test "$status" -ne 0 && ! "$normalization_phase_committed" && ! "$inactive_phase_committed" && test -n "$normalization_target"; then
+      atomic_copy "$normalization_restore" "$normalization_target" 644 "$normalization_restore_sha" true || true
+      assert_owned_regular "$normalization_target" boot >/dev/null 2>&1 || true
+      test "$(sha "$normalization_target" 2>/dev/null || true)" = "$normalization_restore_sha" || true
+      sudo sync || true
+    fi
+    test -z "$accepted_workspace" || test "$accepted_workspace" = "$workspace" ||
+      remove_transaction_workspace "$accepted_workspace" 2>/dev/null || true
+    accepted_workspace=''
+    test -z "$workspace" || remove_transaction_workspace "$workspace" 2>/dev/null || true
+    workspace=''
+    trap - EXIT
+    exit "$status"
+  }
+  workspace=''
+  trap cleanup_normalization EXIT
+
+  phase="$(accepted_transition_value phase 2>/dev/null || true)"
+  if assert_accepted_transition; then
+    :
+  else
+    case "$phase" in
+      explicit_normal_verified) reconciliation_selection=canonical_initramfs_published ;;
+      canonical_initramfs_published) reconciliation_selection=canonical_pair_published ;;
+      canonical_pair_published) reconciliation_selection=normalized_config_published ;;
+      *) die 'accepted driver transition is missing or unsafe' ;;
+    esac
+    assert_accepted_transition "$reconciliation_selection" ||
+      die 'accepted driver transition is missing or unsafe'
+  fi
+  test "$(accepted_transition_value schema_version)" = 6 ||
+    die 'inactive normalization requires schema-6 authority'
+  case "$phase" in
+    explicit_normal_verified|canonical_initramfs_published|canonical_pair_published|normalized_config_published) ;;
+    *) die 'accepted inactive transition is not ready for normalization' ;;
+  esac
+  candidate_release="$(accepted_transition_value candidate_kernel_release)"
+  prior_release="$(accepted_transition_value prior_kernel_release)"
+  candidate_kernel="$(accepted_transition_value candidate_kernel_file)"
+  candidate_initramfs="$(accepted_transition_value candidate_initramfs_file)"
+  candidate_kernel_sha="$(accepted_transition_value candidate_kernel_sha256)"
+  candidate_initramfs_sha="$(accepted_transition_value candidate_initramfs_sha256)"
+  test "$(uname -r)" = "$candidate_release" ||
+    die 'running kernel does not match the inactive normalization candidate'
+  boot="$(explicit_commit_boot_expectation)" || die 'inactive normalization boot flag is unsafe'
+  test "$boot" = normal || die 'inactive normalization requires a normal boot'
+  test ! -L "$state_file" && test ! -e "$state_file" &&
+    test ! -L "$state_dir/.inactive-explicit-state-hold" &&
+    test ! -e "$state_dir/.inactive-explicit-state-hold" ||
+    die 'generic replay state blocks inactive normalization'
+  assert_no_boot_writers || die 'a boot/package writer is active during inactive normalization'
+  assert_inactive_companions \
+    "$(accepted_transition_value prior_normal_kernel_sha256)" \
+    "$(accepted_transition_value prior_normal_initramfs_sha256)" \
+    "$candidate_kernel_sha" "$candidate_initramfs_sha" ||
+    die 'inactive normalization companions are unsafe'
+
+  case "$reconciliation_selection" in
+    canonical_initramfs_published) orphan_kind=normalization-initramfs ;;
+    canonical_pair_published) orphan_kind=normalization-pair ;;
+    normalized_config_published) orphan_kind=normalization-config ;;
+    '')
+      case "$phase" in
+        explicit_normal_verified)
+          find_inactive_replay_workspace ||
+            die 'inactive normalization workspace set is unsafe'
+          if test -n "$inactive_replay_workspace"; then
+            assert_phase_setter_replay_workspace ||
+              die 'inactive normalization has an unrecognized replay workspace'
+            retire_verified_inactive_replay_workspace ||
+              die 'failed to retire explicit verification replay workspace'
+          fi
+          ;;
+        canonical_initramfs_published)
+          orphan_kind=normalization-initramfs-published
+          orphan_phase_published=true
+          ;;
+        canonical_pair_published)
+          orphan_kind=normalization-pair-published
+          orphan_phase_published=true
+          ;;
+        normalized_config_published)
+          orphan_kind=normalization-config-published
+          orphan_phase_published=true
+          ;;
+      esac
+      ;;
+    *) die 'inactive normalization reconciliation selection is unsafe' ;;
+  esac
+  if test -n "$orphan_kind"; then
+    assert_inactive_replay_workspace "$orphan_kind" ||
+      die 'inactive normalization replay workspace is unsafe'
+    if "$orphan_phase_published"; then
+      retire_verified_inactive_replay_workspace ||
+        die 'failed to retire phase-published normalization replay workspace'
+    fi
+  fi
+
+  case "$phase:$reconciliation_selection" in
+    explicit_normal_verified:canonical_initramfs_published)
+      if test -n "$inactive_replay_workspace"; then
+        transition_snapshot_sha="$(sha "$inactive_replay_transition_snapshot")" ||
+          die 'failed to hash canonical initramfs replay snapshot'
+        set_accepted_transition_phase explicit_normal_verified canonical_initramfs_published \
+          '' '' "$inactive_replay_transition_snapshot" "$transition_snapshot_sha" ||
+          die 'failed to reconcile canonical initramfs phase'
+      else
+        set_accepted_transition_phase explicit_normal_verified canonical_initramfs_published \
+          '' '' '' '' '' '' canonical_initramfs_published ||
+          die 'failed to reconcile canonical initramfs phase'
+      fi
+      retire_verified_inactive_replay_workspace ||
+        die 'failed to retire canonical initramfs replay workspace'
+      phase=canonical_initramfs_published
+      ;;
+    canonical_initramfs_published:canonical_pair_published)
+      if test -n "$inactive_replay_workspace"; then
+        transition_snapshot_sha="$(sha "$inactive_replay_transition_snapshot")" ||
+          die 'failed to hash canonical pair replay snapshot'
+        set_accepted_transition_phase canonical_initramfs_published canonical_pair_published \
+          '' '' "$inactive_replay_transition_snapshot" "$transition_snapshot_sha" ||
+          die 'failed to reconcile canonical pair phase'
+      else
+        set_accepted_transition_phase canonical_initramfs_published canonical_pair_published \
+          '' '' '' '' '' '' canonical_pair_published ||
+          die 'failed to reconcile canonical pair phase'
+      fi
+      retire_verified_inactive_replay_workspace ||
+        die 'failed to retire canonical pair replay workspace'
+      phase=canonical_pair_published
+      ;;
+    canonical_pair_published:normalized_config_published)
+      normalized_sha="$(sudo awk -F= \
+        '$1 == "normalized_normal_config_sha256" { print $2 }' \
+        "$accepted_transition_prepared_anchor")" ||
+        die 'failed to read prepared normalized config identity'
+      [[ "$normalized_sha" =~ ^[0-9a-f]{64}$ ]] ||
+        die 'prepared normalized config identity is unsafe'
+      if test -n "$inactive_replay_workspace"; then
+        transition_snapshot_sha="$(sha "$inactive_replay_transition_snapshot")" ||
+          die 'failed to hash normalized config replay snapshot'
+        set_accepted_transition_phase canonical_pair_published normalized_config_published \
+          '' '' "$inactive_replay_transition_snapshot" "$transition_snapshot_sha" '' "$normalized_sha" ||
+          die 'failed to reconcile normalized config phase'
+      else
+        set_accepted_transition_phase canonical_pair_published normalized_config_published \
+          '' '' '' '' '' "$normalized_sha" normalized_config_published ||
+          die 'failed to reconcile normalized config phase'
+      fi
+      retire_verified_inactive_replay_workspace ||
+        die 'failed to retire normalized config replay workspace'
+      phase=normalized_config_published
+      ;;
+    *:) ;;
+    *) die 'inactive normalization reconciliation state is unsafe' ;;
+  esac
+
+  if test "$phase" = explicit_normal_verified; then
+    assert_explicit_inactive_replay_leaves || die 'explicit normal selection drifted before normalization'
+    assert_owned_regular "${root}/boot/firmware/kernel8.img" boot &&
+      test "$(sha "${root}/boot/firmware/kernel8.img")" = "$(accepted_transition_value prior_normal_kernel_sha256)" &&
+      assert_owned_regular "${root}/boot/firmware/initramfs8" boot &&
+      test "$(sha "${root}/boot/firmware/initramfs8")" = "$(accepted_transition_value prior_normal_initramfs_sha256)" ||
+      die 'conventional inactive firmware pair drifted before normalization'
+    workspace="$(new_transaction_workspace)" || die 'failed to create initramfs normalization workspace'
+    transition_snapshot="$(privileged_snapshot "$accepted_transition" "$workspace" normalization-transition)" || die 'failed to snapshot normalization authority'
+    transition_snapshot_sha="$(sha "$transition_snapshot")" || die 'failed to hash normalization authority'
+    normal_tmp="$(prepare_copy "$accepted_transition_candidate_initramfs" "$(dirname "${root}/boot/firmware/initramfs8")" 644 "$workspace" true)" ||
+      die 'failed to prepare canonical candidate initramfs'
+    normalization_target="${root}/boot/firmware/initramfs8"
+    normalization_restore="$accepted_transition_prior_initramfs"
+    normalization_restore_sha="$(accepted_transition_value prior_normal_initramfs_sha256)"
+    normalization_phase_committed=false
+    inactive_phase_committed=false
+    sudo mv -f "$normal_tmp" "${root}/boot/firmware/initramfs8" ||
+      die 'failed to publish canonical candidate initramfs'
+    assert_owned_regular "${root}/boot/firmware/initramfs8" boot &&
+      test "$(sha "${root}/boot/firmware/initramfs8")" = "$candidate_initramfs_sha" ||
+      die 'canonical candidate initramfs verification failed'
+    sudo sync
+    fixture_interrupt_after inactive-normalize-initramfs-before-phase
+    set_accepted_transition_phase explicit_normal_verified canonical_initramfs_published '' '' "$transition_snapshot" "$transition_snapshot_sha" ||
+      die 'failed to publish canonical initramfs phase'
+    normalization_phase_committed=true
+    fixture_interrupt_after inactive-normalize-initramfs-published
+    remove_transaction_workspace "$workspace" || die 'failed to retire initramfs normalization workspace'
+    phase=canonical_initramfs_published
+  fi
+  if test "$phase" = canonical_initramfs_published; then
+    assert_owned_regular "${root}/boot/firmware/initramfs8" boot &&
+      test "$(sha "${root}/boot/firmware/initramfs8")" = "$candidate_initramfs_sha" ||
+      die 'canonical candidate initramfs drifted before kernel publication'
+    workspace="$(new_transaction_workspace)" || die 'failed to create kernel normalization workspace'
+    transition_snapshot="$(privileged_snapshot "$accepted_transition" "$workspace" normalization-transition)" || die 'failed to snapshot normalization authority'
+    transition_snapshot_sha="$(sha "$transition_snapshot")" || die 'failed to hash normalization authority'
+    normal_tmp="$(prepare_copy "$accepted_transition_candidate_kernel" "$(dirname "${root}/boot/firmware/kernel8.img")" 644 "$workspace" true)" ||
+      die 'failed to prepare canonical candidate kernel'
+    normalization_target="${root}/boot/firmware/kernel8.img"
+    normalization_restore="$accepted_transition_prior_kernel"
+    normalization_restore_sha="$(accepted_transition_value prior_normal_kernel_sha256)"
+    normalization_phase_committed=false
+    inactive_phase_committed=false
+    sudo mv -f "$normal_tmp" "${root}/boot/firmware/kernel8.img" ||
+      die 'failed to publish canonical candidate kernel'
+    assert_owned_regular "${root}/boot/firmware/kernel8.img" boot &&
+      test "$(sha "${root}/boot/firmware/kernel8.img")" = "$candidate_kernel_sha" &&
+      assert_owned_regular "${root}/boot/firmware/initramfs8" boot &&
+      test "$(sha "${root}/boot/firmware/initramfs8")" = "$candidate_initramfs_sha" ||
+      die 'canonical candidate pair verification failed'
+    sudo sync
+    fixture_interrupt_after inactive-normalize-pair-before-phase
+    set_accepted_transition_phase canonical_initramfs_published canonical_pair_published '' '' "$transition_snapshot" "$transition_snapshot_sha" ||
+      die 'failed to publish canonical pair phase'
+    normalization_phase_committed=true
+    fixture_interrupt_after inactive-normalize-pair-published
+    remove_transaction_workspace "$workspace" || die 'failed to retire kernel normalization workspace'
+    phase=canonical_pair_published
+  fi
+  if test "$phase" = canonical_pair_published; then
+    assert_owned_regular "${root}/boot/firmware/kernel8.img" boot &&
+      test "$(sha "${root}/boot/firmware/kernel8.img")" = "$candidate_kernel_sha" &&
+      assert_owned_regular "${root}/boot/firmware/initramfs8" boot &&
+      test "$(sha "${root}/boot/firmware/initramfs8")" = "$candidate_initramfs_sha" ||
+      die 'canonical pair drifted before normalized config publication'
+    workspace="$(new_transaction_workspace)" || die 'failed to create normalized config workspace'
+    transition_snapshot="$(privileged_snapshot "$accepted_transition" "$workspace" normalization-transition)" || die 'failed to snapshot normalization authority'
+    transition_snapshot_sha="$(sha "$transition_snapshot")" || die 'failed to hash normalization authority'
+    normalized="$(private_file "$workspace" normalized-normal)" || die 'failed to allocate normalized config'
+    derive_normalized_normal_config "$accepted_transition_prior_config" \
+      "$(accepted_transition_value candidate_overlay_file)" "$normalized" "$workspace" ||
+      die 'failed to derive normalized normal config'
+    normalized_sha="$(sha "$normalized")" || die 'failed to hash normalized normal config'
+    normal_tmp="$(prepare_copy "$normalized" "$(dirname "$normal_config")" 644 "$workspace" true)" ||
+      die 'failed to prepare normalized normal config'
+    normalization_target="$normal_config"
+    normalization_restore="$(privileged_snapshot "$normal_config" "$workspace" explicit-normal-before-normalization)" || die 'failed to snapshot explicit normal config'
+    normalization_restore_sha="$(sha "$normalization_restore")" || die 'failed to hash explicit normal config'
+    normalization_phase_committed=false
+    inactive_phase_committed=false
+    sudo mv -f "$normal_tmp" "$normal_config" || die 'failed to publish normalized normal config'
+    test "$(sha "$normal_config")" = "$normalized_sha" ||
+      die 'normalized normal config verification failed'
+    sudo sync
+    fixture_interrupt_after inactive-normalize-config-before-phase
+    set_accepted_transition_phase canonical_pair_published normalized_config_published '' '' "$transition_snapshot" "$transition_snapshot_sha" '' "$normalized_sha" ||
+      die 'failed to publish normalized config phase'
+    normalization_phase_committed=true
+    fixture_interrupt_after inactive-normalize-config-published
+    remove_transaction_workspace "$workspace" || die 'failed to retire normalized config workspace'
+  fi
+  printf 'normalized inactive kernel %s\n' "$(accepted_transition_value candidate_source_revision)"
+  trap - EXIT
+}
+
+mark_normalized_verified_accepted() {
+  local candidate_release prior_release boot phase phase_replay_snapshot=''
+
+  assert_accepted_transition || die 'accepted driver transition is missing or unsafe'
+  test "$(accepted_transition_value schema_version)" = 6 ||
+    die 'normalized verification requires schema-6 authority'
+  phase="$(accepted_transition_value phase)"
+  case "$phase" in
+    normalized_config_published|normalized_verified) ;;
+    *) die 'accepted inactive transition is not awaiting normalized verification' ;;
+  esac
+  candidate_release="$(accepted_transition_value candidate_kernel_release)"
+  prior_release="$(accepted_transition_value prior_kernel_release)"
+  test "$(uname -r)" = "$candidate_release" ||
+    die 'running kernel does not match the normalized candidate'
+  boot="$(explicit_commit_boot_expectation)" || die 'normalized boot flag is unsafe'
+  test "$boot" = normal || die 'normalized verification requires a normal boot'
+  assert_owned_regular "${root}/boot/firmware/kernel8.img" boot &&
+    test "$(sha "${root}/boot/firmware/kernel8.img")" = "$(accepted_transition_value candidate_kernel_sha256)" &&
+    assert_owned_regular "${root}/boot/firmware/initramfs8" boot &&
+    test "$(sha "${root}/boot/firmware/initramfs8")" = "$(accepted_transition_value candidate_initramfs_sha256)" &&
+    test "$(sha "$normal_config")" = "$(accepted_transition_value normalized_normal_config_sha256)" ||
+    die 'normalized conventional boot selection drifted'
+  if test "$phase" = normalized_verified; then
+    assert_phase_setter_replay_workspace ||
+      die 'normalized verification replay workspace is unsafe'
+    retire_verified_inactive_replay_workspace ||
+      die 'failed to retire normalized verification replay workspace'
+    printf 'normalized verification already committed %s\n' \
+      "$(accepted_transition_value candidate_source_revision)"
+    return
+  fi
+  assert_absent_or_proposed_phase_setter_workspace verification-normalized ||
+    die 'normalized verification requires completed normalization replay'
+  if test -n "$inactive_replay_workspace"; then
+    phase_replay_snapshot="$inactive_replay_workspace/accepted-transition"
+  fi
+  set_accepted_transition_phase normalized_config_published normalized_verified \
+    '' '' '' '' '' '' '' "$phase_replay_snapshot" ||
+    die 'failed to publish normalized verification phase'
+  assert_accepted_transition || die 'normalized verification binding failed validation'
+  printf 'marked normalized verified %s\n' "$(accepted_transition_value candidate_source_revision)"
+}
+
 assert_accepted_transition() {
   local key count schema kind phase prior_version prior_revision prior_release accepted_schema
-  local candidate_version candidate_revision candidate_release candidate_artifact marker
+  local candidate_version candidate_revision candidate_release candidate_artifact marker selection_phase
+  local expected_selection_sha
   local -a keys=()
 
   assert_owned_regular "$accepted_transition" 600 || return
@@ -5370,11 +6718,32 @@ assert_accepted_transition() {
     count="$(sudo awk -F= -v wanted="$key" '$1 == wanted { count++ } END { print count + 0 }' "$accepted_transition")"
     test "$count" = 1 || return
   done
+  if test "$schema" = 6; then
+    assert_prepared_transition_anchor || return
+  else
+    test ! -L "$accepted_transition_prepared_anchor" && \
+      test ! -e "$accepted_transition_prepared_anchor" || return
+  fi
   kind="$(accepted_transition_value kind)"
   case "$kind" in new|retained) ;; *) return 1;; esac
   if test "$schema" = 5 || test "$schema" = 6; then test "$kind" = new || return; fi
   phase="$(accepted_transition_value phase)"
-  case "$phase" in prepared|staged|committed|verified|finalizing|receipt_published) ;; *) return 1;; esac
+  if test "$schema" = 6; then
+    case "$phase" in
+      prepared|staged|explicit_normal_published|explicit_normal_verified|canonical_initramfs_published|canonical_pair_published|normalized_config_published|normalized_verified|finalizing|receipt_published) ;;
+      *) return 1 ;;
+    esac
+  else
+    case "$phase" in prepared|staged|committed|verified|finalizing|receipt_published) ;; *) return 1;; esac
+  fi
+  selection_phase="${1:-$phase}"
+  if test "$selection_phase" != "$phase"; then
+    test "$schema" = 6 || return
+    case "$phase:$selection_phase" in
+      staged:explicit_normal_config_published|staged:explicit_normal_published|explicit_normal_verified:canonical_initramfs_published|canonical_initramfs_published:canonical_pair_published|canonical_pair_published:normalized_config_published) ;;
+      *) return 1 ;;
+    esac
+  fi
   prior_version="$(accepted_transition_value prior_driver_version)"
   prior_revision="$(accepted_transition_value prior_source_revision)"
   prior_release="$(accepted_transition_value prior_kernel_release)"
@@ -5450,7 +6819,7 @@ assert_accepted_transition() {
   fi
   test "$(sha "$accepted_transition_prior_config")" = \
     "$(accepted_transition_value prior_normal_config_sha256)" || return
-  if test "$schema" = 5 || test "$schema" = 6; then
+  if test "$schema" = 5; then
     case "$(accepted_transition_value prior_tryboot_existed)" in
       true)
         [[ "$(accepted_transition_value prior_tryboot_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
@@ -5485,8 +6854,90 @@ assert_accepted_transition() {
     )" || return
     test "$(accepted_transition_value candidate_kernel_file)" = "$inactive_kernel_file" || return
     test "$(accepted_transition_value candidate_initramfs_file)" = "$inactive_initramfs_file" || return
-    test "$(accepted_transition_value explicit_normal_config_sha256)" = pending || return
-    test "$(accepted_transition_value normalized_normal_config_sha256)" = pending || return
+    case "$phase" in
+      prepared|staged)
+        test "$(accepted_transition_value explicit_normal_config_sha256)" = pending || return
+        test "$(accepted_transition_value normalized_normal_config_sha256)" = pending || return
+        ;;
+      explicit_normal_published|explicit_normal_verified|canonical_initramfs_published|canonical_pair_published)
+        test "$(accepted_transition_value explicit_normal_config_sha256)" = \
+          "$(accepted_transition_value candidate_normal_config_sha256)" || return
+        test "$(accepted_transition_value normalized_normal_config_sha256)" = pending || return
+        ;;
+      normalized_config_published|normalized_verified|finalizing|receipt_published)
+        [[ "$(accepted_transition_value explicit_normal_config_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
+        [[ "$(accepted_transition_value normalized_normal_config_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
+        ;;
+    esac
+    case "$selection_phase" in
+      prepared)
+        assert_owned_regular "$normal_config" boot &&
+          test "$(sha "$normal_config")" = \
+            "$(accepted_transition_value prior_normal_config_sha256)" &&
+          validate_prepared_prior_tryboot || return
+        ;;
+      staged)
+        assert_owned_regular "$normal_config" boot &&
+          test "$(sha "$normal_config")" = \
+            "$(accepted_transition_value prior_normal_config_sha256)" &&
+          validate_staged_prior_tryboot || return
+        ;;
+      explicit_normal_config_published)
+        expected_selection_sha="$(accepted_transition_value candidate_normal_config_sha256)"
+        assert_owned_regular "$normal_config" boot &&
+          test "$(sha "$normal_config")" = "$expected_selection_sha" &&
+          assert_owned_regular "$tryboot_config" boot &&
+          test "$(sha "$tryboot_config")" = \
+            "$(accepted_transition_value tryboot_config_sha256)" || return
+        ;;
+      explicit_normal_published|explicit_normal_verified|canonical_initramfs_published|canonical_pair_published)
+        if test "$phase" = staged; then
+          expected_selection_sha="$(accepted_transition_value candidate_normal_config_sha256)"
+        else
+          expected_selection_sha="$(accepted_transition_value explicit_normal_config_sha256)"
+        fi
+        assert_owned_regular "$normal_config" boot &&
+          test "$(sha "$normal_config")" = "$expected_selection_sha" &&
+          validate_accepted_prior_tryboot \
+            "$(accepted_transition_value prior_tryboot_existed)" \
+            "$(accepted_transition_value prior_tryboot_sha256)" || return
+        ;;
+      normalized_config_published|normalized_verified|finalizing|receipt_published)
+        if test "$phase" = canonical_pair_published; then
+          expected_selection_sha="$(sudo awk -F= \
+            '$1 == "normalized_normal_config_sha256" { print $2 }' \
+            "$accepted_transition_prepared_anchor")" || return
+        else
+          expected_selection_sha="$(accepted_transition_value normalized_normal_config_sha256)"
+        fi
+        [[ "$expected_selection_sha" =~ ^[0-9a-f]{64}$ ]] || return
+        assert_owned_regular "$normal_config" boot &&
+          test "$(sha "$normal_config")" = "$expected_selection_sha" &&
+          validate_accepted_prior_tryboot \
+            "$(accepted_transition_value prior_tryboot_existed)" \
+            "$(accepted_transition_value prior_tryboot_sha256)" || return
+        ;;
+    esac
+    case "$selection_phase" in
+      prepared|staged|explicit_normal_config_published|explicit_normal_published|explicit_normal_verified)
+        assert_owned_regular "${root}/boot/firmware/kernel8.img" boot &&
+          test "$(sha "${root}/boot/firmware/kernel8.img")" = "$(accepted_transition_value prior_normal_kernel_sha256)" &&
+          assert_owned_regular "${root}/boot/firmware/initramfs8" boot &&
+          test "$(sha "${root}/boot/firmware/initramfs8")" = "$(accepted_transition_value prior_normal_initramfs_sha256)" || return
+        ;;
+      canonical_initramfs_published)
+        assert_owned_regular "${root}/boot/firmware/initramfs8" boot &&
+          test "$(sha "${root}/boot/firmware/initramfs8")" = "$(accepted_transition_value candidate_initramfs_sha256)" &&
+          assert_owned_regular "${root}/boot/firmware/kernel8.img" boot &&
+          test "$(sha "${root}/boot/firmware/kernel8.img")" = "$(accepted_transition_value prior_normal_kernel_sha256)" || return
+        ;;
+      canonical_pair_published|normalized_config_published|normalized_verified|finalizing|receipt_published)
+        assert_owned_regular "${root}/boot/firmware/kernel8.img" boot &&
+          test "$(sha "${root}/boot/firmware/kernel8.img")" = "$(accepted_transition_value candidate_kernel_sha256)" &&
+          assert_owned_regular "${root}/boot/firmware/initramfs8" boot &&
+          test "$(sha "${root}/boot/firmware/initramfs8")" = "$(accepted_transition_value candidate_initramfs_sha256)" || return
+        ;;
+    esac
     assert_inactive_companions \
       "$(accepted_transition_value prior_normal_kernel_sha256)" \
       "$(accepted_transition_value prior_normal_initramfs_sha256)" \
@@ -5557,6 +7008,9 @@ stage_retained() {
   assert_accepted_state || die 'accepted driver state is missing or unsafe'
   test ! -L "$accepted_transition" && test ! -e "$accepted_transition" ||
     die 'an accepted driver transition is already active'
+  test ! -L "$accepted_transition_prepared_anchor" && \
+    test ! -e "$accepted_transition_prepared_anchor" ||
+    die 'orphan accepted transition prepared anchor exists'
   test ! -L "$accepted_transition_prior_config" && test ! -e "$accepted_transition_prior_config" ||
     die 'orphan accepted transition config exists'
   test ! -L "$state_file" && test ! -e "$state_file" ||
@@ -5931,6 +7385,10 @@ recover_accepted() {
 
   if ! sudo test -e "$accepted_transition" && ! sudo test -L "$accepted_transition"; then
     assert_accepted_state || die 'accepted driver receipt is missing or unsafe'
+    if sudo test -e "$accepted_transition_prepared_anchor" || \
+      sudo test -L "$accepted_transition_prepared_anchor"; then
+      die 'orphan accepted transition prepared anchor is unsafe'
+    fi
     if sudo test -e "$accepted_transition_prior_tryboot" || \
       sudo test -L "$accepted_transition_prior_tryboot"; then
       assert_owned_regular "$accepted_transition_prior_tryboot" 600 ||
@@ -6044,6 +7502,10 @@ finalize_accepted() {
 
   if ! sudo test -e "$accepted_transition" && ! sudo test -L "$accepted_transition"; then
     assert_accepted_state || die 'accepted driver receipt is missing or unsafe'
+    if sudo test -e "$accepted_transition_prepared_anchor" || \
+      sudo test -L "$accepted_transition_prepared_anchor"; then
+      die 'orphan accepted transition prepared anchor is unsafe'
+    fi
     if sudo test -e "$accepted_transition_prior_tryboot" || \
       sudo test -L "$accepted_transition_prior_tryboot"; then
       assert_owned_regular "$accepted_transition_prior_tryboot" 600 ||
@@ -6961,6 +8423,8 @@ unset schema5_staged_authority_asserting schema5_staged_authority_allow_prepared
 case "${1-}" in
   stage) shift; stage "$@" ;;
   identity) identity ;;
+  commit-probe) commit_probe ;;
+  accepted-normal-probe) shift; accepted_normal_probe "$@" ;;
   authorize-inactive-stage) authorize_inactive_stage ;;
   commit) commit ;;
   rollback) rollback ;;
@@ -6972,11 +8436,14 @@ case "${1-}" in
   commit-retained) commit_retained ;;
   recover-accepted) recover_accepted ;;
   mark-verified-accepted) mark_verified_accepted ;;
+  mark-explicit-normal-verified-accepted) mark_explicit_normal_verified_accepted ;;
+  normalize-inactive-kernel-accepted) normalize_inactive_kernel_accepted ;;
+  mark-normalized-verified-accepted) mark_normalized_verified_accepted ;;
   finalize-accepted) finalize_accepted ;;
   uninstall-accepted) shift; uninstall_accepted "$@" ;;
   finalize-uninstall-accepted) finalize_uninstall_accepted ;;
   retire-inactive) shift; retire_inactive_accepted "$@" ;;
   uninstall) uninstall ;;
   cleanup-legacy-planeradar) shift; cleanup_legacy_planeradar "$@" ;;
-  *) die 'usage: lifecycle-remote.sh {stage|identity|authorize-inactive-stage|commit|rollback|record-accepted|recover-accepted-record|prepare-new-accepted|mark-committed-accepted|stage-retained|commit-retained|recover-accepted|mark-verified-accepted|finalize-accepted|uninstall-accepted|finalize-uninstall-accepted|retire-inactive|uninstall|cleanup-legacy-planeradar}' ;;
+  *) die 'usage: lifecycle-remote.sh {stage|identity|commit-probe|authorize-inactive-stage|commit|rollback|record-accepted|recover-accepted-record|prepare-new-accepted|mark-committed-accepted|stage-retained|commit-retained|recover-accepted|mark-verified-accepted|finalize-accepted|uninstall-accepted|finalize-uninstall-accepted|retire-inactive|uninstall|cleanup-legacy-planeradar}' ;;
 esac

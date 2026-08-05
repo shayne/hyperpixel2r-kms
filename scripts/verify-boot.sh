@@ -6,7 +6,7 @@ source "$repo_root/scripts/common.sh"
 
 usage() {
   cat <<'USAGE'
-Usage: verify-boot.sh [--target TARGET] [--expect-tryboot|--expect-normal] [--expect-kernel-release RELEASE] [--expect-driver-version VERSION] [--expect-overlay-file FILE] [--json]
+Usage: verify-boot.sh [--target TARGET] [--expect-tryboot|--expect-normal] [--expect-kernel-release RELEASE] [--expect-driver-version VERSION] [--expect-overlay-file FILE] [--expect-module-file FILE] [--expect-module-sha256 SHA256] [--allow-retired-tryboot-config] [--expect-retired-tryboot-absent|--expect-retired-tryboot-sha256 SHA256] [--json]
 
 Verify the live HyperPixel driver, generic compatible binding, DRM/input path,
 and current-boot SDL renderer evidence.  --json is a versioned stable result.
@@ -18,7 +18,12 @@ expected_boot=tryboot
 expected_driver_version=''
 expected_overlay_file=''
 expected_kernel_release=''
+expected_module_file=''
+expected_module_sha256=''
 json=false
+allow_retired_tryboot_config=false
+retired_tryboot_mode=''
+retired_tryboot_sha256=''
 while test "$#" -gt 0; do
   case "$1" in
     --target) test "$#" -ge 2 || { echo '--target requires a value' >&2; exit 64; }; target="$2"; shift 2 ;;
@@ -27,6 +32,11 @@ while test "$#" -gt 0; do
     --expect-kernel-release) test "$#" -ge 2 || { echo '--expect-kernel-release requires a value' >&2; exit 64; }; expected_kernel_release="$2"; shift 2 ;;
     --expect-driver-version) test "$#" -ge 2 || { echo '--expect-driver-version requires a value' >&2; exit 64; }; expected_driver_version="$2"; shift 2 ;;
     --expect-overlay-file) test "$#" -ge 2 || { echo '--expect-overlay-file requires a value' >&2; exit 64; }; expected_overlay_file="$2"; shift 2 ;;
+    --expect-module-file) test "$#" -ge 2 || { echo '--expect-module-file requires a value' >&2; exit 64; }; expected_module_file="$2"; shift 2 ;;
+    --expect-module-sha256) test "$#" -ge 2 || { echo '--expect-module-sha256 requires a value' >&2; exit 64; }; expected_module_sha256="$2"; shift 2 ;;
+    --allow-retired-tryboot-config) allow_retired_tryboot_config=true; shift ;;
+    --expect-retired-tryboot-absent) test -z "$retired_tryboot_mode" || exit 64; retired_tryboot_mode=absent; shift ;;
+    --expect-retired-tryboot-sha256) test "$#" -ge 2 && test -z "$retired_tryboot_mode" || exit 64; retired_tryboot_mode=sha256; retired_tryboot_sha256="$2"; shift 2 ;;
     --json) json=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 64 ;;
@@ -36,7 +46,34 @@ done
 hp2r_validate_target "$target"
 if test -n "$expected_driver_version"; then [[ "$expected_driver_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'unsafe expected driver version' >&2; exit 64; }; fi
 if test -n "$expected_overlay_file"; then [[ "$expected_overlay_file" =~ ^hyperpixel2r-kms-[0-9a-f]{12}\.dtbo$ ]] || { echo 'unsafe expected overlay file' >&2; exit 64; }; fi
+if test -n "$expected_module_file"; then test "$expected_module_file" = hyperpixel2r_kms.ko || { echo 'unsafe expected module file' >&2; exit 64; }; fi
+if test -n "$expected_module_sha256"; then [[ "$expected_module_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo 'unsafe expected module checksum' >&2; exit 64; }; fi
+if test -n "$expected_module_file"; then
+  test -n "$expected_module_sha256" || { echo 'expected module file and checksum must be supplied together' >&2; exit 64; }
+elif test -n "$expected_module_sha256"; then
+  echo 'expected module file and checksum must be supplied together' >&2
+  exit 64
+fi
 if test -n "$expected_kernel_release"; then hp2r_validate_release "$expected_kernel_release"; fi
+if test -n "$retired_tryboot_mode"; then
+  test -n "$expected_kernel_release" && test -n "$expected_driver_version" &&
+    test -n "$expected_overlay_file" || {
+      echo 'retired tryboot expectation requires an exact candidate identity' >&2
+      exit 64
+    }
+  if test "$retired_tryboot_mode" = sha256; then
+    [[ "$retired_tryboot_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo 'unsafe retired tryboot checksum' >&2; exit 64; }
+  fi
+fi
+if "$allow_retired_tryboot_config"; then
+  test "$expected_boot" = tryboot && test -n "$retired_tryboot_mode" || {
+    echo '--allow-retired-tryboot-config requires an exact retired tryboot identity' >&2
+    exit 64
+  }
+elif test "$expected_boot" = tryboot && test -n "$retired_tryboot_mode"; then
+  echo 'tryboot verification of a retired config requires --allow-retired-tryboot-config' >&2
+  exit 64
+fi
 ssh_options=(-o BatchMode=yes -o ConnectTimeout=8 -o ConnectionAttempts=1)
 release="$(ssh "${ssh_options[@]}" "$target" uname -r)"
 hp2r_validate_release "$release"
@@ -47,16 +84,27 @@ fi
 remote_expected_kernel_release="${expected_kernel_release:-$release}"
 remote_expected_driver_version="${expected_driver_version:-none}"
 remote_expected_overlay_file="${expected_overlay_file:-none}"
+remote_expected_module_file="${expected_module_file:-none}"
+remote_expected_module_sha256="${expected_module_sha256:-none}"
+remote_retired_tryboot_mode="${retired_tryboot_mode:-active}"
+remote_retired_tryboot_sha256="${retired_tryboot_sha256:-none}"
 
-ssh "${ssh_options[@]}" "$target" bash -s -- "$expected_boot" "$remote_expected_kernel_release" "$json" "$remote_expected_driver_version" "$remote_expected_overlay_file" <<'REMOTE'
+ssh "${ssh_options[@]}" "$target" bash -s -- "$expected_boot" "$remote_expected_kernel_release" "$json" "$remote_expected_driver_version" "$remote_expected_overlay_file" "$allow_retired_tryboot_config" "$remote_expected_module_file" "$remote_expected_module_sha256" "$remote_retired_tryboot_mode" "$remote_retired_tryboot_sha256" <<'REMOTE'
 set -euo pipefail
 expected_boot="$1"
 release="$2"
 json="$3"
 expected_driver_version="$4"
 expected_overlay_file="$5"
+allow_retired_tryboot_config="$6"
+expected_module_file="$7"
+expected_module_sha256="$8"
+retired_tryboot_mode="$9"
+retired_tryboot_sha256="${10}"
 if test "$expected_driver_version" = none; then expected_driver_version=''; fi
 if test "$expected_overlay_file" = none; then expected_overlay_file=''; fi
+if test "$expected_module_file" = none; then expected_module_file=''; fi
+if test "$expected_module_sha256" = none; then expected_module_sha256=''; fi
 root="${HP2R_INSTALL_ROOT:-}"
 path() { printf '%s%s\n' "$root" "$1"; }
 tryboot_flag="$(path /proc/device-tree/chosen/bootloader/tryboot)"
@@ -87,6 +135,30 @@ if test -n "$expected_driver_version" && test "$driver_version" != "$expected_dr
   echo 'loaded module version does not match the staged candidate' >&2
   exit 1
 fi
+if test -n "$expected_module_file"; then
+  expected_module_path="$(path "/lib/modules/$release/extra/$expected_module_file")"
+  test ! -L "$expected_module_path" && test -f "$expected_module_path" || {
+    echo 'expected candidate module path is unsafe' >&2
+    exit 1
+  }
+  test "$(stat -c '%U:%G:%a' "$expected_module_path")" = root:root:644 || {
+    echo 'expected candidate module ownership or mode is unsafe' >&2
+    exit 1
+  }
+  resolved_module_path="$(modinfo -k "$release" -n "$module_name")"
+  resolved_module_canonical="$(readlink -f -- "$resolved_module_path")"
+  expected_module_canonical="$(readlink -f -- "$expected_module_path")"
+  test "$resolved_module_canonical" = "$expected_module_canonical" || {
+    echo 'resolved module path does not match the staged candidate' >&2
+    exit 1
+  }
+  test "$(sha256sum "$expected_module_path" | awk '{ print $1 }')" = "$expected_module_sha256" || {
+    echo 'resolved module checksum does not match the staged candidate' >&2
+    exit 1
+  }
+  module_vermagic="$(modinfo -k "$release" -F vermagic "$module_name")"
+  case "$module_vermagic" in "$release "*) ;; *) echo 'resolved module vermagic does not match the running kernel' >&2; exit 1 ;; esac
+fi
 
 generic_driver="$(path /sys/bus/platform/drivers/hyperpixel2r-kms)"
 platform_devices="$(path /sys/devices/platform)"
@@ -116,22 +188,56 @@ case "$expected_boot" in
   *) echo 'unsupported boot expectation' >&2; exit 1 ;;
 esac
 config="$(path "/boot/firmware/$active_config_name")"
-test ! -L "$config" && test -f "$config"
-overlay_name="$(sudo awk '
-  {
-    line=$0; sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line)
-    if (line ~ /^dtoverlay=hyperpixel2r-kms-[0-9a-f]{12}\.dtbo$/) {
-      sub(/^dtoverlay=/, "", line); print line
-    }
-  }
-' "$config")"
-test "$(printf '%s\n' "$overlay_name" | sed '/^$/d' | wc -l | tr -d ' ')" = 1 || { echo 'active boot config does not declare exactly one generic overlay' >&2; exit 1; }
-[[ "$overlay_name" =~ ^hyperpixel2r-kms-[0-9a-f]{12}\.dtbo$ ]] || {
-  echo 'active boot config has an invalid generic overlay name' >&2
+if test "$retired_tryboot_mode" != active; then
+  retired_config="$(path /boot/firmware/tryboot.txt)"
+  case "$retired_tryboot_mode" in
+    absent)
+      test ! -L "$retired_config" && test ! -e "$retired_config" || {
+        echo 'retired tryboot config was expected to be absent' >&2
+        exit 1
+      }
+      ;;
+    sha256)
+      test ! -L "$retired_config" && test -f "$retired_config" || {
+        echo 'retired tryboot config is unsafe' >&2
+        exit 1
+      }
+      test "$(sudo sha256sum "$retired_config" | awk '{ print $1 }')" = "$retired_tryboot_sha256" || {
+        echo 'retired tryboot config does not match accepted prior authority' >&2
+        exit 1
+      }
+      ;;
+    *) echo 'retired tryboot expectation is unsafe' >&2; exit 1 ;;
+  esac
+fi
+if test "$allow_retired_tryboot_config" = true; then
+  overlay_name="$expected_overlay_file"
+elif test -L "$config"; then
+  echo 'active boot config is a symlink' >&2
   exit 1
-}
-if test -n "$expected_overlay_file" && test "$overlay_name" != "$expected_overlay_file"; then
-  echo 'active generic overlay does not match the staged candidate' >&2
+elif test -f "$config"; then
+  overlay_name="$(sudo awk '
+    {
+      line=$0; sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line)
+      if (line ~ /^dtoverlay=hyperpixel2r-kms-[0-9a-f]{12}\.dtbo$/) {
+        sub(/^dtoverlay=/, "", line); print line
+      }
+    }
+  ' "$config")"
+  test "$(printf '%s\n' "$overlay_name" | sed '/^$/d' | wc -l | tr -d ' ')" = 1 || { echo 'active boot config does not declare exactly one generic overlay' >&2; exit 1; }
+  [[ "$overlay_name" =~ ^hyperpixel2r-kms-[0-9a-f]{12}\.dtbo$ ]] || {
+    echo 'active boot config has an invalid generic overlay name' >&2
+    exit 1
+  }
+  if test -n "$expected_overlay_file" && test "$overlay_name" != "$expected_overlay_file"; then
+    echo 'active generic overlay does not match the staged candidate' >&2
+    exit 1
+  fi
+elif test -e "$config"; then
+  echo 'active boot config is not a regular file' >&2
+  exit 1
+else
+  echo 'active boot config is missing' >&2
   exit 1
 fi
 

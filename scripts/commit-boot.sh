@@ -20,10 +20,17 @@ hp2r_validate_target "$target"
 ssh_options=(-o BatchMode=yes -o ConnectTimeout=8 -o ConnectionAttempts=1)
 remote_stage=''
 payload=''
-identity=''
+commit_probe=''
+commit_phase=''
+expected_boot=''
 driver_version=''
 overlay_file=''
 kernel_release=''
+module_file=''
+module_sha256=''
+retired_tryboot_existed=''
+retired_tryboot_sha256=''
+verify_args=()
 cleanup() {
   local status=$?
   trap - EXIT
@@ -37,17 +44,49 @@ remote_stage="$(ssh "${ssh_options[@]}" "$target" mktemp -d /tmp/hp2r-tryboot-st
 payload="$(mktemp -d "${TMPDIR:-/tmp}/hp2r-commit.XXXXXX")"
 install -m 0644 "$repo_root/scripts/lifecycle-remote.sh" "$payload/lifecycle-remote.sh"
 scp "${ssh_options[@]}" -rp "$payload/." "$target:$remote_stage/"
-identity="$(ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" identity)"
-[[ "$identity" =~ ^([0-9]+\.[0-9]+\.[0-9]+)$'\t'(hyperpixel2r-kms-[0-9a-f]{12}\.dtbo)$'\t'([A-Za-z0-9._+-]+)$ ]] || {
-  echo 'target returned an unsafe candidate identity' >&2
+commit_probe="$(ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" commit-probe)"
+[[ "$commit_probe" =~ ^(tryboot|explicit-config-reconcile|explicit-replay|explicit-reconcile)$'\t'(tryboot|normal)$'\t'([0-9]+\.[0-9]+\.[0-9]+)$'\t'(hyperpixel2r-kms-[0-9a-f]{12}\.dtbo)$'\t'([A-Za-z0-9._+-]+)$'\t'(hyperpixel2r_kms\.ko)$'\t'([0-9a-f]{64})$'\t'(active|true|false)$'\t'(none|[0-9a-f]{64})$ ]] || {
+  echo 'target returned an unsafe commit probe' >&2
   exit 1
 }
-driver_version="${BASH_REMATCH[1]}"
-overlay_file="${BASH_REMATCH[2]}"
-kernel_release="${BASH_REMATCH[3]}"
-"$repo_root/scripts/verify-boot.sh" --target "$target" --expect-tryboot \
-  --expect-kernel-release "$kernel_release" --expect-driver-version "$driver_version" \
-  --expect-overlay-file "$overlay_file" >/dev/null
+commit_phase="${BASH_REMATCH[1]}"
+expected_boot="${BASH_REMATCH[2]}"
+driver_version="${BASH_REMATCH[3]}"
+overlay_file="${BASH_REMATCH[4]}"
+kernel_release="${BASH_REMATCH[5]}"
+module_file="${BASH_REMATCH[6]}"
+module_sha256="${BASH_REMATCH[7]}"
+retired_tryboot_existed="${BASH_REMATCH[8]}"
+retired_tryboot_sha256="${BASH_REMATCH[9]}"
+case "$commit_phase:$expected_boot" in
+  tryboot:tryboot|explicit-config-reconcile:tryboot|explicit-config-reconcile:normal|explicit-replay:tryboot|explicit-replay:normal|explicit-reconcile:tryboot|explicit-reconcile:normal) ;;
+  *) echo 'target returned an inconsistent commit probe' >&2; exit 1 ;;
+esac
+verify_args=(
+  --target "$target"
+  "--expect-$expected_boot"
+  --expect-kernel-release "$kernel_release"
+  --expect-driver-version "$driver_version"
+  --expect-overlay-file "$overlay_file"
+  --expect-module-file "$module_file"
+  --expect-module-sha256 "$module_sha256"
+)
+if test "$commit_phase" = explicit-replay || test "$commit_phase" = explicit-reconcile; then
+  case "$retired_tryboot_existed:$retired_tryboot_sha256" in
+    false:none) verify_args+=(--expect-retired-tryboot-absent) ;;
+    true:[0-9a-f]*) verify_args+=(--expect-retired-tryboot-sha256 "$retired_tryboot_sha256") ;;
+    *) echo 'target returned an unsafe retired tryboot identity' >&2; exit 1 ;;
+  esac
+  if test "$expected_boot" = tryboot; then
+    verify_args+=(--allow-retired-tryboot-config)
+  fi
+else
+  test "$retired_tryboot_existed:$retired_tryboot_sha256" = active:none || {
+    echo 'target returned retired tryboot identity outside replay' >&2
+    exit 1
+  }
+fi
+"$repo_root/scripts/verify-boot.sh" "${verify_args[@]}" >/dev/null
 ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" commit
 ssh "${ssh_options[@]}" "$target" rm -rf -- "$remote_stage"
 remote_stage=''

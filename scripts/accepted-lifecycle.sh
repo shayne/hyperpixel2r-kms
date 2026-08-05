@@ -9,6 +9,7 @@ source "$repo_root/scripts/common.sh"
 
 target="${HP2R_TARGET:-}"
 action=''
+action_seen=false
 driver_version=''
 source_revision=''
 kernel_release=''
@@ -25,7 +26,12 @@ backlight_rule_sha256=''
 while test "$#" -gt 0; do
   case "$1" in
     --target) test "$#" -ge 2 || exit 64; target="$2"; shift 2 ;;
-    --action) test "$#" -ge 2 || exit 64; action="$2"; shift 2 ;;
+    --action)
+      test "$#" -ge 2 && ! "$action_seen" || exit 64
+      action="$2"
+      action_seen=true
+      shift 2
+      ;;
     --driver-version) test "$#" -ge 2 || exit 64; driver_version="$2"; shift 2 ;;
     --source-revision) test "$#" -ge 2 || exit 64; source_revision="$2"; shift 2 ;;
     --kernel-release) test "$#" -ge 2 || exit 64; kernel_release="$2"; shift 2 ;;
@@ -53,7 +59,7 @@ case "$action" in
     [[ "$source_revision" =~ ^[0-9a-f]{40}$ ]] || exit 64
     hp2r_validate_release "$kernel_release"
     ;;
-  mark-committed|commit-retained|recover|mark-verified|finalize|finalize-uninstall)
+  mark-committed|commit-retained|recover|mark-verified|mark-explicit-normal-verified|normalize-inactive-kernel|mark-normalized-verified|finalize|finalize-uninstall)
     test -z "$driver_version$source_revision$kernel_release" || exit 64
     ;;
   *) echo 'unsupported accepted lifecycle action' >&2; exit 64 ;;
@@ -102,6 +108,7 @@ if test "$action" = prepare-new; then
 fi
 remote_stage=''
 payload=''
+normal_probe=''
 cleanup() {
   local status=$?
   trap - EXIT
@@ -118,6 +125,25 @@ remote_stage="$(ssh "${ssh_options[@]}" "$target" mktemp -d /tmp/hp2r-accepted.X
 payload="$(mktemp -d "${TMPDIR:-/tmp}/hp2r-accepted.XXXXXX")"
 install -m 0644 "$repo_root/scripts/lifecycle-remote.sh" "$payload/lifecycle-remote.sh"
 scp "${ssh_options[@]}" -rp "$payload/." "$target:$remote_stage/"
+case "$action" in
+  mark-explicit-normal-verified) expected_phase=explicit_normal_published ;;
+  mark-normalized-verified) expected_phase=normalized_config_published ;;
+  *) expected_phase='' ;;
+esac
+if test -n "$expected_phase"; then
+  normal_probe="$(ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" \
+    accepted-normal-probe "$expected_phase")"
+  [[ "$normal_probe" =~ ^("$expected_phase")$'\t'([0-9]+\.[0-9]+\.[0-9]+)$'\t'(hyperpixel2r-kms-[0-9a-f]{12}\.dtbo)$'\t'([A-Za-z0-9._+-]+)$'\t'(hyperpixel2r_kms\.ko)$'\t'([0-9a-f]{64})$ ]] || {
+    echo 'target returned an unsafe accepted normal probe' >&2
+    exit 1
+  }
+  "$repo_root/scripts/verify-boot.sh" --target "$target" --expect-normal \
+    --expect-kernel-release "${BASH_REMATCH[4]}" \
+    --expect-driver-version "${BASH_REMATCH[2]}" \
+    --expect-overlay-file "${BASH_REMATCH[3]}" \
+    --expect-module-file "${BASH_REMATCH[5]}" \
+    --expect-module-sha256 "${BASH_REMATCH[6]}" >/dev/null
+fi
 case "$action" in
   record)
     ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" \
@@ -158,6 +184,15 @@ case "$action" in
     ;;
   mark-verified)
     ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" mark-verified-accepted
+    ;;
+  mark-explicit-normal-verified)
+    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" mark-explicit-normal-verified-accepted
+    ;;
+  normalize-inactive-kernel)
+    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" normalize-inactive-kernel-accepted
+    ;;
+  mark-normalized-verified)
+    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" mark-normalized-verified-accepted
     ;;
   finalize)
     ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" finalize-accepted

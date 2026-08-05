@@ -44,6 +44,13 @@ while IFS= read -r -d '' relative_path; do
   cp -p "$repo_root/$relative_path" "$fixture_repo/$relative_path"
 done < <(git -C "$repo_root" ls-files -z)
 
+# Include the fixture-only ancestor wrapper in the working-tree overlay, even
+# before the introducing commit makes it part of the detached fixture source.
+relative_path='tests/accepted-lifecycle.sh'
+test -f "$repo_root/$relative_path" && test ! -L "$repo_root/$relative_path"
+mkdir -p "$fixture_repo/$(dirname "$relative_path")"
+cp -p "$repo_root/$relative_path" "$fixture_repo/$relative_path"
+
 release='6.18.34+rpt-rpi-v8'
 source_tree="$(git -C "$fixture_repo" rev-parse "$source_revision^{tree}")"
 artifact_dir="$fixture_repo/dist/artifacts/$release"
@@ -145,9 +152,17 @@ docker run --rm \
   --env HP2R_FIXTURE_REPO_ROOT=/repo \
   --env HP2R_FIXTURE_CASE="${HP2R_FIXTURE_CASE:-}" \
   --env HP2R_FIXTURE_INTERRUPT_AFTER="${HP2R_FIXTURE_INTERRUPT_AFTER:-}" \
+  --env HP2R_FIXTURE_COMMIT_BOUNDARY="${HP2R_FIXTURE_COMMIT_BOUNDARY:-}" \
+  --env HP2R_FIXTURE_NORMALIZE_BOUNDARY="${HP2R_FIXTURE_NORMALIZE_BOUNDARY:-}" \
   --env HP2R_FIXTURE_RETIRE_BOUNDARY="${HP2R_FIXTURE_RETIRE_BOUNDARY:-}" \
   --env HP2R_FIXTURE_FAIL_AFTER_STAGED_PUBLICATION="${HP2R_FIXTURE_FAIL_AFTER_STAGED_PUBLICATION:-}" \
   --env HP2R_FIXTURE_HOSTILE="${HP2R_FIXTURE_HOSTILE:-}" \
+  --env HP2R_FIXTURE_NORMALIZATION_PHASE_CASE="${HP2R_FIXTURE_NORMALIZATION_PHASE_CASE:-}" \
+  --env HP2R_FIXTURE_PHASE_SETTER_HOSTILE="${HP2R_FIXTURE_PHASE_SETTER_HOSTILE:-}" \
+  --env HP2R_FIXTURE_PREPHASE_SETTER_HOSTILE="${HP2R_FIXTURE_PREPHASE_SETTER_HOSTILE:-}" \
+  --env HP2R_FIXTURE_REPLAY_HOSTILE="${HP2R_FIXTURE_REPLAY_HOSTILE:-}" \
+  --env HP2R_FIXTURE_ANCESTOR_ACTION_ARGV="${HP2R_FIXTURE_ANCESTOR_ACTION_ARGV:-}" \
+  --env HP2R_FIXTURE_ANCESTOR_EXPECT="${HP2R_FIXTURE_ANCESTOR_EXPECT:-}" \
   "$image" \
   bash tests/boot-fixtures.sh
 

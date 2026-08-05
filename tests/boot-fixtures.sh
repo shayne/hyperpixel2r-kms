@@ -456,12 +456,16 @@ if test "${1-}" = bash && test "${2-}" = -s; then
   fi
   if setpriv --reuid=65534 --regid=65534 --clear-groups \
     env HP2R_INSTALL_ROOT="$HP2R_FIXTURE_ROOT" PATH="$PATH" \
+    HP2R_FIXTURE_REMOTE_RUNNING_RELEASE="${HP2R_FIXTURE_REMOTE_RUNNING_RELEASE:-}" \
+    HP2R_FIXTURE_INTERRUPT_AFTER="${HP2R_FIXTURE_INTERRUPT_AFTER:-}" \
+    HP2R_FIXTURE_PRESERVE_MUTATIONS="${HP2R_FIXTURE_PRESERVE_MUTATIONS:-}" \
     HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH:-}" \
     HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH:-}" \
     HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH:-}" \
     HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH:-}" \
     HP2R_FIXTURE_FAIL_AFTER_STAGED_PUBLICATION="${HP2R_FIXTURE_FAIL_AFTER_STAGED_PUBLICATION:-}" \
     HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY="${HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY:-}" \
+    HP2R_FIXTURE_MUTATE_NORMALIZATION_BOUND_LEAF="${HP2R_FIXTURE_MUTATE_NORMALIZATION_BOUND_LEAF:-}" \
     schema5_staged_authority_asserting="${schema5_staged_authority_asserting:-}" \
     schema5_staged_authority_allow_prepared="${schema5_staged_authority_allow_prepared:-}" \
     bash -c 'id -u > "$HP2R_FIXTURE_ROOT/tmp/remote-uid"; exec bash "$@"' bash "$@"; then
@@ -496,12 +500,16 @@ if test "${1-}" = bash && { [[ "${2-}" == /tmp/hp2r-tryboot-stage.*/* ]] || [[ "
   fi
   setpriv --reuid=65534 --regid=65534 --clear-groups \
     env HP2R_INSTALL_ROOT="$HP2R_FIXTURE_ROOT" PATH="$PATH" \
+    HP2R_FIXTURE_REMOTE_RUNNING_RELEASE="${HP2R_FIXTURE_REMOTE_RUNNING_RELEASE:-}" \
+    HP2R_FIXTURE_INTERRUPT_AFTER="${HP2R_FIXTURE_INTERRUPT_AFTER:-}" \
+    HP2R_FIXTURE_PRESERVE_MUTATIONS="${HP2R_FIXTURE_PRESERVE_MUTATIONS:-}" \
     HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH:-}" \
     HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH:-}" \
     HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH:-}" \
     HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH:-}" \
     HP2R_FIXTURE_FAIL_AFTER_STAGED_PUBLICATION="${HP2R_FIXTURE_FAIL_AFTER_STAGED_PUBLICATION:-}" \
     HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY="${HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY:-}" \
+    HP2R_FIXTURE_MUTATE_NORMALIZATION_BOUND_LEAF="${HP2R_FIXTURE_MUTATE_NORMALIZATION_BOUND_LEAF:-}" \
     schema5_staged_authority_asserting="${schema5_staged_authority_asserting:-}" \
     schema5_staged_authority_allow_prepared="${schema5_staged_authority_allow_prepared:-}" \
     bash -c 'id -u > "$HP2R_FIXTURE_ROOT/tmp/remote-uid"; exec bash "$@"' bash "$script" "$@"
@@ -589,7 +597,11 @@ if test -n "${HP2R_FIXTURE_LOG:-}"; then
   printf 'modinfo -k %s -F %s %s\n' "$release" "${field:-none}" "$module" >> "$HP2R_FIXTURE_LOG"
 fi
 if test "$field" = vermagic; then
-  printf '%s fixture\n' "$release"
+  if test "${HP2R_FIXTURE_VERMAGIC_PREFIX_EVIL:-}" = 1; then
+    printf '%sevil fixture\n' "$release"
+  else
+    printf '%s fixture\n' "$release"
+  fi
   exit 0
 fi
 relative="$(awk -F ': ' '$1 == "hyperpixel2r_kms.ko" { print $2 }' \
@@ -1172,14 +1184,17 @@ run_stage() {
 run_controller() {
   local script="$1"
   shift
-  local fixture_bin="$bin"
+  local fixture_bin="$bin" fixture_release="${HP2R_FIXTURE_RELEASE_OVERRIDE:-$release}"
+  local accepted_controller=0
   local result
+  test "$script" != accepted-lifecycle.sh || accepted_controller=1
   if test "${HP2R_FIXTURE_NO_DKMS:-}" = 1; then fixture_bin="$bin_no_dkms"; fi
   if PATH="$fixture_bin:$PATH" \
     HP2R_FIXTURE_ROOT="$root" \
-    HP2R_FIXTURE_RELEASE="$release" \
+    HP2R_FIXTURE_RELEASE="$fixture_release" \
     HP2R_FIXTURE_LOG="$log" \
     HP2R_FIXTURE_REPO_ROOT="$repo_root" \
+    HP2R_FIXTURE_ACCEPTED_CONTROLLER="$accepted_controller" \
     HP2R_LEGACY_MIGRATION_CONTRACT="${HP2R_LEGACY_MIGRATION_CONTRACT:-}" \
     HP2R_TARGET=pi@fixture \
     "$repo_root/scripts/$script" "$@"; then
@@ -1196,12 +1211,69 @@ run_controller() {
   fi
 }
 
+run_accepted_action_argv() {
+  PATH="$bin:$PATH" \
+    HP2R_FIXTURE_ROOT="$root" \
+    HP2R_FIXTURE_RELEASE="$release" \
+    HP2R_FIXTURE_LOG="$log" \
+    HP2R_FIXTURE_REPO_ROOT="$repo_root" \
+    HP2R_TARGET=pi@fixture \
+    bash -c '
+      ssh() { return 99; }
+      export -f ssh
+      exec "$@"
+    ' bash "$repo_root/scripts/accepted-lifecycle.sh" "$@"
+}
+
+exercise_accepted_action_argv_parser() {
+  local status
+
+  if run_accepted_action_argv \
+    --action recover-record \
+    --driver-version 0.1.1 \
+    --source-revision "$source_revision" \
+    --kernel-release "$release" >/dev/null 2>&1; then
+    fail 'single accepted action did not reach the controller transport'
+  else
+    status=$?
+    test "$status" = 99 || fail "single accepted action was rejected before transport: $status"
+  fi
+  for arguments in \
+    '--action unsupported' \
+    '--action recover-record --action recover-record --driver-version 0.1.1 --source-revision '"$source_revision"' --kernel-release '"$release" \
+    '--action recover-record --action unsupported --driver-version 0.1.1 --source-revision '"$source_revision"' --kernel-release '"$release" \
+    '--action'; do
+    # Intentional shell splitting: each fixture vector is an argv contract.
+    if run_accepted_action_argv $arguments >/dev/null 2>&1; then
+      fail "accepted action parser accepted malformed argv: $arguments"
+    else
+      status=$?
+      test "$status" = 64 || fail "accepted action parser returned $status for: $arguments"
+    fi
+  done
+}
+
 run_accepted_remote() {
   PATH="$bin:$PATH" \
     HP2R_FIXTURE_ROOT="$root" \
     HP2R_INSTALL_ROOT="$root" \
+    HP2R_FIXTURE_RELEASE="${HP2R_FIXTURE_RELEASE_OVERRIDE:-$release}" \
     HP2R_FIXTURE_LOG="$log" \
     bash "$repo_root/scripts/lifecycle-remote.sh" "$@"
+}
+
+write_fixture_prepared_anchor() {
+  local transition="$1"
+  local normalized_sha="${2:-8888888888888888888888888888888888888888888888888888888888888888}"
+  local anchor="$(dirname "$transition")/accepted-transition-prepared.sha256"
+
+  {
+    printf 'prepared_transition_sha256=%s\n' \
+      "$(sha256sum "$transition" | awk '{ print $1 }')"
+    printf 'normalized_normal_config_sha256=%s\n' "$normalized_sha"
+  } > "$anchor"
+  chown root:root "$anchor"
+  chmod 0600 "$anchor"
 }
 
 prepare_inactive_authorization_target() {
@@ -1273,6 +1345,7 @@ prepare_inactive_authorization_target() {
   } > "$transition"
   chown root:root "$transition"
   chmod 0600 "$transition"
+  write_fixture_prepared_anchor "$transition"
   authorization_candidate_release="$candidate_release"
   authorization_candidate_kernel="$candidate_kernel"
   authorization_candidate_initramfs="$candidate_initramfs"
@@ -1342,6 +1415,7 @@ prepare_aligned_inactive_authorization_target() {
     "$(awk -F '\t' '$1 == "vc4_overlay_sha256" { print $2 }' "$target_manifest")"
   chown root:root "$transition"
   chmod 0600 "$transition"
+  write_fixture_prepared_anchor "$transition"
   aligned_candidate_release="$candidate_release"
   aligned_candidate_target_parent="$candidate_parent"
   aligned_candidate_artifact="$candidate_artifact"
@@ -3070,6 +3144,15 @@ exercise_inactive_kernel_prepare() {
   local candidate_stage_repo=''
 
   new_target
+  if test "${HP2R_FIXTURE_PRIOR_TRYBOOT:-}" = 1; then
+    printf '%s\n' \
+      '[all]' \
+      '# accepted prior one-shot configuration' \
+      'dtoverlay=hyperpixel2r-kms-eefaf3ae40fd.dtbo' \
+      > "$root/boot/firmware/tryboot.txt"
+    chown root:root "$root/boot/firmware/tryboot.txt"
+    chmod 0644 "$root/boot/firmware/tryboot.txt"
+  fi
   if [[ "${HP2R_FIXTURE_INTERRUPT_AFTER:-}" == candidate-* ]]; then
     HP2R_FIXTURE_INTERRUPT_AFTER='' run_stage >/dev/null
   else
@@ -3087,6 +3170,10 @@ exercise_inactive_kernel_prepare() {
   cp "$repo_root/dist/kernel-target/$release/target.txt" "$candidate_manifest"
   printf 'inactive prior kernel bytes\n' > "$root$prior_kernel"
   printf 'inactive prior initramfs bytes\n' > "$root$prior_initramfs"
+  cp "$root$prior_kernel" "$root/boot/firmware/kernel8.img"
+  cp "$root$prior_initramfs" "$root/boot/firmware/initramfs8"
+  chown root:root "$root/boot/firmware/kernel8.img" "$root/boot/firmware/initramfs8"
+  chmod 0644 "$root/boot/firmware/kernel8.img" "$root/boot/firmware/initramfs8"
   printf 'inactive candidate kernel bytes\n' > "$candidate_target/root$candidate_kernel"
   printf 'inactive candidate initramfs bytes\n' > "$candidate_target/root$candidate_initramfs"
   mkdir -p "$root/lib/modules/$candidate_release" "$root/var/lib/dpkg/info"
@@ -3118,7 +3205,7 @@ exercise_inactive_kernel_prepare() {
   cp "$root$prior_kernel" "$prior_kernel_before"
   cp "$root$prior_initramfs" "$prior_initramfs_before"
 
-  run_inactive_prepare() {
+  run_inactive_prepare_child() {
     PATH="$bin:$PATH" \
       HP2R_FIXTURE_ROOT="$root" \
       HP2R_FIXTURE_RELEASE="$release" \
@@ -3141,6 +3228,31 @@ exercise_inactive_kernel_prepare() {
         --backlight-rule-file "$backlight_rule_file" \
         --backlight-rule-sha256 "$(awk -F '\t' '$1 == "backlight_rule_sha256" { print $2 }' "$artifact_manifest")"
   }
+  run_inactive_prepare() {
+    if test -n "${HP2R_FIXTURE_ANCESTOR_ACTION_ARGV:-}"; then
+      HP2R_FIXTURE_ANCESTOR_DRIVER_VERSION="$candidate_driver_version" \
+        HP2R_FIXTURE_ANCESTOR_SOURCE_REVISION="$source_revision" \
+        HP2R_FIXTURE_ANCESTOR_KERNEL_RELEASE="$candidate_release" \
+        HP2R_FIXTURE_ANCESTOR_KERNEL_TARGET="$candidate_parent" \
+        HP2R_FIXTURE_ANCESTOR_TARGET_IDENTITY=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+        HP2R_FIXTURE_ANCESTOR_MANIFEST_SHA="$(sha256sum "$artifact_manifest" | awk '{ print $1 }')" \
+        HP2R_FIXTURE_ANCESTOR_MODULE_SHA="$(awk -F '\t' '$1 == "module_sha256" { print $2 }' "$artifact_manifest")" \
+        HP2R_FIXTURE_ANCESTOR_OVERLAY_FILE="$overlay_file" \
+        HP2R_FIXTURE_ANCESTOR_OVERLAY_SHA="$(awk -F '\t' '$1 == "overlay_sha256" { print $2 }' "$artifact_manifest")" \
+        HP2R_FIXTURE_ANCESTOR_BACKLIGHT_RULE_SHA="$(awk -F '\t' '$1 == "backlight_rule_sha256" { print $2 }' "$artifact_manifest")" \
+        PATH="$bin:$PATH" \
+        HP2R_FIXTURE_ROOT="$root" \
+        HP2R_FIXTURE_RELEASE="$release" \
+        HP2R_FIXTURE_LOG="$log" \
+        HP2R_FIXTURE_REPO_ROOT="$repo_root" \
+        HP2R_FIXTURE_ACCEPTED_CONTROLLER=1 \
+        HP2R_TARGET=pi@fixture \
+        bash "$repo_root/tests/accepted-lifecycle.sh" \
+        ${HP2R_FIXTURE_ANCESTOR_ACTION_ARGV}
+      return
+    fi
+    run_inactive_prepare_child
+  }
   run_inactive_stage() {
     HP2R_FIXTURE_REPLACE_OVERLAY="$overlay_file" \
       HP2R_FIXTURE_STAGE_REPO_OVERRIDE="${candidate_stage_repo:-$repo_root}" \
@@ -3151,6 +3263,29 @@ exercise_inactive_kernel_prepare() {
       --kernel-release "$candidate_release" \
       --target-identity-sha256 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   }
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-accepted-ancestor-one; then
+    local expected="${HP2R_FIXTURE_ANCESTOR_EXPECT:-}" before
+    test -n "$expected" || fail 'missing accepted ancestor expectation'
+    before="$fixture/accepted-ancestor-config-before"
+    cp "$root/boot/firmware/config.txt" "$before"
+    if run_inactive_prepare >/dev/null 2>&1; then
+      status=0
+    else
+      status=$?
+    fi
+    if test "$status" = 0; then
+      test "$expected" = pass || fail 'writer guard accepted malformed controller ancestor'
+      assert_file "$state_dir/accepted-transition"
+    else
+      test "$expected" = reject ||
+        fail "writer guard rejected allowed controller ancestor: $status"
+      assert_absent "$state_dir/accepted-transition"
+      cmp -s "$before" "$root/boot/firmware/config.txt" ||
+        fail 'writer guard mutation escaped a rejected controller ancestor'
+    fi
+    assert_no_private_workspaces
+    exit 0
+  fi
   if test -n "${HP2R_FIXTURE_HOSTILE:-}"; then
     local hostile="$HP2R_FIXTURE_HOSTILE" negative=true name mutation lock writer pid=''
     local normal_state="$fixture/inactive-hostile-normal" module_state="$fixture/inactive-hostile-module"
@@ -3265,9 +3400,7 @@ exercise_inactive_kernel_prepare() {
       capture_inactive_path "$(inactive_companion_path "$name")" "$companion_state/$name"
     done
     if "$negative"; then
-      if test "${HP2R_FIXTURE_DEBUG:-}" = 1; then
-        run_inactive_prepare && fail "inactive prepare accepted hostile $hostile"
-      elif run_inactive_prepare >/dev/null 2>&1; then
+      if run_inactive_prepare >/dev/null 2>&1; then
         if test "$hostile" = writer-late-apt && ! test -f "$root/tmp/inactive-late-writer-start"; then
           fail 'inactive late-writer fixture did not launch after capture'
         fi
@@ -3285,7 +3418,7 @@ exercise_inactive_kernel_prepare() {
         test ! -e "$output" || ! grep -Fq "$writer_secret" "$output" ||
           fail 'writer secret argv escaped the privileged writer helper'
       done
-    elif test "${HP2R_FIXTURE_DEBUG:-}" = 1 || test "$hostile" = baseline; then
+    elif test "$hostile" = baseline; then
       run_inactive_prepare || fail "inactive prepare rejected harmless $hostile"
     else
       run_inactive_prepare >/dev/null || fail "inactive prepare rejected harmless $hostile"
@@ -3341,7 +3474,14 @@ exercise_inactive_kernel_prepare() {
     fail 'inactive prepare changed normal boot config'
   cmp -s "$conventional_before" "$root/boot/firmware/config.txt" ||
     fail 'inactive prepare changed conventional normal boot pair'
-  assert_absent "$root/boot/firmware/tryboot.txt"
+  if test "${HP2R_FIXTURE_PRIOR_TRYBOOT:-}" = 1; then
+    assert_file "$root/boot/firmware/tryboot.txt"
+    grep -Fxq '# accepted prior one-shot configuration' \
+      "$root/boot/firmware/tryboot.txt" ||
+      fail 'inactive prepare changed the accepted prior tryboot config'
+  else
+    assert_absent "$root/boot/firmware/tryboot.txt"
+  fi
 
   # Task 5 must stage the prepared inactive candidate through the public
   # controller while the fixture still reports the accepted, prior release.
@@ -3575,6 +3715,892 @@ exercise_inactive_kernel_prepare() {
     done
     exit 0
   fi
+  # A successful cross-kernel promotion must retain the conventional pair as
+  # fallback while normal firmware selects the complete candidate-only pair.
+  # This catches the old generic commit branch, which derives an overlay-only
+  # normal config and therefore cannot safely select an inactive kernel.
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-explicit-promotion; then
+    mkdir -p "$root/proc/device-tree/chosen/bootloader"
+    printf '\0\0\0\1' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    install_live_hardware
+    export HP2R_FIXTURE_RELEASE_OVERRIDE="$candidate_release"
+    run_controller commit-boot.sh >/dev/null
+    unset HP2R_FIXTURE_RELEASE_OVERRIDE
+    grep -Fxq 'phase=explicit_normal_published' "$state_dir/accepted-transition" ||
+      fail 'inactive commit did not publish the explicit normal phase'
+    test "$(tail -n 4 "$root/boot/firmware/config.txt")" = "$(printf '%s\n' \
+      '# hyperpixel2r-kms one-shot inactive-kernel candidate' \
+      "kernel=$kernel_name" \
+      "initramfs $initramfs_name followkernel" \
+      "dtoverlay=$overlay_file")" ||
+      fail 'inactive commit did not select the complete explicit candidate pair'
+    cmp -s "$prior_kernel_before" "$root$prior_kernel" ||
+      fail 'inactive commit changed the conventional prior kernel'
+    cmp -s "$prior_initramfs_before" "$root$prior_initramfs" ||
+      fail 'inactive commit changed the conventional prior initramfs'
+    assert_absent "$state_dir/tryboot-state"
+    assert_absent "$root/boot/firmware/tryboot.txt"
+    assert_file "$root/boot/firmware/$kernel_name"
+    assert_file "$root/boot/firmware/$initramfs_name"
+    exit 0
+  fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-explicit-normal-verified; then
+    # First commit the healthy tryboot into the explicit candidate selection.
+    mkdir -p "$root/proc/device-tree/chosen/bootloader"
+    printf '\0\0\0\1' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    install_live_hardware
+    export HP2R_FIXTURE_RELEASE_OVERRIDE="$candidate_release"
+    run_controller commit-boot.sh >/dev/null
+    # The next boot is normal, but still selects the candidate-only pair.
+    printf '\0\0\0\0' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    run_controller accepted-lifecycle.sh --action mark-explicit-normal-verified >/dev/null
+    grep -Fxq 'phase=explicit_normal_verified' "$state_dir/accepted-transition" ||
+      fail 'explicit normal verifier did not publish its typed phase'
+    cmp -s "$prior_kernel_before" "$root$prior_kernel" ||
+      fail 'explicit normal verifier changed the conventional prior kernel'
+    cmp -s "$prior_initramfs_before" "$root$prior_initramfs" ||
+      fail 'explicit normal verifier changed the conventional prior initramfs'
+    unset HP2R_FIXTURE_RELEASE_OVERRIDE
+    exit 0
+  fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-explicit-normal-unhealthy; then
+    mkdir -p "$root/proc/device-tree/chosen/bootloader"
+    printf '\0\0\0\1' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    install_live_hardware
+    export HP2R_FIXTURE_RELEASE_OVERRIDE="$candidate_release"
+    run_controller commit-boot.sh >/dev/null
+    printf '\0\0\0\0' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    rm -f "$root/sys/module/hyperpixel2r_kms/version"
+    if run_controller accepted-lifecycle.sh --action mark-explicit-normal-verified >/dev/null 2>&1; then
+      fail 'explicit normal verifier accepted unhealthy live hardware'
+    fi
+    grep -Fxq 'phase=explicit_normal_published' "$state_dir/accepted-transition" ||
+      fail 'unhealthy explicit normal verification advanced lifecycle authority'
+    unset HP2R_FIXTURE_RELEASE_OVERRIDE
+    exit 0
+  fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-explicit-normal-conventional-drift; then
+    mkdir -p "$root/proc/device-tree/chosen/bootloader"
+    printf '\0\0\0\1' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    install_live_hardware
+    export HP2R_FIXTURE_RELEASE_OVERRIDE="$candidate_release"
+    run_controller commit-boot.sh >/dev/null
+    printf '\0\0\0\0' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    printf 'hostile conventional kernel drift\n' >> "$root/boot/firmware/kernel8.img"
+    cp "$root/boot/firmware/kernel8.img" "$fixture/explicit-conventional-drift-before"
+    if run_controller accepted-lifecycle.sh --action mark-explicit-normal-verified >/dev/null 2>&1; then
+      fail 'explicit normal verifier accepted conventional pair drift'
+    fi
+    grep -Fxq 'phase=explicit_normal_published' "$state_dir/accepted-transition" ||
+      fail 'conventional pair drift advanced explicit normal phase'
+    cmp -s "$fixture/explicit-conventional-drift-before" "$root/boot/firmware/kernel8.img" ||
+      fail 'rejected conventional pair drift was changed'
+    assert_no_private_workspaces
+    unset HP2R_FIXTURE_RELEASE_OVERRIDE
+    exit 0
+  fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-explicit-normal-vermagic-prefix; then
+    mkdir -p "$root/proc/device-tree/chosen/bootloader"
+    printf '\0\0\0\1' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    install_live_hardware
+    export HP2R_FIXTURE_RELEASE_OVERRIDE="$candidate_release"
+    run_controller commit-boot.sh >/dev/null
+    printf '\0\0\0\0' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    export HP2R_FIXTURE_VERMAGIC_PREFIX_EVIL=1
+    if run_controller accepted-lifecycle.sh --action mark-explicit-normal-verified >/dev/null 2>&1; then
+      fail 'explicit normal verifier accepted a release-prefix vermagic collision'
+    fi
+    unset HP2R_FIXTURE_VERMAGIC_PREFIX_EVIL
+    grep -Fxq 'phase=explicit_normal_published' "$state_dir/accepted-transition" ||
+      fail 'release-prefix vermagic collision advanced explicit normal phase'
+    assert_no_private_workspaces
+    unset HP2R_FIXTURE_RELEASE_OVERRIDE
+    exit 0
+  fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-explicit-normal-module-resolution-drift; then
+    mkdir -p "$root/proc/device-tree/chosen/bootloader"
+    printf '\0\0\0\1' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    install_live_hardware
+    export HP2R_FIXTURE_RELEASE_OVERRIDE="$candidate_release"
+    run_controller commit-boot.sh >/dev/null
+    printf '\0\0\0\0' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    mkdir -p "$root/lib/modules/$candidate_release/updates/dkms"
+    printf 'stale same-version resolved module\n' > \
+      "$root/lib/modules/$candidate_release/updates/dkms/hyperpixel2r_kms.ko"
+    printf 'hyperpixel2r_kms.ko: updates/dkms/hyperpixel2r_kms.ko\n' > \
+      "$root/lib/modules/$candidate_release/modules.dep"
+    if run_controller accepted-lifecycle.sh --action mark-explicit-normal-verified >/dev/null 2>&1; then
+      fail 'explicit normal verifier accepted stale same-version module resolution'
+    fi
+    grep -Fxq 'phase=explicit_normal_published' "$state_dir/accepted-transition" ||
+      fail 'stale module resolution advanced explicit normal phase'
+    assert_no_private_workspaces
+    unset HP2R_FIXTURE_RELEASE_OVERRIDE
+    exit 0
+  fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-normalized-module-resolution-drift; then
+    cp "$root$prior_kernel" "$root/boot/firmware/kernel8.img"
+    cp "$root$prior_initramfs" "$root/boot/firmware/initramfs8"
+    chown root:root "$root/boot/firmware/kernel8.img" "$root/boot/firmware/initramfs8"
+    chmod 0644 "$root/boot/firmware/kernel8.img" "$root/boot/firmware/initramfs8"
+    mkdir -p "$root/proc/device-tree/chosen/bootloader"
+    printf '\0\0\0\1' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    install_live_hardware
+    export HP2R_FIXTURE_RELEASE_OVERRIDE="$candidate_release"
+    run_controller commit-boot.sh >/dev/null
+    printf '\0\0\0\0' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    run_controller accepted-lifecycle.sh --action mark-explicit-normal-verified >/dev/null
+    run_controller accepted-lifecycle.sh --action normalize-inactive-kernel >/dev/null
+    mkdir -p "$root/lib/modules/$candidate_release/updates/dkms"
+    printf 'stale same-version resolved module\n' > \
+      "$root/lib/modules/$candidate_release/updates/dkms/hyperpixel2r_kms.ko"
+    printf 'hyperpixel2r_kms.ko: updates/dkms/hyperpixel2r_kms.ko\n' > \
+      "$root/lib/modules/$candidate_release/modules.dep"
+    if run_controller accepted-lifecycle.sh --action mark-normalized-verified >/dev/null 2>&1; then
+      fail 'normalized verifier accepted stale same-version module resolution'
+    fi
+    grep -Fxq 'phase=normalized_config_published' "$state_dir/accepted-transition" ||
+      fail 'stale module resolution advanced normalized phase'
+    assert_no_private_workspaces
+    unset HP2R_FIXTURE_RELEASE_OVERRIDE
+    exit 0
+  fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-normalization; then
+    cp "$root$prior_kernel" "$fixture/normalization-versioned-kernel-before"
+    cp "$root$prior_initramfs" "$fixture/normalization-versioned-initramfs-before"
+    cp "$root$prior_kernel" "$root/boot/firmware/kernel8.img"
+    cp "$root$prior_initramfs" "$root/boot/firmware/initramfs8"
+    chown root:root "$root/boot/firmware/kernel8.img" "$root/boot/firmware/initramfs8"
+    chmod 0644 "$root/boot/firmware/kernel8.img" "$root/boot/firmware/initramfs8"
+    mkdir -p "$root/proc/device-tree/chosen/bootloader"
+    printf '\0\0\0\1' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    install_live_hardware
+    export HP2R_FIXTURE_RELEASE_OVERRIDE="$candidate_release"
+    run_controller commit-boot.sh >/dev/null
+    printf '\0\0\0\0' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    cmp -s "$root$prior_kernel" "$root/boot/firmware/kernel8.img" ||
+      fail 'explicit selection changed the conventional prior kernel'
+    cmp -s "$root$prior_initramfs" "$root/boot/firmware/initramfs8" ||
+      fail 'explicit selection changed the conventional prior initramfs'
+    run_controller accepted-lifecycle.sh --action mark-explicit-normal-verified >/dev/null
+    run_controller accepted-lifecycle.sh --action normalize-inactive-kernel >/dev/null
+    grep -Fxq 'phase=normalized_config_published' "$state_dir/accepted-transition" ||
+      fail 'inactive normalization did not publish normalized config phase'
+    cmp -s "$root/boot/firmware/$kernel_name" "$root/boot/firmware/kernel8.img" ||
+      fail 'inactive normalization did not publish the candidate conventional kernel'
+    cmp -s "$root/boot/firmware/$initramfs_name" "$root/boot/firmware/initramfs8" ||
+      fail 'inactive normalization did not publish the candidate conventional initramfs'
+    cmp -s "$fixture/normalization-versioned-kernel-before" "$root$prior_kernel" ||
+      fail 'inactive normalization changed the versioned kernel source'
+    cmp -s "$fixture/normalization-versioned-initramfs-before" "$root$prior_initramfs" ||
+      fail 'inactive normalization changed the versioned initramfs source'
+    grep -Fxq 'auto_initramfs=1' "$root/boot/firmware/config.txt" ||
+      fail 'inactive normalization did not publish auto initramfs config'
+    if grep -Eq '^(kernel=|initramfs hp2r-)' "$root/boot/firmware/config.txt"; then
+      fail 'inactive normalization left an explicit candidate boot override'
+    fi
+    run_controller accepted-lifecycle.sh --action mark-normalized-verified >/dev/null
+    grep -Fxq 'phase=normalized_verified' "$state_dir/accepted-transition" ||
+      fail 'normalized normal verifier did not publish its typed phase'
+    unset HP2R_FIXTURE_RELEASE_OVERRIDE
+    exit 0
+  fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-normalization-interruption-one; then
+    local boundary="${HP2R_FIXTURE_NORMALIZE_BOUNDARY:-}" expected_phase crash_workspace=''
+    test -n "$boundary" || fail 'missing normalization interruption boundary'
+    cp "$root$prior_kernel" "$fixture/normalization-versioned-kernel-before"
+    cp "$root$prior_initramfs" "$fixture/normalization-versioned-initramfs-before"
+    cp "$root$prior_kernel" "$root/boot/firmware/kernel8.img"
+    cp "$root$prior_initramfs" "$root/boot/firmware/initramfs8"
+    chown root:root "$root/boot/firmware/kernel8.img" "$root/boot/firmware/initramfs8"
+    chmod 0644 "$root/boot/firmware/kernel8.img" "$root/boot/firmware/initramfs8"
+    mkdir -p "$root/proc/device-tree/chosen/bootloader"
+    printf '\0\0\0\1' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    install_live_hardware
+    export HP2R_FIXTURE_RELEASE_OVERRIDE="$candidate_release"
+    run_controller commit-boot.sh >/dev/null
+    printf '\0\0\0\0' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    run_controller accepted-lifecycle.sh --action mark-explicit-normal-verified >/dev/null
+    export HP2R_FIXTURE_INTERRUPT_AFTER="$boundary"
+    if [[ "$boundary" == *-published || "$boundary" == *-phase-prepared ||
+      "$boundary" == *-phase-atomic ]]; then
+      export HP2R_FIXTURE_PRESERVE_MUTATIONS=1
+    fi
+    if run_controller accepted-lifecycle.sh --action normalize-inactive-kernel >/dev/null 2>&1; then
+      fail "normalization ignored interruption: $boundary"
+    fi
+    unset HP2R_FIXTURE_INTERRUPT_AFTER
+    if [[ "$boundary" == *-before-phase || "$boundary" == *-published ||
+      "$boundary" == *-phase-prepared || "$boundary" == *-phase-atomic ]]; then
+      unset HP2R_FIXTURE_PRESERVE_MUTATIONS
+      test "$(find "$state_dir" -mindepth 1 -maxdepth 1 -type d \
+        -name '.hp2r-transaction.*' -print | wc -l | tr -d ' ')" = 1 ||
+        fail 'normalization crash did not retain one exact private workspace'
+      crash_workspace="$(find "$state_dir" -mindepth 1 -maxdepth 1 -type d \
+        -name '.hp2r-transaction.*' -print)"
+    fi
+    case "$boundary" in
+      inactive-normalize-initramfs-before-phase|accepted-transition-canonical_initramfs_published-phase-prepared)
+        expected_phase=explicit_normal_verified
+        cmp -s "$root$prior_kernel" "$root/boot/firmware/kernel8.img" ||
+          fail 'initramfs pre-phase crash changed conventional kernel'
+        cmp -s "$root/boot/firmware/$initramfs_name" "$root/boot/firmware/initramfs8" ||
+          fail 'initramfs pre-phase crash lacks candidate initramfs'
+        ;;
+      inactive-normalize-initramfs-published|accepted-transition-canonical_initramfs_published-phase-atomic)
+        expected_phase=canonical_initramfs_published
+        cmp -s "$root$prior_kernel" "$root/boot/firmware/kernel8.img" || fail 'initramfs boundary changed conventional kernel'
+        cmp -s "$root/boot/firmware/$initramfs_name" "$root/boot/firmware/initramfs8" || fail 'initramfs boundary lacks candidate initramfs'
+        grep -Fxq "kernel=$kernel_name" "$root/boot/firmware/config.txt" || fail 'initramfs boundary lost explicit config'
+        ;;
+      inactive-normalize-pair-before-phase|accepted-transition-canonical_pair_published-phase-prepared)
+        expected_phase=canonical_initramfs_published
+        cmp -s "$root/boot/firmware/$kernel_name" "$root/boot/firmware/kernel8.img" ||
+          fail 'pair pre-phase crash lacks candidate kernel'
+        cmp -s "$root/boot/firmware/$initramfs_name" "$root/boot/firmware/initramfs8" ||
+          fail 'pair pre-phase crash lacks candidate initramfs'
+        ;;
+      inactive-normalize-pair-published|accepted-transition-canonical_pair_published-phase-atomic)
+        expected_phase=canonical_pair_published
+        cmp -s "$root/boot/firmware/$kernel_name" "$root/boot/firmware/kernel8.img" || fail 'pair boundary lacks candidate kernel'
+        cmp -s "$root/boot/firmware/$initramfs_name" "$root/boot/firmware/initramfs8" || fail 'pair boundary lacks candidate initramfs'
+        grep -Fxq "kernel=$kernel_name" "$root/boot/firmware/config.txt" || fail 'pair boundary lost explicit config'
+        ;;
+      inactive-normalize-config-before-phase|accepted-transition-normalized_config_published-phase-prepared)
+        expected_phase=canonical_pair_published
+        grep -Fxq 'auto_initramfs=1' "$root/boot/firmware/config.txt" ||
+          fail 'config pre-phase crash lacks normalized config'
+        ;;
+      inactive-normalize-config-published|accepted-transition-normalized_config_published-phase-atomic)
+        expected_phase=normalized_config_published
+        grep -Fxq 'auto_initramfs=1' "$root/boot/firmware/config.txt" || fail 'config boundary lacks normalized config'
+        ;;
+      *)
+        fail 'unknown normalization interruption boundary'
+        ;;
+    esac
+    grep -Fxq "phase=$expected_phase" "$state_dir/accepted-transition" || fail 'normalization interruption published wrong phase'
+    case "$boundary" in
+      inactive-normalize-config-published|accepted-transition-normalized_config_published-phase-atomic)
+        expected_config_sha="$(awk -F= '$1 == "normalized_normal_config_sha256" { print $2 }' "$state_dir/accepted-transition")"
+        ;;
+      inactive-normalize-config-before-phase|accepted-transition-normalized_config_published-phase-prepared)
+        expected_config_sha="$(awk -F= '$1 == "normalized_normal_config_sha256" { print $2 }' \
+          "$state_dir/accepted-transition-prepared.sha256")"
+        ;;
+      *)
+        expected_config_sha="$(awk -F= '$1 == "explicit_normal_config_sha256" { print $2 }' "$state_dir/accepted-transition")"
+        ;;
+    esac
+    test "$(sha256sum "$root/boot/firmware/config.txt" | awk '{ print $1 }')" = "$expected_config_sha" || fail 'normalization interruption config digest disagrees with journal'
+    for companion in \
+      accepted-transition-prior-kernel.img \
+      accepted-transition-prior-initramfs.img \
+      accepted-transition-candidate-kernel.img \
+      accepted-transition-candidate-initramfs.img
+    do
+      assert_file "$state_dir/$companion"
+    done
+    assert_file "$root/boot/firmware/$kernel_name"
+    assert_file "$root/boot/firmware/$initramfs_name"
+    assert_absent "$state_dir/tryboot-state"
+    assert_absent "$state_dir/.inactive-explicit-state-hold"
+    assert_absent "$root/boot/firmware/tryboot.txt"
+    cmp -s "$fixture/normalization-versioned-kernel-before" "$root$prior_kernel" || fail 'normalization interruption changed versioned kernel source'
+    cmp -s "$fixture/normalization-versioned-initramfs-before" "$root$prior_initramfs" || fail 'normalization interruption changed versioned initramfs source'
+    if test "$boundary" = accepted-transition-normalized_config_published-phase-atomic; then
+      if HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
+        run_controller accepted-lifecycle.sh --action mark-normalized-verified >/dev/null 2>&1; then
+        fail 'normalized verification advanced past an unfinished normalization replay'
+      fi
+      grep -Fxq 'phase=normalized_config_published' "$state_dir/accepted-transition" ||
+        fail 'rejected out-of-order normalized verification changed phase'
+      test -d "$crash_workspace" ||
+        fail 'rejected out-of-order normalized verification retired the caller workspace'
+    fi
+    run_controller accepted-lifecycle.sh --action normalize-inactive-kernel >/dev/null
+    grep -Fxq 'phase=normalized_config_published' "$state_dir/accepted-transition" || fail 'normalization retry did not finish'
+    cmp -s "$root/boot/firmware/$kernel_name" "$root/boot/firmware/kernel8.img" || fail 'normalization retry lacks candidate kernel8'
+    cmp -s "$root/boot/firmware/$initramfs_name" "$root/boot/firmware/initramfs8" || fail 'normalization retry lacks candidate initramfs8'
+    test "$(sha256sum "$root/boot/firmware/config.txt" | awk '{ print $1 }')" = "$(awk -F= '$1 == "normalized_normal_config_sha256" { print $2 }' "$state_dir/accepted-transition")" || fail 'normalization retry config digest disagrees with journal'
+    if test -n "$crash_workspace" && test -d "$crash_workspace"; then
+      fail 'normalization retry retained the original abrupt-crash workspace'
+    fi
+    assert_no_private_workspaces
+    unset HP2R_FIXTURE_RELEASE_OVERRIDE
+    exit 0
+  fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-normalization-race-one; then
+    local race="${HP2R_FIXTURE_NORMALIZATION_RACE:-}"
+    case "$race" in
+      journal|bound-leaf) ;;
+      *) fail 'missing normalization snapshot race kind' ;;
+    esac
+    cp "$root$prior_kernel" "$root/boot/firmware/kernel8.img"
+    cp "$root$prior_initramfs" "$root/boot/firmware/initramfs8"
+    chown root:root "$root/boot/firmware/kernel8.img" "$root/boot/firmware/initramfs8"
+    chmod 0644 "$root/boot/firmware/kernel8.img" "$root/boot/firmware/initramfs8"
+    mkdir -p "$root/proc/device-tree/chosen/bootloader"
+    printf '\0\0\0\1' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    install_live_hardware
+    export HP2R_FIXTURE_RELEASE_OVERRIDE="$candidate_release"
+    run_controller commit-boot.sh >/dev/null
+    printf '\0\0\0\0' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    run_controller accepted-lifecycle.sh --action mark-explicit-normal-verified >/dev/null
+    cp "$state_dir/accepted-transition" "$fixture/normalization-race-journal-before-$race"
+    case "$race" in
+      journal)
+        export HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY=1
+        ;;
+      bound-leaf)
+        export HP2R_FIXTURE_MUTATE_NORMALIZATION_BOUND_LEAF=1
+        ;;
+    esac
+    if run_controller accepted-lifecycle.sh --action normalize-inactive-kernel >/dev/null 2>&1; then
+      fail "normalization snapshot race was accepted: $race"
+    fi
+    unset HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY HP2R_FIXTURE_MUTATE_NORMALIZATION_BOUND_LEAF
+    grep -Fxq 'phase=explicit_normal_verified' "$state_dir/accepted-transition" ||
+      fail "normalization race advanced phase: $race"
+    assert_no_private_workspaces
+    cmp -s "$root$prior_initramfs" "$root/boot/firmware/initramfs8" ||
+      fail "normalization race did not compensate unpublished initramfs: $race"
+    cmp -s "$root$prior_kernel" "$root/boot/firmware/kernel8.img" ||
+      fail "normalization race changed conventional kernel before phase commit: $race"
+      case "$race" in
+        journal)
+          assert_file "$root/tmp/setter-authority-mutated"
+          cmp -s "$fixture/normalization-race-journal-before-$race" "$state_dir/accepted-transition" && fail 'journal race did not retain hostile drift'
+          cp "$fixture/normalization-race-journal-before-$race" "$state_dir/accepted-transition"
+          chown root:root "$state_dir/accepted-transition"
+          chmod 0600 "$state_dir/accepted-transition"
+          ;;
+        bound-leaf)
+          assert_file "$root/tmp/normalization-bound-leaf-mutated"
+          cmp -s "$fixture/normalization-race-journal-before-$race" "$state_dir/accepted-transition" || fail 'bound leaf race rewrote journal'
+          cp "$root/boot/firmware/$kernel_name" "$state_dir/accepted-transition-candidate-kernel.img"
+          chown root:root "$state_dir/accepted-transition-candidate-kernel.img"
+          chmod 0600 "$state_dir/accepted-transition-candidate-kernel.img"
+          ;;
+      esac
+      run_controller accepted-lifecycle.sh --action normalize-inactive-kernel >/dev/null || fail "normalization retry failed after repairing $race"
+      grep -Fxq 'phase=normalized_config_published' "$state_dir/accepted-transition" || fail "normalization retry did not finish after $race"
+      cmp -s "$root/boot/firmware/$kernel_name" "$root/boot/firmware/kernel8.img" || fail "normalization retry kernel mismatch after $race"
+      cmp -s "$root/boot/firmware/$initramfs_name" "$root/boot/firmware/initramfs8" || fail "normalization retry initramfs mismatch after $race"
+      test "$(sha256sum "$root/boot/firmware/config.txt" | awk '{ print $1 }')" = "$(awk -F= '$1 == "normalized_normal_config_sha256" { print $2 }' "$state_dir/accepted-transition")" || fail "normalization retry config mismatch after $race"
+      assert_no_private_workspaces
+    unset HP2R_FIXTURE_RELEASE_OVERRIDE
+    exit 0
+  fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-normalization-post-atomic; then
+    cp "$root$prior_kernel" "$root/boot/firmware/kernel8.img"
+    cp "$root$prior_initramfs" "$root/boot/firmware/initramfs8"
+    chown root:root "$root/boot/firmware/kernel8.img" "$root/boot/firmware/initramfs8"
+    chmod 0644 "$root/boot/firmware/kernel8.img" "$root/boot/firmware/initramfs8"
+    mkdir -p "$root/proc/device-tree/chosen/bootloader"
+    printf '\0\0\0\1' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    install_live_hardware
+    export HP2R_FIXTURE_RELEASE_OVERRIDE="$candidate_release"
+    run_controller commit-boot.sh >/dev/null
+    printf '\0\0\0\0' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    run_controller accepted-lifecycle.sh --action mark-explicit-normal-verified >/dev/null
+    export HP2R_FIXTURE_INTERRUPT_AFTER=accepted-transition-phase-atomic
+    export HP2R_FIXTURE_PRESERVE_MUTATIONS=1
+    if run_controller accepted-lifecycle.sh --action normalize-inactive-kernel >/dev/null 2>&1; then
+      fail 'normalization ignored post-atomic setter power loss'
+    else
+      status=$?
+    fi
+    unset HP2R_FIXTURE_INTERRUPT_AFTER HP2R_FIXTURE_PRESERVE_MUTATIONS
+    test "$status" = 97 || fail "post-atomic setter power loss returned $status"
+    grep -Fxq 'phase=canonical_initramfs_published' "$state_dir/accepted-transition" || fail 'post-atomic failure did not retain committed phase'
+    cmp -s "$root/boot/firmware/$initramfs_name" "$root/boot/firmware/initramfs8" || fail 'post-atomic failure compensated committed initramfs'
+    grep -Fxq "kernel=$kernel_name" "$root/boot/firmware/config.txt" || fail 'post-atomic failure changed explicit config'
+    test "$(find "$state_dir" -mindepth 1 -maxdepth 1 -type d \
+      -name '.hp2r-transaction.*' -print | wc -l | tr -d ' ')" = 1 ||
+      fail 'post-atomic setter power loss did not retain one exact replay workspace'
+    run_controller accepted-lifecycle.sh --action normalize-inactive-kernel >/dev/null ||
+      fail 'normalization did not recover post-atomic setter power loss'
+    grep -Fxq 'phase=normalized_config_published' "$state_dir/accepted-transition" ||
+      fail 'post-atomic setter recovery did not finish normalization'
+    assert_no_private_workspaces
+    unset HP2R_FIXTURE_RELEASE_OVERRIDE
+    exit 0
+  fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-verification-phase-atomic ||
+    test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-verification-phase-prepared; then
+    local setter_boundary=accepted-transition-phase-atomic
+    local explicit_crash_phase=explicit_normal_verified
+    local normalized_crash_phase=normalized_verified
+    if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-verification-phase-prepared; then
+      setter_boundary=accepted-transition-phase-prepared
+      explicit_crash_phase=explicit_normal_published
+      normalized_crash_phase=normalized_config_published
+    fi
+    cp "$root$prior_kernel" "$root/boot/firmware/kernel8.img"
+    cp "$root$prior_initramfs" "$root/boot/firmware/initramfs8"
+    chown root:root "$root/boot/firmware/kernel8.img" "$root/boot/firmware/initramfs8"
+    chmod 0644 "$root/boot/firmware/kernel8.img" "$root/boot/firmware/initramfs8"
+    mkdir -p "$root/proc/device-tree/chosen/bootloader"
+    printf '\0\0\0\1' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    install_live_hardware
+    export HP2R_FIXTURE_RELEASE_OVERRIDE="$candidate_release"
+    run_controller commit-boot.sh >/dev/null
+    printf '\0\0\0\0' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+
+    export HP2R_FIXTURE_INTERRUPT_AFTER="$setter_boundary"
+    export HP2R_FIXTURE_PRESERVE_MUTATIONS=1
+    if run_controller accepted-lifecycle.sh --action mark-explicit-normal-verified >/dev/null 2>&1; then
+      fail 'explicit normal verification ignored setter power loss'
+    else
+      status=$?
+    fi
+    unset HP2R_FIXTURE_INTERRUPT_AFTER HP2R_FIXTURE_PRESERVE_MUTATIONS
+    test "$status" = 97 || fail "explicit normal setter power loss returned $status"
+    grep -Fxq "phase=$explicit_crash_phase" "$state_dir/accepted-transition" ||
+      fail 'explicit normal setter power loss retained the wrong phase'
+    test "$(find "$state_dir" -mindepth 1 -maxdepth 1 -type d \
+      -name '.hp2r-transaction.*' -print | wc -l | tr -d ' ')" = 1 ||
+      fail 'explicit normal setter power loss did not retain one exact workspace'
+    if test -n "${HP2R_FIXTURE_PHASE_SETTER_HOSTILE:-}"; then
+      setter_workspace="$(find "$state_dir" -mindepth 1 -maxdepth 1 -type d \
+        -name '.hp2r-transaction.*' -print)"
+      case "$HP2R_FIXTURE_PHASE_SETTER_HOSTILE" in
+        digest)
+          printf 'hostile setter digest drift\n' >> "$setter_workspace/accepted-transition"
+          ;;
+        extra)
+          printf 'unexpected setter leaf\n' > "$setter_workspace/unexpected"
+          chown root:root "$setter_workspace/unexpected"
+          chmod 0600 "$setter_workspace/unexpected"
+          ;;
+        mode)
+          chmod 0644 "$setter_workspace/accepted-transition"
+          ;;
+        *) fail 'unknown phase-setter hostile kind' ;;
+      esac
+      if HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
+        run_controller accepted-lifecycle.sh --action mark-explicit-normal-verified >/dev/null 2>&1; then
+        fail "phase-setter replay accepted hostile $HP2R_FIXTURE_PHASE_SETTER_HOSTILE"
+      fi
+      test -d "$setter_workspace" ||
+        fail "phase-setter replay deleted hostile $HP2R_FIXTURE_PHASE_SETTER_HOSTILE workspace"
+      unset HP2R_FIXTURE_RELEASE_OVERRIDE
+      exit 0
+    fi
+    HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
+      run_controller accepted-lifecycle.sh --action mark-explicit-normal-verified >/dev/null ||
+      fail 'explicit normal verification did not recover its setter power loss'
+    grep -Fxq 'phase=explicit_normal_verified' "$state_dir/accepted-transition" ||
+      fail 'explicit normal verification recovery did not publish verified phase'
+    assert_no_private_workspaces
+
+    run_controller accepted-lifecycle.sh --action normalize-inactive-kernel >/dev/null
+    export HP2R_FIXTURE_INTERRUPT_AFTER="$setter_boundary"
+    export HP2R_FIXTURE_PRESERVE_MUTATIONS=1
+    if run_controller accepted-lifecycle.sh --action mark-normalized-verified >/dev/null 2>&1; then
+      fail 'normalized verification ignored setter power loss'
+    else
+      status=$?
+    fi
+    unset HP2R_FIXTURE_INTERRUPT_AFTER HP2R_FIXTURE_PRESERVE_MUTATIONS
+    test "$status" = 97 || fail "normalized setter power loss returned $status"
+    grep -Fxq "phase=$normalized_crash_phase" "$state_dir/accepted-transition" ||
+      fail 'normalized setter power loss retained the wrong phase'
+    test "$(find "$state_dir" -mindepth 1 -maxdepth 1 -type d \
+      -name '.hp2r-transaction.*' -print | wc -l | tr -d ' ')" = 1 ||
+      fail 'normalized setter power loss did not retain one exact workspace'
+    HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
+      run_controller accepted-lifecycle.sh --action mark-normalized-verified >/dev/null ||
+      fail 'normalized verification did not recover its setter power loss'
+    grep -Fxq 'phase=normalized_verified' "$state_dir/accepted-transition" ||
+      fail 'normalized verification recovery did not publish verified phase'
+    assert_no_private_workspaces
+    unset HP2R_FIXTURE_RELEASE_OVERRIDE
+    exit 0
+  fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-normalized-unhealthy; then
+    cp "$root$prior_kernel" "$root/boot/firmware/kernel8.img"
+    cp "$root$prior_initramfs" "$root/boot/firmware/initramfs8"
+    chown root:root "$root/boot/firmware/kernel8.img" "$root/boot/firmware/initramfs8"
+    chmod 0644 "$root/boot/firmware/kernel8.img" "$root/boot/firmware/initramfs8"
+    mkdir -p "$root/proc/device-tree/chosen/bootloader"
+    printf '\0\0\0\1' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    install_live_hardware
+    export HP2R_FIXTURE_RELEASE_OVERRIDE="$candidate_release"
+    run_controller commit-boot.sh >/dev/null
+    printf '\0\0\0\0' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    run_controller accepted-lifecycle.sh --action mark-explicit-normal-verified >/dev/null
+    run_controller accepted-lifecycle.sh --action normalize-inactive-kernel >/dev/null
+    rm -f "$root/sys/module/hyperpixel2r_kms/version"
+    if run_controller accepted-lifecycle.sh --action mark-normalized-verified >/dev/null 2>&1; then
+      fail 'normalized verifier accepted unhealthy hardware'
+    fi
+    grep -Fxq 'phase=normalized_config_published' "$state_dir/accepted-transition" || fail 'unhealthy normalized verifier advanced phase'
+    assert_no_private_workspaces
+    unset HP2R_FIXTURE_RELEASE_OVERRIDE
+    exit 0
+  fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-normalization-phase-hostile-one; then
+    local phase_case="${HP2R_FIXTURE_NORMALIZATION_PHASE_CASE:-}" boundary expected_phase action hostile
+    local hostile_secondary='' normalized_hostile_sha=''
+    case "$phase_case" in
+      initramfs)
+        boundary=inactive-normalize-initramfs-published
+        expected_phase=canonical_initramfs_published
+        action=normalize-inactive-kernel
+        hostile="$root/boot/firmware/initramfs8"
+        ;;
+      pair)
+        boundary=inactive-normalize-pair-published
+        expected_phase=canonical_pair_published
+        action=normalize-inactive-kernel
+        hostile="$root/boot/firmware/kernel8.img"
+        ;;
+      config)
+        boundary=inactive-normalize-config-published
+        expected_phase=normalized_config_published
+        action=mark-normalized-verified
+        hostile="$root/boot/firmware/config.txt"
+        ;;
+      normalized-pair)
+        boundary=inactive-normalize-config-published
+        expected_phase=normalized_config_published
+        action=mark-normalized-verified
+        hostile="$state_dir/accepted-transition"
+        hostile_secondary="$root/boot/firmware/config.txt"
+        ;;
+      journal|phase)
+        boundary=inactive-normalize-initramfs-published
+        expected_phase=canonical_initramfs_published
+        action=normalize-inactive-kernel
+        hostile="$state_dir/accepted-transition"
+        ;;
+      anchor-drift|anchor-missing|anchor-symlink)
+        boundary=inactive-normalize-initramfs-published
+        expected_phase=canonical_initramfs_published
+        action=normalize-inactive-kernel
+        hostile="$state_dir/accepted-transition-prepared.sha256"
+        ;;
+      *)
+        fail 'unknown normalization hostile phase case'
+        ;;
+    esac
+    cp "$root$prior_kernel" "$root/boot/firmware/kernel8.img"
+    cp "$root$prior_initramfs" "$root/boot/firmware/initramfs8"
+    chown root:root "$root/boot/firmware/kernel8.img" "$root/boot/firmware/initramfs8"
+    chmod 0644 "$root/boot/firmware/kernel8.img" "$root/boot/firmware/initramfs8"
+    mkdir -p "$root/proc/device-tree/chosen/bootloader"
+    printf '\0\0\0\1' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    install_live_hardware
+    export HP2R_FIXTURE_RELEASE_OVERRIDE="$candidate_release"
+    run_controller commit-boot.sh >/dev/null
+    printf '\0\0\0\0' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    run_controller accepted-lifecycle.sh --action mark-explicit-normal-verified >/dev/null
+    export HP2R_FIXTURE_INTERRUPT_AFTER="$boundary"
+    if run_controller accepted-lifecycle.sh --action normalize-inactive-kernel >/dev/null 2>&1; then
+      fail 'normalization hostile setup ignored interruption'
+    fi
+    unset HP2R_FIXTURE_INTERRUPT_AFTER
+    grep -Fxq "phase=$expected_phase" "$state_dir/accepted-transition" || fail 'normalization hostile setup phase drifted'
+    case "$phase_case" in
+      journal)
+        sed -i 's/^target_identity_sha256=.*/target_identity_sha256=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/' "$hostile"
+        ;;
+      phase)
+        sed -i 's/^phase=.*/phase=unsupported/' "$hostile"
+        ;;
+      anchor-drift)
+        printf '%064d\n' 0 > "$hostile"
+        ;;
+      anchor-missing)
+        rm -f -- "$hostile"
+        ;;
+      anchor-symlink)
+        rm -f -- "$hostile"
+        ln -s accepted-transition "$hostile"
+        ;;
+      normalized-pair)
+        printf 'hostile normalized selection\n' >> "$hostile_secondary"
+        normalized_hostile_sha="$(sha256sum "$hostile_secondary" | awk '{ print $1 }')"
+        sed -i \
+          "s/^normalized_normal_config_sha256=.*/normalized_normal_config_sha256=$normalized_hostile_sha/" \
+          "$hostile"
+        ;;
+      *)
+        printf 'hostile normalization drift\n' >> "$hostile"
+        ;;
+    esac
+    if test "$phase_case" != anchor-missing; then
+      cp -P "$hostile" "$fixture/normalization-hostile-before-$phase_case"
+      if test -n "$hostile_secondary"; then
+        cp -P "$hostile_secondary" \
+          "$fixture/normalization-hostile-secondary-before-$phase_case"
+      fi
+    fi
+    if run_controller accepted-lifecycle.sh --action "$action" >/dev/null 2>&1; then
+      fail "normalization hostile phase was accepted: $phase_case"
+    fi
+    if test "$phase_case" = anchor-missing; then
+      test ! -e "$hostile" && test ! -L "$hostile" || fail 'normalization recreated a missing prepared anchor'
+    elif test "$phase_case" = anchor-symlink; then
+      test -L "$hostile" || fail 'normalization replaced a symlinked prepared anchor'
+    else
+      cmp -s "$fixture/normalization-hostile-before-$phase_case" "$hostile" || fail "normalization hostile bytes were changed: $phase_case"
+      if test -n "$hostile_secondary"; then
+        cmp -s "$fixture/normalization-hostile-secondary-before-$phase_case" \
+          "$hostile_secondary" ||
+          fail "normalization secondary hostile bytes were changed: $phase_case"
+      fi
+    fi
+    if test "$phase_case" = phase; then
+      grep -Fxq 'phase=unsupported' "$state_dir/accepted-transition" ||
+        fail 'normalization hostile action changed the unsupported phase'
+    else
+      grep -Fxq "phase=$expected_phase" "$state_dir/accepted-transition" ||
+        fail "normalization hostile action advanced phase: $phase_case"
+    fi
+    assert_no_private_workspaces
+    unset HP2R_FIXTURE_RELEASE_OVERRIDE
+    exit 0
+  fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-explicit-interruption-one; then
+    local boundary="${HP2R_FIXTURE_COMMIT_BOUNDARY:-}" expected_phase
+    test -n "$boundary" || fail 'missing inactive explicit interruption boundary'
+    mkdir -p "$root/proc/device-tree/chosen/bootloader"
+    printf '\0\0\0\1' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    install_live_hardware
+    export HP2R_FIXTURE_RELEASE_OVERRIDE="$candidate_release"
+    export HP2R_FIXTURE_INTERRUPT_AFTER="$boundary"
+    if test "$boundary" = inactive-explicit-normal-published ||
+      test "$boundary" = accepted-transition-phase-atomic ||
+      test "$boundary" = accepted-transition-phase-prepared ||
+      test "$boundary" = inactive-explicit-normal-state-moved ||
+      test "$boundary" = inactive-explicit-normal-state-deleted ||
+      test "$boundary" = inactive-explicit-normal-files-published ||
+      test "$boundary" = inactive-explicit-normal-config-published; then
+      export HP2R_FIXTURE_PRESERVE_MUTATIONS=1
+    fi
+    if run_controller commit-boot.sh >/dev/null 2>&1; then
+      fail "inactive commit ignored interruption: $boundary"
+    fi
+    unset HP2R_FIXTURE_INTERRUPT_AFTER
+    if test "$boundary" = inactive-explicit-normal-published ||
+      test "$boundary" = accepted-transition-phase-atomic ||
+      test "$boundary" = accepted-transition-phase-prepared ||
+      test "$boundary" = inactive-explicit-normal-state-moved ||
+      test "$boundary" = inactive-explicit-normal-state-deleted ||
+      test "$boundary" = inactive-explicit-normal-files-published ||
+      test "$boundary" = inactive-explicit-normal-config-published; then
+      unset HP2R_FIXTURE_PRESERVE_MUTATIONS
+      assert_file "$state_dir/accepted-transition"
+      if test "$boundary" = inactive-explicit-normal-published ||
+        test "$boundary" = accepted-transition-phase-atomic; then
+        grep -Fxq 'phase=explicit_normal_published' "$state_dir/accepted-transition" ||
+          fail 'phase-published interruption lost the explicit transition journal'
+        assert_file "$state_dir/tryboot-state"
+      elif test "$boundary" = inactive-explicit-normal-state-moved; then
+        grep -Fxq 'phase=explicit_normal_published' "$state_dir/accepted-transition" ||
+          fail 'state-moved interruption did not retain the explicit transition journal'
+        assert_file "$state_dir/.inactive-explicit-state-hold"
+      elif test "$boundary" = inactive-explicit-normal-state-deleted; then
+        grep -Fxq 'phase=explicit_normal_published' "$state_dir/accepted-transition" ||
+          fail 'state-deleted interruption lost the explicit transition journal'
+        assert_absent "$state_dir/tryboot-state"
+        assert_absent "$state_dir/.inactive-explicit-state-hold"
+      else
+        grep -Fxq 'phase=staged' "$state_dir/accepted-transition" ||
+          fail 'files-published crash advanced the explicit transition journal'
+        assert_file "$state_dir/tryboot-state"
+      fi
+      test "$(find "$state_dir" -mindepth 1 -maxdepth 1 -type d \
+        -name '.hp2r-transaction.*' -print | wc -l | tr -d ' ')" = 1 ||
+        fail 'explicit crash did not retain one exact private workspace'
+    fi
+    case "$boundary" in
+      inactive-explicit-normal-config-published)
+        expected_phase=staged
+        test "$(tail -n 4 "$root/boot/firmware/config.txt")" = "$(printf '%s\n' \
+          '# hyperpixel2r-kms one-shot inactive-kernel candidate' \
+          "kernel=$kernel_name" \
+          "initramfs $initramfs_name followkernel" \
+          "dtoverlay=$overlay_file")" ||
+          fail 'config-only crash lost the explicit candidate selection'
+        test "$(sha256sum "$root/boot/firmware/tryboot.txt" | awk '{ print $1 }')" = \
+          "$(awk -F= '$1 == "candidate_config_sha256" { print $2 }' "$state_dir/tryboot-state")" ||
+          fail 'config-only crash changed the active candidate tryboot selection'
+        ;;
+      inactive-explicit-normal-files-published|accepted-transition-phase-prepared)
+        expected_phase=staged
+        test "$(tail -n 4 "$root/boot/firmware/config.txt")" = "$(printf '%s\n' \
+          '# hyperpixel2r-kms one-shot inactive-kernel candidate' \
+          "kernel=$kernel_name" \
+          "initramfs $initramfs_name followkernel" \
+          "dtoverlay=$overlay_file")" ||
+          fail 'files-published crash lost the explicit candidate selection'
+        if test "${HP2R_FIXTURE_PRIOR_TRYBOOT:-}" = 1; then
+          grep -Fxq '# accepted prior one-shot configuration' \
+            "$root/boot/firmware/tryboot.txt" ||
+            fail 'files-published crash did not retain the restored prior tryboot config'
+        else
+          assert_absent "$root/boot/firmware/tryboot.txt"
+        fi
+        ;;
+      inactive-explicit-normal-before-phase)
+        expected_phase=staged
+        cmp -s "$normal_before" "$root/boot/firmware/config.txt" ||
+          fail 'pre-phase interruption did not restore the prior normal selection'
+        ;;
+      inactive-explicit-normal-published|accepted-transition-phase-atomic)
+        expected_phase=explicit_normal_published
+        test "$(tail -n 4 "$root/boot/firmware/config.txt")" = "$(printf '%s\n' \
+          '# hyperpixel2r-kms one-shot inactive-kernel candidate' \
+          "kernel=$kernel_name" \
+          "initramfs $initramfs_name followkernel" \
+          "dtoverlay=$overlay_file")" ||
+          fail 'post-phase interruption did not retain the complete explicit selection'
+        ;;
+      inactive-explicit-normal-state-moved|inactive-explicit-normal-state-deleted)
+        expected_phase=explicit_normal_published
+        test "$(tail -n 4 "$root/boot/firmware/config.txt")" = "$(printf '%s\n' \
+          '# hyperpixel2r-kms one-shot inactive-kernel candidate' \
+          "kernel=$kernel_name" \
+          "initramfs $initramfs_name followkernel" \
+          "dtoverlay=$overlay_file")" ||
+          fail 'state-retirement interruption did not retain the complete explicit selection'
+        ;;
+      *) fail "unknown inactive explicit interruption boundary: $boundary" ;;
+    esac
+    grep -Fxq "phase=$expected_phase" "$state_dir/accepted-transition" ||
+      fail "inactive interruption published the wrong phase: $boundary"
+    case "$boundary" in
+      inactive-explicit-normal-config-published|inactive-explicit-normal-files-published|inactive-explicit-normal-before-phase|accepted-transition-phase-prepared|inactive-explicit-normal-published|accepted-transition-phase-atomic)
+        assert_file "$state_dir/tryboot-state"
+        ;;
+      *) assert_absent "$state_dir/tryboot-state" ;;
+    esac
+    if test "$boundary" = accepted-transition-phase-prepared &&
+      test "${HP2R_FIXTURE_PREPHASE_SETTER_HOSTILE:-}" = current-journal; then
+      setter_workspace="$(find "$state_dir" -mindepth 1 -maxdepth 1 -type d \
+        -name '.hp2r-transaction.*' -print)"
+      cp "$state_dir/accepted-transition" "$setter_workspace/accepted-transition"
+      chown root:root "$setter_workspace/accepted-transition"
+      chmod 0600 "$setter_workspace/accepted-transition"
+      if HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
+        run_controller commit-boot.sh >/dev/null 2>&1; then
+        fail 'pre-phase replay accepted the current journal as its proposed next journal'
+      fi
+      grep -Fxq 'phase=staged' "$state_dir/accepted-transition" ||
+        fail 'hostile pre-phase setter replay changed the durable phase'
+      test -d "$setter_workspace" ||
+        fail 'hostile pre-phase setter replay deleted the suspicious caller workspace'
+      assert_file "$state_dir/tryboot-state"
+      unset HP2R_FIXTURE_RELEASE_OVERRIDE
+      exit 0
+    fi
+    if test "$boundary" = inactive-explicit-normal-published ||
+      test "$boundary" = accepted-transition-phase-atomic; then
+      if HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
+        run_controller verify-boot.sh --expect-tryboot \
+        --expect-kernel-release "$candidate_release" \
+        --expect-driver-version "$candidate_driver_version" \
+        --expect-overlay-file "$overlay_file" >/dev/null 2>&1; then
+        fail 'ordinary tryboot verification accepted a retired active config'
+      fi
+      if HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
+        run_controller verify-boot.sh --expect-tryboot \
+        --allow-retired-tryboot-config >/dev/null 2>&1; then
+        fail 'retired tryboot verification accepted an incomplete identity'
+      else
+        status=$?
+        test "$status" = 64 ||
+          fail "retired tryboot verification returned $status for an incomplete identity"
+      fi
+    fi
+    if test "$boundary" = accepted-transition-phase-atomic; then
+      printf '\0\0\0\0' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+      if HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
+        run_controller accepted-lifecycle.sh --action mark-explicit-normal-verified >/dev/null 2>&1; then
+        fail 'explicit verification advanced past an unfinished commit replay'
+      fi
+      grep -Fxq 'phase=explicit_normal_published' "$state_dir/accepted-transition" ||
+        fail 'rejected out-of-order explicit verification changed phase'
+      assert_file "$state_dir/tryboot-state"
+      test "$(find "$state_dir" -mindepth 1 -maxdepth 1 -type d \
+        -name '.hp2r-transaction.*' -print | wc -l | tr -d ' ')" = 1 ||
+        fail 'rejected out-of-order explicit verification retired the caller workspace'
+    fi
+    # A public replay must obtain a typed, phase-aware proof before it can
+    # invoke commit.  In particular, a moved generic state is authoritative
+    # only when the full schema-6 journal and the deterministic hold agree.
+    if test "$boundary" = inactive-explicit-normal-state-moved; then
+      local commit_probe
+      commit_probe="$(run_accepted_remote commit-probe)" ||
+        fail 'public moved-state replay could not obtain a strict commit probe'
+      [[ "$commit_probe" =~ ^explicit-replay$'\t'tryboot$'\t'[0-9]+\.[0-9]+\.[0-9]+$'\t'hyperpixel2r-kms-[0-9a-f]{12}\.dtbo$'\t'[A-Za-z0-9._+-]+$'\t'hyperpixel2r_kms\.ko$'\t'[0-9a-f]{64}$'\t'false$'\t'none$ ]] ||
+        fail 'public moved-state replay returned an unsafe typed commit probe'
+    fi
+    if test -n "${HP2R_FIXTURE_REPLAY_HOSTILE:-}"; then
+      replay_workspace="$(find "$state_dir" -mindepth 1 -maxdepth 1 -type d \
+        -name '.hp2r-transaction.*' -print)"
+      test -n "$replay_workspace" && test -d "$replay_workspace" ||
+        fail 'hostile explicit replay fixture lacks its caller workspace'
+      cp -a "$replay_workspace" "$fixture/explicit-hostile-workspace-before"
+      find -P "$replay_workspace" -mindepth 0 -maxdepth 1 \
+        -printf '%P\t%u:%g:%m\n' | LC_ALL=C sort \
+        > "$fixture/explicit-hostile-workspace-metadata-before"
+    fi
+    case "${HP2R_FIXTURE_REPLAY_HOSTILE:-}" in
+      '') ;;
+      journal)
+        replace_equals_value "$state_dir/accepted-transition" target_identity_sha256 \
+          dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+        ;;
+      hold)
+        printf 'forged generic state\n' >> "$state_dir/.inactive-explicit-state-hold"
+        ;;
+      *) fail 'unknown inactive explicit replay hostile fixture' ;;
+    esac
+    if test -n "${HP2R_FIXTURE_REPLAY_HOSTILE:-}"; then
+      if run_accepted_remote commit-probe >/dev/null 2>&1; then
+        fail 'strict commit probe accepted forged inactive replay authority'
+      fi
+      if HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
+        run_controller commit-boot.sh >/dev/null 2>&1; then
+        fail 'public commit reached replay after a forged inactive authority probe'
+      fi
+      assert_absent "$state_dir/tryboot-state"
+      assert_file "$state_dir/.inactive-explicit-state-hold"
+      test -d "$replay_workspace" ||
+        fail 'hostile explicit replay deleted the suspicious caller workspace'
+      diff -r "$fixture/explicit-hostile-workspace-before" "$replay_workspace" >/dev/null ||
+        fail 'hostile explicit replay changed the suspicious caller workspace bytes'
+      find -P "$replay_workspace" -mindepth 0 -maxdepth 1 \
+        -printf '%P\t%u:%g:%m\n' | LC_ALL=C sort \
+        > "$fixture/explicit-hostile-workspace-metadata-after"
+      cmp -s "$fixture/explicit-hostile-workspace-metadata-before" \
+        "$fixture/explicit-hostile-workspace-metadata-after" ||
+        fail 'hostile explicit replay changed the suspicious caller workspace metadata'
+      unset HP2R_FIXTURE_RELEASE_OVERRIDE
+      exit 0
+    fi
+    if test "${HP2R_FIXTURE_REPLAY_NORMAL:-}" = 1; then
+      printf '\0\0\0\0' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    fi
+    if ! HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
+      run_controller commit-boot.sh >"$fixture/inactive-explicit-commit-replay" 2>&1; then
+      cat "$fixture/inactive-explicit-commit-replay" >&2
+      fail "inactive commit did not resume after interruption: $boundary"
+    fi
+    assert_absent "$state_dir/tryboot-state"
+    assert_absent "$state_dir/.inactive-explicit-state-hold" ||
+      fail "inactive commit left a durable state hold after retry: $boundary"
+    assert_no_private_workspaces
+    grep -Fxq 'phase=explicit_normal_published' "$state_dir/accepted-transition" ||
+      fail "inactive commit resume did not retain explicit normal phase: $boundary"
+    unset HP2R_FIXTURE_RELEASE_OVERRIDE
+    exit 0
+  fi
   if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-rollback; then
     run_controller rollback-boot.sh >/dev/null
     cmp -s "$normal_before" "$root/boot/firmware/config.txt" ||
@@ -3652,6 +4678,246 @@ exercise_inactive_kernel_prepare() {
   fi
 }
 
+exercise_inactive_kernel_explicit_interruptions() {
+  local boundary count=0
+
+  for boundary in \
+    inactive-explicit-normal-before-phase \
+    accepted-transition-phase-prepared \
+    accepted-transition-phase-atomic \
+    inactive-explicit-normal-published \
+    inactive-explicit-normal-state-moved \
+    inactive-explicit-normal-state-deleted
+  do
+    if HP2R_FIXTURE_CASE=inactive-kernel-explicit-interruption-one \
+      HP2R_FIXTURE_COMMIT_BOUNDARY="$boundary" bash "${BASH_SOURCE[0]}" >/dev/null; then
+      count=$((count + 1))
+    else
+      fail "inactive explicit interruption fixture failed: $boundary"
+    fi
+  done
+  test "$count" = 6 || fail 'inactive explicit interruption inventory drifted'
+}
+
+exercise_inactive_kernel_explicit_prephase_crash() {
+  HP2R_FIXTURE_CASE=inactive-kernel-explicit-interruption-one \
+    HP2R_FIXTURE_COMMIT_BOUNDARY=inactive-explicit-normal-files-published \
+    bash "${BASH_SOURCE[0]}" >/dev/null ||
+    fail 'inactive explicit files-published crash did not resume'
+}
+
+exercise_inactive_kernel_explicit_prephase_setter_hostile() {
+  HP2R_FIXTURE_CASE=inactive-kernel-explicit-interruption-one \
+    HP2R_FIXTURE_COMMIT_BOUNDARY=accepted-transition-phase-prepared \
+    HP2R_FIXTURE_PREPHASE_SETTER_HOSTILE=current-journal \
+    bash "${BASH_SOURCE[0]}" >/dev/null ||
+    fail 'inactive explicit pre-phase setter accepted a non-proposed journal'
+}
+
+exercise_inactive_kernel_explicit_interfile_crash() {
+  HP2R_FIXTURE_CASE=inactive-kernel-explicit-interruption-one \
+    HP2R_FIXTURE_COMMIT_BOUNDARY=inactive-explicit-normal-config-published \
+    bash "${BASH_SOURCE[0]}" >/dev/null ||
+    fail 'inactive explicit config-only crash did not resume'
+}
+
+exercise_inactive_kernel_explicit_prior_tryboot_replay() {
+  HP2R_FIXTURE_CASE=inactive-kernel-explicit-interruption-one \
+    HP2R_FIXTURE_COMMIT_BOUNDARY=inactive-explicit-normal-published \
+    HP2R_FIXTURE_PRIOR_TRYBOOT=1 \
+    bash "${BASH_SOURCE[0]}" >/dev/null ||
+    fail 'inactive explicit replay rejected the restored accepted prior tryboot config'
+}
+
+exercise_inactive_kernel_explicit_normal_replay() {
+  HP2R_FIXTURE_CASE=inactive-kernel-explicit-interruption-one \
+    HP2R_FIXTURE_COMMIT_BOUNDARY=inactive-explicit-normal-published \
+    HP2R_FIXTURE_PRIOR_TRYBOOT=1 \
+    HP2R_FIXTURE_REPLAY_NORMAL=1 \
+    bash "${BASH_SOURCE[0]}" >/dev/null ||
+    fail 'inactive explicit normal-boot replay rejected its retired tryboot identity'
+}
+
+exercise_inactive_kernel_normalization_prephase_crashes() {
+  local boundary count=0
+
+  for boundary in \
+    inactive-normalize-initramfs-before-phase \
+    inactive-normalize-pair-before-phase \
+    inactive-normalize-config-before-phase
+  do
+    if HP2R_FIXTURE_CASE=inactive-kernel-normalization-interruption-one \
+      HP2R_FIXTURE_NORMALIZE_BOUNDARY="$boundary" \
+      HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
+      bash "${BASH_SOURCE[0]}" >/dev/null; then
+      count=$((count + 1))
+    else
+      fail "normalization pre-phase crash did not resume: $boundary"
+    fi
+  done
+  test "$count" = 3 || fail 'normalization pre-phase crash inventory drifted'
+}
+
+exercise_inactive_kernel_normal_module_provenance() {
+  local case_name count=0
+
+  for case_name in \
+    inactive-kernel-explicit-normal-module-resolution-drift \
+    inactive-kernel-normalized-module-resolution-drift
+  do
+    if HP2R_FIXTURE_CASE="$case_name" bash "${BASH_SOURCE[0]}" >/dev/null; then
+      count=$((count + 1))
+    else
+      fail "normal verification module provenance fixture failed: $case_name"
+    fi
+  done
+  test "$count" = 2 || fail 'normal verification module provenance inventory drifted'
+}
+
+exercise_inactive_kernel_explicit_probe_hostile() {
+  local hostile count=0
+
+  for hostile in journal hold; do
+    if HP2R_FIXTURE_CASE=inactive-kernel-explicit-interruption-one \
+      HP2R_FIXTURE_COMMIT_BOUNDARY=inactive-explicit-normal-state-moved \
+      HP2R_FIXTURE_REPLAY_HOSTILE="$hostile" bash "${BASH_SOURCE[0]}" >/dev/null; then
+      count=$((count + 1))
+    else
+      fail "inactive explicit replay hostile fixture failed: $hostile"
+    fi
+  done
+  test "$count" = 2 || fail 'inactive explicit replay hostile inventory drifted'
+}
+
+exercise_inactive_kernel_normalization_interruptions() {
+  local boundary count=0
+
+  for boundary in \
+    inactive-normalize-initramfs-published \
+    inactive-normalize-pair-published \
+    inactive-normalize-config-published
+  do
+    if HP2R_FIXTURE_CASE=inactive-kernel-normalization-interruption-one \
+      HP2R_FIXTURE_NORMALIZE_BOUNDARY="$boundary" \
+      bash "${BASH_SOURCE[0]}" >/dev/null; then
+      count=$((count + 1))
+    else
+      fail "normalization interruption fixture failed: $boundary"
+    fi
+  done
+  test "$count" = 3 || fail 'normalization interruption inventory drifted'
+}
+
+exercise_inactive_kernel_normalization_setter_boundaries() {
+  local boundary count=0
+
+  for boundary in \
+    accepted-transition-canonical_initramfs_published-phase-prepared \
+    accepted-transition-canonical_initramfs_published-phase-atomic \
+    accepted-transition-canonical_pair_published-phase-prepared \
+    accepted-transition-canonical_pair_published-phase-atomic \
+    accepted-transition-normalized_config_published-phase-prepared \
+    accepted-transition-normalized_config_published-phase-atomic
+  do
+    if HP2R_FIXTURE_CASE=inactive-kernel-normalization-interruption-one \
+      HP2R_FIXTURE_NORMALIZE_BOUNDARY="$boundary" \
+      bash "${BASH_SOURCE[0]}" >/dev/null; then
+      count=$((count + 1))
+    else
+      fail "normalization setter boundary fixture failed: $boundary"
+    fi
+  done
+  test "$count" = 6 || fail 'normalization setter boundary inventory drifted'
+}
+
+exercise_inactive_kernel_verification_phase_atomic_hostiles() {
+  local hostile count=0
+
+  for hostile in digest extra mode; do
+    if HP2R_FIXTURE_CASE=inactive-kernel-verification-phase-atomic \
+      HP2R_FIXTURE_PHASE_SETTER_HOSTILE="$hostile" \
+      bash "${BASH_SOURCE[0]}" >/dev/null; then
+      count=$((count + 1))
+    else
+      fail "verification phase-setter hostile fixture failed: $hostile"
+    fi
+  done
+  test "$count" = 3 || fail 'verification phase-setter hostile inventory drifted'
+}
+
+exercise_inactive_kernel_normalization_races() {
+  local race count=0
+
+  for race in journal bound-leaf; do
+    if HP2R_FIXTURE_CASE=inactive-kernel-normalization-race-one \
+      HP2R_FIXTURE_NORMALIZATION_RACE="$race" \
+      bash "${BASH_SOURCE[0]}" >/dev/null; then
+      count=$((count + 1))
+    else
+      fail "normalization snapshot race failed: $race"
+    fi
+  done
+  test "$count" = 2 || fail 'normalization snapshot race inventory drifted'
+}
+
+exercise_inactive_kernel_normalization_phase_hostiles() {
+  local phase_case count=0
+
+  for phase_case in \
+    initramfs pair config normalized-pair journal phase \
+    anchor-drift anchor-missing anchor-symlink
+  do
+    if HP2R_FIXTURE_CASE=inactive-kernel-normalization-phase-hostile-one \
+      HP2R_FIXTURE_NORMALIZATION_PHASE_CASE="$phase_case" \
+      bash "${BASH_SOURCE[0]}" >/dev/null; then
+      count=$((count + 1))
+    else
+      fail "normalization phase hostile failed: $phase_case"
+    fi
+  done
+  test "$count" = 9 || fail 'normalization phase hostile inventory drifted'
+}
+
+exercise_accepted_controller_ancestor_argv() {
+  local vector action expected count=0
+
+  while IFS=$'\t' read -r vector action expected; do
+    test -n "$vector" || continue
+    if HP2R_FIXTURE_CASE=inactive-kernel-accepted-ancestor-one \
+      HP2R_FIXTURE_ANCESTOR_ACTION_ARGV="$action" \
+      HP2R_FIXTURE_ANCESTOR_EXPECT="$expected" \
+      bash "${BASH_SOURCE[0]}" >/dev/null; then
+      count=$((count + 1))
+    else
+      fail "accepted controller ancestor argv fixture failed: $vector"
+    fi
+  done <<'VECTORS'
+allowed	--action prepare-new	pass
+unsupported	--action unsupported	reject
+duplicate	--action prepare-new --action prepare-new	reject
+conflicting	--action prepare-new --action unsupported	reject
+missing-operand	--action	reject
+VECTORS
+  test "$count" = 5 || fail 'accepted controller ancestor argv inventory drifted'
+}
+
+assert_inactive_phase_guards_fail_closed() {
+  local function_name body count=0
+
+  for function_name in \
+    assert_schema5_explicit_resume_state \
+    assert_schema5_staged_authority \
+    assert_explicit_inactive_replay_leaves
+  do
+    body="$(grep -A 35 "^${function_name}()" "$repo_root/scripts/lifecycle-remote.sh")"
+    test -n "$body" || fail "missing inactive phase assertion helper: $function_name"
+    printf '%s\n' "$body" | grep -Fq '*) return 1 ;;' ||
+      fail "inactive phase assertion can inherit a successful status: $function_name"
+    count=$((count + 1))
+  done
+  test "$count" = 3 || fail 'inactive phase assertion inventory drifted'
+}
+
 exercise_inactive_kernel_matrix() {
   local hostile count=0
 
@@ -3718,7 +4984,107 @@ exercise_inactive_kernel_retirement_interruptions() {
   test "$count" = 5 || fail 'inactive retirement interruption inventory drifted'
 }
 
+exercise_legacy_accepted_upgrade() {
+  local legacy_accepted_artifact legacy_accepted_receipt legacy_successor
+  local legacy_transition prepare_output
+
+  # A schema-2 accepted receipt predates driver ownership of the backlight
+  # rule. Preparing its first capable successor must preserve the schema-5
+  # same-kernel protocol while proving the ambient rule state.
+  new_target
+  run_stage >/dev/null
+  install_live_hardware
+  run_controller commit-boot.sh >/dev/null
+  legacy_accepted_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
+  downgrade_artifact_to_schema_one "$legacy_accepted_artifact"
+  run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" >/dev/null
+  legacy_accepted_receipt="$root/var/lib/hyperpixel2r-kms/accepted-state"
+  grep -Fxq 'schema_version=2' "$legacy_accepted_receipt" ||
+    fail 'legacy accepted upgrade fixture is not schema 2'
+  legacy_successor='eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
+  prepare_output="$fixture/legacy-accepted-upgrade-prepare.out"
+  if HP2R_FIXTURE_INTERRUPT_AFTER=accepted-transition-published \
+    run_accepted_remote prepare-new-accepted \
+      0.1.1 "$legacy_successor" "$release" "$(printf d%.0s {1..64})" \
+      hyperpixel2r_kms.ko "$(printf e%.0s {1..64})" \
+      hyperpixel2r-kms-eeeeeeeeeeee.dtbo "$(printf f%.0s {1..64})" \
+      "$backlight_rule_file" "$(printf a%.0s {1..64})" >"$prepare_output" 2>&1; then
+    fail 'legacy accepted upgrade ignored transition publication interruption'
+  fi
+  legacy_transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  if ! grep -Fxq 'schema_version=5' "$legacy_transition"; then
+    cat "$prepare_output" >&2
+    fail 'legacy accepted upgrade did not publish a schema-5 transition'
+  fi
+  grep -Fxq 'prior_backlight_rule_existed=false' "$legacy_transition" ||
+    fail 'legacy accepted upgrade did not prove the ambient rule was absent'
+  grep -Fxq 'prior_tryboot_existed=false' "$legacy_transition" ||
+    fail 'legacy accepted upgrade did not prove prior tryboot absence'
+  grep -Fxq 'prior_tryboot_sha256=none' "$legacy_transition" ||
+    fail 'legacy accepted upgrade did not bind prior tryboot absence'
+  assert_absent "$backlight_rule_path"
+  run_accepted_remote recover-accepted >/dev/null
+  assert_absent "$legacy_transition"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-prior-backlight-rule"
+}
+
+exercise_rollback_transaction_retired_replay() {
+  local failure_status
+
+  new_target
+  prepare_installed_rollback_shape created transaction-retired-replay
+  if HP2R_FIXTURE_DKMS_REJECT_EXTRA_COLLISION=1 \
+    HP2R_FIXTURE_INTERRUPT_AFTER=rollback-transaction-retired-unpublished \
+    HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
+    run_controller rollback-boot.sh >/dev/null 2>&1; then
+    fail 'transaction-retired rollback ignored its interruption'
+  else
+    failure_status=$?
+  fi
+  test "$failure_status" = 97 ||
+    fail "transaction-retired rollback interruption returned $failure_status"
+  assert_file "$root/var/lib/hyperpixel2r-kms/rollback-state"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+  find "$root/var/lib/hyperpixel2r-kms" -mindepth 1 -maxdepth 1 \
+    -type d -name '.hp2r-transaction.*' -exec rm -rf -- {} +
+  HP2R_FIXTURE_DKMS_REJECT_EXTRA_COLLISION=1 \
+    run_controller rollback-boot.sh >/dev/null
+  assert_installed_rollback_shape_restored created \
+    rollback-transaction-retired-unpublished
+}
+
+assert_inactive_phase_guards_fail_closed
+
 case "${HP2R_FIXTURE_CASE:-}" in
+  legacy-accepted-upgrade)
+    exercise_legacy_accepted_upgrade
+    exit 0
+    ;;
+  rollback-transaction-retired-replay)
+    exercise_rollback_transaction_retired_replay
+    exit 0
+    ;;
+  accepted-action-argv)
+    exercise_accepted_action_argv_parser
+    exercise_accepted_controller_ancestor_argv
+    exit 0
+    ;;
+  inactive-kernel-explicit-prephase-crash)
+    exercise_inactive_kernel_explicit_prephase_crash
+    exit 0
+    ;;
+  inactive-kernel-explicit-prior-tryboot-replay)
+    exercise_inactive_kernel_explicit_prior_tryboot_replay
+    exit 0
+    ;;
+  inactive-kernel-normalization-prephase-crashes)
+    exercise_inactive_kernel_normalization_prephase_crashes
+    exit 0
+    ;;
+  inactive-kernel-normal-module-provenance)
+    exercise_inactive_kernel_normal_module_provenance
+    exit 0
+    ;;
   inactive-kernel)
     exercise_inactive_kernel_prepare
     exit 0
@@ -3751,11 +5117,59 @@ case "${HP2R_FIXTURE_CASE:-}" in
     exercise_inactive_kernel_prepare
     exit 0
     ;;
+  inactive-kernel-explicit-interruptions)
+    exercise_inactive_kernel_explicit_interruptions
+    exit 0
+    ;;
+  inactive-kernel-explicit-probe-hostile)
+    exercise_inactive_kernel_explicit_probe_hostile
+    exit 0
+    ;;
+  inactive-kernel-explicit-interfile-crash)
+    exercise_inactive_kernel_explicit_interfile_crash
+    exit 0
+    ;;
+  inactive-kernel-explicit-prephase-setter-hostile)
+    exercise_inactive_kernel_explicit_prephase_setter_hostile
+    exit 0
+    ;;
+  inactive-kernel-explicit-normal-replay)
+    exercise_inactive_kernel_explicit_normal_replay
+    exit 0
+    ;;
+  inactive-kernel-normalization-interruptions)
+    exercise_inactive_kernel_normalization_interruptions
+    exit 0
+    ;;
+  inactive-kernel-normalization-setter-boundaries)
+    exercise_inactive_kernel_normalization_setter_boundaries
+    exit 0
+    ;;
+  inactive-kernel-verification-phase-atomic-hostiles)
+    exercise_inactive_kernel_verification_phase_atomic_hostiles
+    exit 0
+    ;;
+  inactive-kernel-normalization-races)
+    exercise_inactive_kernel_normalization_races
+    exit 0
+    ;;
+  inactive-kernel-normalization-post-atomic)
+    exercise_inactive_kernel_prepare
+    exit 0
+    ;;
+  inactive-kernel-normalization-phase-hostiles)
+    exercise_inactive_kernel_normalization_phase_hostiles
+    exit 0
+    ;;
+  inactive-kernel-normalized-unhealthy)
+    exercise_inactive_kernel_prepare
+    exit 0
+    ;;
   inactive-kernel-driver-upgrade)
     exercise_inactive_kernel_prepare
     exit 0
     ;;
-  inactive-kernel-phase-authority-drift|inactive-kernel-final-module-drift|inactive-kernel-final-artifact-drift|inactive-kernel-final-dkms-drift|inactive-kernel-setter-snapshot|inactive-kernel-stale-authority|inactive-kernel-hostile-env|inactive-kernel-commit-rejected)
+  inactive-kernel-phase-authority-drift|inactive-kernel-final-module-drift|inactive-kernel-final-artifact-drift|inactive-kernel-final-dkms-drift|inactive-kernel-setter-snapshot|inactive-kernel-stale-authority|inactive-kernel-hostile-env|inactive-kernel-commit-rejected|inactive-kernel-explicit-promotion|inactive-kernel-explicit-normal-verified|inactive-kernel-explicit-normal-unhealthy|inactive-kernel-explicit-normal-conventional-drift|inactive-kernel-explicit-normal-vermagic-prefix|inactive-kernel-explicit-normal-module-resolution-drift|inactive-kernel-normalized-module-resolution-drift|inactive-kernel-normalization|inactive-kernel-normalization-interruption-one|inactive-kernel-normalization-race-one|inactive-kernel-normalization-post-atomic|inactive-kernel-verification-phase-atomic|inactive-kernel-verification-phase-prepared|inactive-kernel-normalized-unhealthy|inactive-kernel-normalization-phase-hostile-one|inactive-kernel-explicit-interruption-one|inactive-kernel-accepted-ancestor-one)
     exercise_inactive_kernel_prepare
     exit 0
     ;;
@@ -4373,41 +5787,7 @@ for installed_drift in artifact-tree manifest module-bytes module-path overlay-b
   assert_recovery_rejection_preserves_state "installed-$installed_drift"
 done
 
-# A schema-2 accepted receipt predates driver ownership of the backlight rule.
-# Preparing the first capable successor must prove the ambient rule state and
-# carry that proof into the new schema-5 transition without mutating it.
-new_target
-run_stage >/dev/null
-install_live_hardware
-run_controller commit-boot.sh >/dev/null
-legacy_accepted_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
-downgrade_artifact_to_schema_one "$legacy_accepted_artifact"
-run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" >/dev/null
-legacy_accepted_receipt="$root/var/lib/hyperpixel2r-kms/accepted-state"
-grep -Fxq 'schema_version=2' "$legacy_accepted_receipt" ||
-  fail 'legacy accepted upgrade fixture is not schema 2'
-legacy_successor='eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
-if HP2R_FIXTURE_INTERRUPT_AFTER=accepted-transition-published \
-  run_accepted_remote prepare-new-accepted \
-    0.1.1 "$legacy_successor" "$release" "$(printf d%.0s {1..64})" \
-    hyperpixel2r_kms.ko "$(printf e%.0s {1..64})" \
-    hyperpixel2r-kms-eeeeeeeeeeee.dtbo "$(printf f%.0s {1..64})" \
-    "$backlight_rule_file" "$(printf a%.0s {1..64})" >/dev/null 2>&1; then
-  fail 'legacy accepted upgrade ignored transition publication interruption'
-fi
-legacy_transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
-grep -Fxq 'schema_version=5' "$legacy_transition" ||
-  fail 'legacy accepted upgrade did not publish a schema-5 transition'
-grep -Fxq 'prior_backlight_rule_existed=false' "$legacy_transition" ||
-  fail 'legacy accepted upgrade did not prove the ambient rule was absent'
-grep -Fxq 'prior_tryboot_existed=false' "$legacy_transition" ||
-  fail 'legacy accepted upgrade did not prove prior tryboot absence'
-grep -Fxq 'prior_tryboot_sha256=none' "$legacy_transition" ||
-  fail 'legacy accepted upgrade did not bind prior tryboot absence'
-assert_absent "$backlight_rule_path"
-run_accepted_remote recover-accepted >/dev/null
-assert_absent "$legacy_transition"
-assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-prior-backlight-rule"
+exercise_legacy_accepted_upgrade
 
 # Accepted lifecycle ownership is a separate durable protocol.  It records the
 # exact retained bundle and a surgical stock-boot candidate, then uninstalls
