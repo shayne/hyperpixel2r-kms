@@ -174,6 +174,43 @@ for mutation in broad tampered extra; do
   fi
 done
 
+no_probe_bin="$temporary_dir/no-probe-bin"
+no_probe_log="$temporary_dir/no-probe-ssh.log"
+mkdir -p "$no_probe_bin"
+cat > "$no_probe_bin/ssh" <<'NO_PROBE_SSH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$HP2R_NO_PROBE_LOG"
+exit 97
+NO_PROBE_SSH
+chmod +x "$no_probe_bin/ssh"
+for command in scripts/build-driver.sh scripts/check-artifacts.sh; do
+  pairing_error="$temporary_dir/$(basename "$command").pairing-error"
+  set +e
+  PATH="$no_probe_bin:$PATH" \
+    HP2R_NO_PROBE_LOG="$no_probe_log" \
+    "$repo_root/$command" \
+      --target fixture-target \
+      --target-identity-sha256 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+      >"$pairing_error" 2>&1
+  pairing_status=$?
+  set -e
+  test "$pairing_status" = 64 || {
+    cat "$pairing_error" >&2
+    printf '%s did not reject unpaired candidate identity with exit 64\n' "$command" >&2
+    exit 1
+  }
+  grep -Fq -- '--target-identity-sha256 requires --kernel-release' "$pairing_error" || {
+    cat "$pairing_error" >&2
+    printf '%s did not report the candidate option pairing error\n' "$command" >&2
+    exit 1
+  }
+done
+test ! -e "$no_probe_log" || {
+  cat "$no_probe_log" >&2
+  printf 'candidate option validation opened an SSH connection\n' >&2
+  exit 1
+}
+
 validate_target_manifest() {
   bash -eu -c \
     'source "$1"; hp2r_validate_target_manifest "$2"' \

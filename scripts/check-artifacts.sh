@@ -80,6 +80,15 @@ while test "$#" -gt 0; do
       ;;
   esac
 done
+if "$explicit_release"; then
+  [[ "$target_identity_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "--kernel-release requires --target-identity-sha256 as lowercase SHA-256" >&2
+    exit 64
+  }
+elif test -n "$target_identity_sha256"; then
+  echo "--target-identity-sha256 requires --kernel-release" >&2
+  exit 64
+fi
 : "${target:?set HP2R_TARGET or pass --target}"
 hp2r_validate_target "$target"
 if test -z "$release"; then
@@ -87,17 +96,10 @@ if test -z "$release"; then
 fi
 hp2r_validate_release "$release"
 if "$explicit_release"; then
-  [[ "$target_identity_sha256" =~ ^[0-9a-f]{64}$ ]] || {
-    echo "--kernel-release requires --target-identity-sha256 as lowercase SHA-256" >&2
-    exit 64
-  }
   target_dir="$(hp2r_release_path "$kernel_target_parent" "$release")"
   target_file="$target_dir/target.txt"
   hp2r_validate_inactive_target_manifest "$target_file" "$target_dir/root"
   hp2r_require_target_identity "$target_file" "$target_identity_sha256"
-elif test -n "$target_identity_sha256"; then
-  echo "--target-identity-sha256 requires --kernel-release" >&2
-  exit 64
 fi
 
 cd "$repo_root"
