@@ -2306,7 +2306,7 @@ assert_inactive_final_stage_boundary() {
   local expected_module_sha="$5" expected_overlay_file="$6" expected_overlay_sha="$7"
   local expected_rule_file="$8" expected_rule_sha="$9" expected_normal_sha="${10}"
   local expected_tryboot_sha="${11}" expected_transition_sha="${12}"
-  local transaction resolved vermagic
+  local transaction resolved vermagic dkms_status
 
   # assert_transaction_state proves the private schema-5 state, artifact tree,
   # manifest, DKMS inventory, installed module/overlay/rule, and staged
@@ -2328,7 +2328,8 @@ assert_inactive_final_stage_boundary() {
     test "$(sha "$accepted_transition")" = "$expected_transition_sha" || return
   resolved="$(sudo modinfo -k "$expected_release" -n hyperpixel2r_kms)" || return
   test "$resolved" = "${root}/lib/modules/$expected_release/extra/$expected_module_file" || return
-  test "$(validate_dkms_status "$expected_version")" = registered || return
+  dkms_status="$(run_dkms status -m hyperpixel2r-kms -v "$expected_version")" || return
+  test "$dkms_status" = "hyperpixel2r-kms/$expected_version, $expected_release, aarch64: installed" || return
   vermagic="$(sudo modinfo -k "$expected_release" -F vermagic hyperpixel2r_kms)" || return
   case "$vermagic" in "$expected_release"*) ;; *) return 1;; esac
 }

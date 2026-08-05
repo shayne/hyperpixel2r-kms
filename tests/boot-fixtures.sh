@@ -3390,7 +3390,8 @@ exercise_inactive_kernel_prepare() {
     if HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH=1 run_inactive_stage >/dev/null 2>&1; then
       fail 'inactive stage accepted live candidate DKMS drift in the final window'
     fi
-    assert_file "$root/tmp/dkms-mutated-on-state-publish"
+    assert_file "$root/tmp/dkms-mutated-on-state-publish" ||
+      fail 'DKMS final-window mutation hook did not run'
     grep -Fxq 'phase=prepared' "$state_dir/accepted-transition" ||
       fail 'late DKMS drift advanced the accepted phase'
     assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
