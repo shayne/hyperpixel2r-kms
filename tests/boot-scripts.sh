@@ -48,7 +48,10 @@ release='6.18.34+rpt-rpi-v8'
 source_tree="$(git -C "$fixture_repo" rev-parse "$source_revision^{tree}")"
 artifact_dir="$fixture_repo/dist/artifacts/$release"
 target_dir="$fixture_repo/dist/kernel-target/$release"
-mkdir -p "$artifact_dir" "$target_dir"
+target_root="$target_dir/root"
+mkdir -p \
+  "$artifact_dir" \
+  "$target_root/boot/firmware/overlays"
 module_file='hyperpixel2r_kms.ko'
 overlay_file="hyperpixel2r-kms-${source_revision:0:12}.dtbo"
 applied_dtb_file='hyperpixel2r-kms-applied.dtb'
@@ -69,7 +72,19 @@ host_fixdep_sha256="$(sha256sum "$artifact_dir/host-fixdep" | awk '{print $1}')"
 host_modpost_sha256="$(sha256sum "$artifact_dir/host-modpost" | awk '{print $1}')"
 host_genksyms_sha256="$(sha256sum "$artifact_dir/host-genksyms" | awk '{print $1}')"
 source_deb_sha256='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-base_dtb_sha256='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+target_identity_sha256='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+kernel_image_path="/boot/vmlinuz-$release"
+initramfs_path="/boot/initrd.img-$release"
+base_dtb_path='/boot/firmware/bcm2710-rpi-zero-2-w.dtb'
+vc4_overlay_path='/boot/firmware/overlays/vc4-kms-v3d.dtbo'
+printf 'synthetic candidate kernel fixture\n' > "$target_root$kernel_image_path"
+printf 'synthetic candidate initramfs fixture\n' > "$target_root$initramfs_path"
+printf 'synthetic base DTB fixture\n' > "$target_root$base_dtb_path"
+printf 'synthetic VC4 overlay fixture\n' > "$target_root$vc4_overlay_path"
+kernel_image_sha256="$(sha256sum "$target_root$kernel_image_path" | awk '{print $1}')"
+initramfs_sha256="$(sha256sum "$target_root$initramfs_path" | awk '{print $1}')"
+base_dtb_sha256="$(sha256sum "$target_root$base_dtb_path" | awk '{print $1}')"
+vc4_overlay_sha256="$(sha256sum "$target_root$vc4_overlay_path" | awk '{print $1}')"
 
 {
   printf 'schema_version\t2\n'
@@ -101,6 +116,8 @@ base_dtb_sha256='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   printf 'host_genksyms_sha256\t%s\n' "$host_genksyms_sha256"
 } > "$artifact_dir/host-tools.txt"
 {
+  printf 'schema_version\t2\n'
+  printf 'target_identity_sha256\t%s\n' "$target_identity_sha256"
   printf 'kernel_release\t%s\n' "$release"
   printf 'kernel_arch\taarch64\n'
   printf 'header_path\t/usr/src/linux-headers-6.18.34+rpt-rpi-v8\n'
@@ -112,8 +129,14 @@ base_dtb_sha256='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   printf 'kernel_source_deb_filename\tpool/main/l/linux/linux-source-6.18_6.18.34-1_all.deb\n'
   printf 'kernel_source_deb_sha256\t%s\n' "$source_deb_sha256"
   printf 'kernel_source_deb\tkernel-source.deb\n'
-  printf 'base_dtb_path\t/boot/firmware/bcm2710-rpi-zero-2-w.dtb\n'
+  printf 'base_dtb_path\t%s\n' "$base_dtb_path"
   printf 'base_dtb_sha256\t%s\n' "$base_dtb_sha256"
+  printf 'kernel_image_path\t%s\n' "$kernel_image_path"
+  printf 'kernel_image_sha256\t%s\n' "$kernel_image_sha256"
+  printf 'initramfs_path\t%s\n' "$initramfs_path"
+  printf 'initramfs_sha256\t%s\n' "$initramfs_sha256"
+  printf 'vc4_overlay_path\t%s\n' "$vc4_overlay_path"
+  printf 'vc4_overlay_sha256\t%s\n' "$vc4_overlay_sha256"
 } > "$target_dir/target.txt"
 
 docker run --rm \

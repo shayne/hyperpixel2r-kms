@@ -21,6 +21,7 @@ USAGE
 
 target="${HP2R_TARGET:-}"
 release=""
+explicit_release=false
 kernel_target_parent="$repo_root/dist/kernel-target"
 artifact_parent="$repo_root/dist/artifacts"
 while test "$#" -gt 0; do
@@ -39,6 +40,7 @@ while test "$#" -gt 0; do
         exit 64
       }
       release="$2"
+      explicit_release=true
       shift 2
       ;;
     --kernel-target)
@@ -122,6 +124,9 @@ test -d "$target_parent" || {
 }
 target_dir="$(hp2r_release_path "$target_parent" "$release")"
 target_file="$target_dir/target.txt"
+if "$explicit_release"; then
+  hp2r_validate_inactive_target_manifest "$target_file" "$target_dir/root"
+fi
 hp2r_validate_artifact_provenance "$manifest" "$target_file" "$artifact_dir"
 
 source_revision="$(hp2r_manifest_value "$manifest" source_revision)"

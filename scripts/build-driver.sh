@@ -22,6 +22,7 @@ USAGE
 
 target="${HP2R_TARGET:-}"
 release=""
+explicit_release=false
 kernel_target_parent="$repo_root/dist/kernel-target"
 source_ref=""
 output_parent="$repo_root/dist/artifacts"
@@ -41,6 +42,7 @@ while test "$#" -gt 0; do
         exit 64
       }
       release="$2"
+      explicit_release=true
       shift 2
       ;;
     --kernel-target)
@@ -180,6 +182,9 @@ base_dtb_sha256="$(
   hp2r_manifest_value "$target_file" base_dtb_sha256
 )"
 root_dir="$target_dir/root"
+if "$explicit_release"; then
+  hp2r_validate_inactive_target_manifest "$target_file" "$root_dir"
+fi
 config_path="$root_dir$header_path/.config"
 test -f "$config_path"
 test -f "$root_dir$header_path/Module.symvers"

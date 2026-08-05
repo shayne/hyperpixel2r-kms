@@ -2554,6 +2554,13 @@ case "${HP2R_FIXTURE_CASE:-}" in
     exercise_accepted_prior_committed_recovery
     exit 0
     ;;
+  smoke)
+    new_target
+    run_stage --stage-only >/dev/null
+    assert_backlight_rule_installed
+    assert_file "$root/boot/firmware/tryboot.txt"
+    exit 0
+    ;;
   '')
     exercise_inactive_uninstall_backlight_matrix
     exercise_prior_absent_accepted_uninstall_proof_guard

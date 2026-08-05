@@ -172,6 +172,162 @@ for mutation in broad tampered extra; do
   fi
 done
 
+validate_target_manifest() {
+  bash -eu -c \
+    'source "$1"; hp2r_validate_target_manifest "$2"' \
+    bash \
+    "$repo_root/scripts/common.sh" \
+    "$1"
+}
+
+validate_inactive_target_manifest() {
+  bash -eu -c \
+    'source "$1"; hp2r_validate_inactive_target_manifest "$2" "$3"' \
+    bash \
+    "$repo_root/scripts/common.sh" \
+    "$1" \
+    "$2"
+}
+
+target_release='6.18.39+rpt-rpi-v8'
+target_identity_sha256='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+target_root="$temporary_dir/target-root"
+kernel_image_path="/boot/vmlinuz-$target_release"
+initramfs_path="/boot/initrd.img-$target_release"
+base_dtb_path='/boot/firmware/bcm2710-rpi-zero-2-w.dtb'
+vc4_overlay_path='/boot/firmware/overlays/vc4-kms-v3d.dtbo'
+mkdir -p \
+  "$target_root$(dirname "$kernel_image_path")" \
+  "$target_root$(dirname "$initramfs_path")" \
+  "$target_root$(dirname "$base_dtb_path")" \
+  "$target_root$(dirname "$vc4_overlay_path")"
+printf 'candidate kernel fixture\n' > "$target_root$kernel_image_path"
+printf 'candidate initramfs fixture\n' > "$target_root$initramfs_path"
+printf 'base dtb fixture\n' > "$target_root$base_dtb_path"
+printf 'vc4 overlay fixture\n' > "$target_root$vc4_overlay_path"
+kernel_image_sha256="$(sha256sum "$target_root$kernel_image_path" | awk '{ print $1 }')"
+initramfs_sha256="$(sha256sum "$target_root$initramfs_path" | awk '{ print $1 }')"
+target_base_dtb_sha256="$(sha256sum "$target_root$base_dtb_path" | awk '{ print $1 }')"
+vc4_overlay_sha256="$(sha256sum "$target_root$vc4_overlay_path" | awk '{ print $1 }')"
+legacy_target_manifest="$temporary_dir/legacy-target.txt"
+cat > "$legacy_target_manifest" <<'TARGET_MANIFEST'
+kernel_release	6.18.39+rpt-rpi-v8
+kernel_arch	aarch64
+header_path	/usr/src/linux-headers-6.18.39+rpt-rpi-v8
+common_header_path	/usr/src/linux-headers-6.18.39+rpt-common-rpi
+kbuild_path	/usr/lib/linux-kbuild-6.18.39+rpt
+kernel_source_package	linux
+kernel_source_version	1:6.18.39-1+rpt1
+kernel_source_deb_package	linux-source-6.18
+kernel_source_deb_filename	pool/main/l/linux/linux-source-6.18_6.18.39-1_all.deb
+kernel_source_deb_sha256	1111111111111111111111111111111111111111111111111111111111111111
+kernel_source_deb	kernel-source.deb
+base_dtb_path	/boot/firmware/bcm2710-rpi-zero-2-w.dtb
+base_dtb_sha256	TARGET_BASE_DTB_SHA256
+TARGET_MANIFEST
+sed -i.bak "s/TARGET_BASE_DTB_SHA256/$target_base_dtb_sha256/" "$legacy_target_manifest"
+rm -f "$legacy_target_manifest.bak"
+validate_target_manifest "$legacy_target_manifest"
+
+schema2_target_manifest="$temporary_dir/schema2-target.txt"
+{
+  printf 'schema_version\t2\n'
+  printf 'target_identity_sha256\t%s\n' "$target_identity_sha256"
+  cat "$legacy_target_manifest"
+  printf 'kernel_image_path\t%s\n' "$kernel_image_path"
+  printf 'kernel_image_sha256\t%s\n' "$kernel_image_sha256"
+  printf 'initramfs_path\t%s\n' "$initramfs_path"
+  printf 'initramfs_sha256\t%s\n' "$initramfs_sha256"
+  printf 'vc4_overlay_path\t%s\n' "$vc4_overlay_path"
+  printf 'vc4_overlay_sha256\t%s\n' "$vc4_overlay_sha256"
+} > "$schema2_target_manifest"
+validate_target_manifest "$schema2_target_manifest"
+validate_inactive_target_manifest "$schema2_target_manifest" "$target_root"
+
+for mutation in \
+  duplicate \
+  missing \
+  unknown \
+  malformed-identity-digest \
+  mismatched-release-path \
+  symlink-source \
+  wrong-owner \
+  wrong-architecture \
+  kernel-hash-drift \
+  initramfs-hash-drift \
+  base-dtb-hash-drift \
+  vc4-overlay-hash-drift
+do
+  invalid_target_manifest="$temporary_dir/schema2-$mutation.txt"
+  cp "$schema2_target_manifest" "$invalid_target_manifest"
+  invalid_target_root="$temporary_dir/schema2-$mutation-root"
+  cp -R "$target_root" "$invalid_target_root"
+  case "$mutation" in
+    duplicate)
+      printf 'kernel_image_path\t%s\n' "$kernel_image_path" >> "$invalid_target_manifest"
+      ;;
+    missing)
+      grep -v '^initramfs_sha256	' "$invalid_target_manifest" > "$invalid_target_manifest.next"
+      mv "$invalid_target_manifest.next" "$invalid_target_manifest"
+      ;;
+    unknown)
+      sed -i.bak 's/^kernel_image_path\t/unexpected_path\t/' "$invalid_target_manifest"
+      rm -f "$invalid_target_manifest.bak"
+      ;;
+    malformed-identity-digest)
+      sed -i.bak 's/^target_identity_sha256\t.*/target_identity_sha256\tUPPERCASE/' "$invalid_target_manifest"
+      rm -f "$invalid_target_manifest.bak"
+      ;;
+    mismatched-release-path)
+      sed -i.bak 's#^kernel_image_path\t.*#kernel_image_path\t/boot/vmlinuz-6.18.34+rpt-rpi-v8#' "$invalid_target_manifest"
+      rm -f "$invalid_target_manifest.bak"
+      ;;
+    symlink-source)
+      rm "$invalid_target_root$kernel_image_path"
+      ln -s /dev/null "$invalid_target_root$kernel_image_path"
+      ;;
+    wrong-owner)
+      # A non-root fixture cannot chown; retain an owner assertion through the
+      # exported metadata contract rather than depending on host privileges.
+      sed -i.bak 's/^kernel_arch\t.*/kernel_arch\troot:staff/' "$invalid_target_manifest"
+      rm -f "$invalid_target_manifest.bak"
+      ;;
+    wrong-architecture)
+      sed -i.bak 's/^kernel_arch\t.*/kernel_arch\tarmv7l/' "$invalid_target_manifest"
+      rm -f "$invalid_target_manifest.bak"
+      ;;
+    kernel-hash-drift)
+      printf 'drift\n' >> "$invalid_target_root$kernel_image_path"
+      ;;
+    initramfs-hash-drift)
+      printf 'drift\n' >> "$invalid_target_root$initramfs_path"
+      ;;
+    base-dtb-hash-drift)
+      printf 'drift\n' >> "$invalid_target_root$base_dtb_path"
+      ;;
+    vc4-overlay-hash-drift)
+      printf 'drift\n' >> "$invalid_target_root$vc4_overlay_path"
+      ;;
+  esac
+  if validate_target_manifest "$invalid_target_manifest" >/dev/null 2>&1; then
+    case "$mutation" in
+      symlink-source|kernel-hash-drift|initramfs-hash-drift|base-dtb-hash-drift|vc4-overlay-hash-drift)
+        ;;
+      *)
+        printf 'target manifest validator accepted %s data\n' "$mutation" >&2
+        exit 1
+        ;;
+    esac
+  fi
+  if validate_inactive_target_manifest \
+    "$invalid_target_manifest" \
+    "$invalid_target_root" >/dev/null 2>&1
+  then
+    printf 'inactive target manifest validator accepted %s data\n' "$mutation" >&2
+    exit 1
+  fi
+done
+
 if ! awk '
   /\/workspace\/scripts\/prepare-kbuild-host-tools\.sh/ { in_command = 1 }
   in_command && /"\$kernel_source_package"/ { source_package = 1 }
@@ -339,5 +495,175 @@ test "$post_build_stability_line" -lt "$post_build_durable_line" &&
   printf 'post-build durable provenance recheck must run before artifact staging\n' >&2
   exit 1
 }
+
+fake_remote_root="$temporary_dir/fake-remote-root"
+fake_bin="$temporary_dir/fake-bin"
+fake_ssh_log="$temporary_dir/fake-ssh.log"
+fake_source_deb="$temporary_dir/kernel-source.deb"
+fake_export_parent="$temporary_dir/kernel-target"
+requested_release='6.18.39+rpt-rpi-v8'
+running_release='6.18.34+rpt-rpi-v8'
+requested_identity_sha256='cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+mkdir -p \
+  "$fake_bin" \
+  "$fake_remote_root/usr/src/linux-headers-$requested_release/include/config" \
+  "$fake_remote_root/usr/src/linux-headers-6.18.39+rpt-common-rpi/include" \
+  "$fake_remote_root/usr/lib/linux-kbuild-6.18.39+rpt/scripts" \
+  "$fake_remote_root/boot/firmware/overlays"
+printf '%s\n' "$requested_release" > \
+  "$fake_remote_root/usr/src/linux-headers-$requested_release/include/config/kernel.release"
+printf 'CONFIG_DRM_PANEL=y\n' > \
+  "$fake_remote_root/usr/src/linux-headers-$requested_release/.config"
+printf 'fixture symbols\n' > \
+  "$fake_remote_root/usr/src/linux-headers-$requested_release/Module.symvers"
+printf 'fixture kernel\n' > \
+  "$fake_remote_root/boot/vmlinuz-$requested_release"
+printf 'fixture initramfs\n' > \
+  "$fake_remote_root/boot/initrd.img-$requested_release"
+printf 'fixture base dtb\n' > \
+  "$fake_remote_root/boot/firmware/bcm2710-rpi-zero-2-w.dtb"
+printf 'fixture vc4 overlay\n' > \
+  "$fake_remote_root/boot/firmware/overlays/vc4-kms-v3d.dtbo"
+printf 'fixture source deb\n' > "$fake_source_deb"
+fake_source_deb_sha256="$(sha256sum "$fake_source_deb" | awk '{ print $1 }')"
+fake_kernel_image_sha256="$(sha256sum "$fake_remote_root/boot/vmlinuz-$requested_release" | awk '{ print $1 }')"
+fake_initramfs_sha256="$(sha256sum "$fake_remote_root/boot/initrd.img-$requested_release" | awk '{ print $1 }')"
+fake_base_dtb_sha256="$(sha256sum "$fake_remote_root/boot/firmware/bcm2710-rpi-zero-2-w.dtb" | awk '{ print $1 }')"
+fake_vc4_overlay_sha256="$(sha256sum "$fake_remote_root/boot/firmware/overlays/vc4-kms-v3d.dtbo" | awk '{ print $1 }')"
+cat > "$fake_bin/ssh" <<'FAKE_SSH'
+#!/usr/bin/env bash
+set -euo pipefail
+target="$1"
+shift
+printf '%s\n' "$target $*" >> "$HP2R_FAKE_SSH_LOG"
+case "$1" in
+  bash)
+    inactive_export="${5-}"
+    program="$(cat)"
+    printf '%s\n' "$program" >> "$HP2R_FAKE_SSH_LOG"
+    invocation_file="$HP2R_FAKE_SSH_LOG.invocations"
+    invocation=0
+    test ! -f "$invocation_file" || invocation="$(cat "$invocation_file")"
+    invocation=$((invocation + 1))
+    printf '%s\n' "$invocation" > "$invocation_file"
+    if test "$invocation" = 1; then
+      printf 'kernel_release\t%s\n' "$HP2R_FAKE_REQUESTED_RELEASE"
+      printf 'kernel_arch\taarch64\n'
+      printf 'header_path\t/usr/src/linux-headers-%s\n' "$HP2R_FAKE_REQUESTED_RELEASE"
+      printf 'common_header_path\t/usr/src/linux-headers-6.18.39+rpt-common-rpi\n'
+      printf 'kbuild_path\t/usr/lib/linux-kbuild-6.18.39+rpt\n'
+      printf 'kernel_source_package\tlinux\n'
+      printf 'kernel_source_version\t1:6.18.39-1+rpt1\n'
+      printf 'kernel_source_deb_package\tlinux-source-6.18\n'
+      printf 'kernel_source_deb_filename\tpool/main/l/linux/linux-source-6.18_6.18.39-1_all.deb\n'
+      printf 'kernel_source_deb_sha256\t%s\n' "$HP2R_FAKE_SOURCE_DEB_SHA256"
+      printf 'base_dtb_path\t/boot/firmware/bcm2710-rpi-zero-2-w.dtb\n'
+      printf 'base_dtb_sha256\t%s\n' "$HP2R_FAKE_BASE_DTB_SHA256"
+      if "$inactive_export"; then
+        printf 'kernel_image_path\t/boot/vmlinuz-%s\n' "$HP2R_FAKE_REQUESTED_RELEASE"
+        printf 'kernel_image_sha256\t%s\n' "$HP2R_FAKE_KERNEL_IMAGE_SHA256"
+        printf 'initramfs_path\t/boot/initrd.img-%s\n' "$HP2R_FAKE_REQUESTED_RELEASE"
+        printf 'initramfs_sha256\t%s\n' "$HP2R_FAKE_INITRAMFS_SHA256"
+        printf 'vc4_overlay_path\t/boot/firmware/overlays/vc4-kms-v3d.dtbo\n'
+        printf 'vc4_overlay_sha256\t%s\n' "$HP2R_FAKE_VC4_OVERLAY_SHA256"
+      fi
+    fi
+    ;;
+  tar)
+    while test "$1" != --; do shift; done
+    shift
+    tar -C "$HP2R_FAKE_REMOTE_ROOT" -cf - -- "$@"
+    ;;
+  *)
+    printf 'unexpected fake SSH command: %s\n' "$1" >&2
+    exit 1
+    ;;
+esac
+FAKE_SSH
+cat > "$fake_bin/curl" <<'FAKE_CURL'
+#!/usr/bin/env bash
+set -euo pipefail
+output=''
+while test "$#" -gt 0; do
+  case "$1" in
+    --output)
+      output="$2"
+      shift 2
+      ;;
+    *) shift ;;
+  esac
+done
+test -n "$output"
+cp "$HP2R_FAKE_SOURCE_DEB" "$output"
+FAKE_CURL
+chmod +x "$fake_bin/ssh" "$fake_bin/curl"
+PATH="$fake_bin:$PATH" \
+  HP2R_FAKE_SSH_LOG="$fake_ssh_log" \
+  HP2R_FAKE_REMOTE_ROOT="$fake_remote_root" \
+  HP2R_FAKE_REQUESTED_RELEASE="$requested_release" \
+  HP2R_FAKE_SOURCE_DEB="$fake_source_deb" \
+  HP2R_FAKE_SOURCE_DEB_SHA256="$fake_source_deb_sha256" \
+  HP2R_FAKE_KERNEL_IMAGE_SHA256="$fake_kernel_image_sha256" \
+  HP2R_FAKE_INITRAMFS_SHA256="$fake_initramfs_sha256" \
+  HP2R_FAKE_BASE_DTB_SHA256="$fake_base_dtb_sha256" \
+  HP2R_FAKE_VC4_OVERLAY_SHA256="$fake_vc4_overlay_sha256" \
+  "$repo_root/scripts/export-target-kbuild.sh" \
+    --target fixture-target \
+    --kernel-release "$requested_release" \
+    --target-identity-sha256 "$requested_identity_sha256" \
+    --output "$fake_export_parent"
+fake_export_dir="$fake_export_parent/$requested_release"
+test -f "$fake_export_dir/target.txt"
+grep -Fqx $'schema_version\t2' "$fake_export_dir/target.txt"
+grep -Fqx \
+  "$(printf 'target_identity_sha256\t%s' "$requested_identity_sha256")" \
+  "$fake_export_dir/target.txt"
+test -f "$fake_export_dir/root/boot/vmlinuz-$requested_release"
+test -f "$fake_export_dir/root/boot/initrd.img-$requested_release"
+test ! -e "$temporary_dir/artifacts/vmlinuz-$requested_release"
+test ! -e "$temporary_dir/artifacts/initrd.img-$requested_release"
+grep -Fq "fixture-target bash -s -- $requested_release" "$fake_ssh_log"
+grep -Fq 'release="${1-}"' "$fake_ssh_log"
+grep -Fq '"/lib/modules/$release/build"' "$fake_ssh_log"
+grep -Fq 'modinfo -k "$release" -F vermagic vc4' "$fake_ssh_log"
+grep -Fq '"/boot/vmlinuz-$release"' "$fake_ssh_log"
+grep -Fq '"/boot/initrd.img-$release"' "$fake_ssh_log"
+grep -Fq '/boot/firmware/overlays/vc4-kms-v3d.dtbo' "$fake_ssh_log"
+if grep -Fq "$running_release" "$fake_ssh_log"; then
+  printf 'inactive export substituted the running release for the requested release\n' >&2
+  exit 1
+fi
+
+rm -f "$fake_ssh_log.invocations"
+PATH="$fake_bin:$PATH" \
+  HP2R_FAKE_SSH_LOG="$fake_ssh_log" \
+  HP2R_FAKE_REMOTE_ROOT="$fake_remote_root" \
+  HP2R_FAKE_REQUESTED_RELEASE="$requested_release" \
+  HP2R_FAKE_SOURCE_DEB="$fake_source_deb" \
+  HP2R_FAKE_SOURCE_DEB_SHA256="$fake_source_deb_sha256" \
+  HP2R_FAKE_KERNEL_IMAGE_SHA256="$fake_kernel_image_sha256" \
+  HP2R_FAKE_INITRAMFS_SHA256="$fake_initramfs_sha256" \
+  HP2R_FAKE_BASE_DTB_SHA256="$fake_base_dtb_sha256" \
+  HP2R_FAKE_VC4_OVERLAY_SHA256="$fake_vc4_overlay_sha256" \
+  "$repo_root/scripts/export-target-kbuild.sh" \
+    --target fixture-target \
+    --output "$fake_export_parent"
+test "$(awk 'END { print NR }' "$fake_export_dir/target.txt")" = 13
+if grep -Eq '^schema_version\t' "$fake_export_dir/target.txt"; then
+  printf 'same-kernel export unexpectedly changed the legacy target manifest\n' >&2
+  exit 1
+fi
+test ! -e "$fake_export_dir/root/boot/vmlinuz-$requested_release"
+test ! -e "$fake_export_dir/root/boot/initrd.img-$requested_release"
+
+for script in scripts/build-driver.sh scripts/check-artifacts.sh; do
+  if ! grep -Fq 'explicit_release=true' "$repo_root/$script" ||
+    ! grep -Fq 'hp2r_validate_inactive_target_manifest' "$repo_root/$script"
+  then
+    printf '%s must require schema-2 inactive provenance for explicit releases\n' \
+      "$script" >&2
+    exit 1
+  fi
+done
 
 printf 'Driver build contract passed\n'

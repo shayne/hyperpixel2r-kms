@@ -493,27 +493,11 @@ hp2r_validate_artifact_manifest() {
   esac
 }
 
-hp2r_validate_target_manifest() {
+hp2r_validate_target_manifest_values() {
   local manifest="$1"
-  local required_keys=(
-    kernel_release
-    kernel_arch
-    header_path
-    common_header_path
-    kbuild_path
-    kernel_source_package
-    kernel_source_version
-    kernel_source_deb_package
-    kernel_source_deb_filename
-    kernel_source_deb_sha256
-    kernel_source_deb
-    base_dtb_path
-    base_dtb_sha256
-  )
   local key
   local value
 
-  hp2r_validate_exact_manifest_rows "$manifest" "${required_keys[@]}" || return
   hp2r_validate_release \
     "$(hp2r_manifest_value "$manifest" kernel_release)" || return
   test "$(hp2r_manifest_value "$manifest" kernel_arch)" = aarch64 || {
@@ -564,6 +548,150 @@ hp2r_validate_target_manifest() {
       echo "target $key is not lowercase SHA-256" >&2
       return 1
     }
+  done
+}
+
+hp2r_validate_legacy_target_manifest() {
+  local manifest="$1"
+  local required_keys=(
+    kernel_release
+    kernel_arch
+    header_path
+    common_header_path
+    kbuild_path
+    kernel_source_package
+    kernel_source_version
+    kernel_source_deb_package
+    kernel_source_deb_filename
+    kernel_source_deb_sha256
+    kernel_source_deb
+    base_dtb_path
+    base_dtb_sha256
+  )
+
+  hp2r_validate_exact_manifest_rows "$manifest" "${required_keys[@]}" || return
+  hp2r_validate_target_manifest_values "$manifest"
+}
+
+hp2r_validate_schema2_target_manifest() {
+  local manifest="$1"
+  local required_keys=(
+    schema_version
+    target_identity_sha256
+    kernel_release
+    kernel_arch
+    header_path
+    common_header_path
+    kbuild_path
+    kernel_source_package
+    kernel_source_version
+    kernel_source_deb_package
+    kernel_source_deb_filename
+    kernel_source_deb_sha256
+    kernel_source_deb
+    base_dtb_path
+    base_dtb_sha256
+    kernel_image_path
+    kernel_image_sha256
+    initramfs_path
+    initramfs_sha256
+    vc4_overlay_path
+    vc4_overlay_sha256
+  )
+  local release
+  local key
+  local value
+
+  hp2r_validate_exact_manifest_rows "$manifest" "${required_keys[@]}" || return
+  test "$(hp2r_manifest_value "$manifest" schema_version)" = 2 || {
+    echo "unsupported target manifest schema version" >&2
+    return 1
+  }
+  value="$(hp2r_manifest_value "$manifest" target_identity_sha256)"
+  [[ "$value" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "target identity is not lowercase SHA-256" >&2
+    return 1
+  }
+  hp2r_validate_target_manifest_values "$manifest" || return
+  release="$(hp2r_manifest_value "$manifest" kernel_release)"
+  test "$(hp2r_manifest_value "$manifest" base_dtb_path)" = \
+    /boot/firmware/bcm2710-rpi-zero-2-w.dtb || {
+    echo "target base DTB path is invalid" >&2
+    return 1
+  }
+  test "$(hp2r_manifest_value "$manifest" kernel_image_path)" = \
+    "/boot/vmlinuz-$release" || {
+    echo "target kernel image path does not match kernel release" >&2
+    return 1
+  }
+  test "$(hp2r_manifest_value "$manifest" initramfs_path)" = \
+    "/boot/initrd.img-$release" || {
+    echo "target initramfs path does not match kernel release" >&2
+    return 1
+  }
+  test "$(hp2r_manifest_value "$manifest" vc4_overlay_path)" = \
+    /boot/firmware/overlays/vc4-kms-v3d.dtbo || {
+    echo "target VC4 overlay path is invalid" >&2
+    return 1
+  }
+  for key in \
+    kernel_image_sha256 \
+    initramfs_sha256 \
+    vc4_overlay_sha256
+  do
+    value="$(hp2r_manifest_value "$manifest" "$key")"
+    [[ "$value" =~ ^[0-9a-f]{64}$ ]] || {
+      echo "target $key is not lowercase SHA-256" >&2
+      return 1
+    }
+  done
+}
+
+hp2r_validate_target_manifest() {
+  local manifest="$1"
+  local schema_version
+
+  hp2r_require_regular "$manifest" || return
+  schema_version="$(hp2r_manifest_value "$manifest" schema_version)"
+  case "$schema_version" in
+    '') hp2r_validate_legacy_target_manifest "$manifest" ;;
+    2) hp2r_validate_schema2_target_manifest "$manifest" ;;
+    *)
+      echo "unsupported target manifest schema version" >&2
+      return 1
+      ;;
+  esac
+}
+
+hp2r_validate_inactive_target_manifest() {
+  local manifest="$1"
+  local root="$2"
+  local path_key
+  local sha_key
+  local path
+
+  hp2r_validate_schema2_target_manifest "$manifest" || return
+  test -d "$root" && test ! -L "$root" || {
+    echo "inactive target export root is missing or a symlink: $root" >&2
+    return 1
+  }
+  for path_key in \
+    kernel_image_path \
+    initramfs_path \
+    base_dtb_path \
+    vc4_overlay_path
+  do
+    case "$path_key" in
+      kernel_image_path) sha_key=kernel_image_sha256 ;;
+      initramfs_path) sha_key=initramfs_sha256 ;;
+      base_dtb_path) sha_key=base_dtb_sha256 ;;
+      vc4_overlay_path) sha_key=vc4_overlay_sha256 ;;
+    esac
+    path="$(hp2r_manifest_value "$manifest" "$path_key")"
+    hp2r_verify_sha256 \
+      "$root$path" \
+      "$(hp2r_manifest_value "$manifest" "$sha_key")" \
+      "exported ${path_key%_path}" || return
   done
 }
 
