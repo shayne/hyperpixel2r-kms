@@ -3395,6 +3395,15 @@ exercise_inactive_kernel_prepare() {
     if run_inactive_stage >/dev/null 2>&1; then
       fail "inactive stage ignored interruption after $HP2R_FIXTURE_INTERRUPT_AFTER"
     fi
+    if test "$HP2R_FIXTURE_INTERRUPT_AFTER" = candidate-staged-published; then
+      grep -Fxq 'phase=staged' "$state_dir/accepted-transition" ||
+        fail 'post-phase interruption did not retain a staged journal'
+      assert_file "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+      assert_file "$root/boot/firmware/tryboot.txt"
+      assert_file "$root/boot/firmware/$kernel_name"
+      assert_file "$root/boot/firmware/$initramfs_name"
+      exit 0
+    fi
     cmp -s "$normal_before" "$root/boot/firmware/config.txt" ||
       fail "inactive interruption changed normal config: $HP2R_FIXTURE_INTERRUPT_AFTER"
     assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
