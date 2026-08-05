@@ -625,11 +625,17 @@ SCRIPT
   # executable basename the production writer classifier is meant to inspect.
   mkdir -p "$fixture/writer-bin"
   for writer in apt apt-get dpkg unattended-upgrade update-initramfs mkinitramfs \
-    kernel-install dkms depmod flash-kernel rpi-eeprom-update lifecycle-remote.sh \
-    accepted-lifecycle.sh stage-tryboot.sh hp2r-boot-selector raspi-config reader
+    kernel-install dkms depmod flash-kernel rpi-eeprom-update
   do
     cp /bin/sleep "$fixture/writer-bin/$writer"
     chmod 0755 "$fixture/writer-bin/$writer"
+  done
+  for writer in lifecycle-remote.sh accepted-lifecycle.sh stage-tryboot.sh \
+    hp2r-boot-selector raspi-config reader harmless-raspi-config-helper; do
+    {
+      printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
+      printf '%s\n' 'while :; do sleep 1; done'
+    } | install -m 0755 /dev/stdin "$fixture/writer-bin/$writer"
   done
 
   install -m 0755 /dev/stdin "$bin/lsmod" <<'SCRIPT'
@@ -2823,6 +2829,9 @@ inactive_hostile_cases() {
     accepted-lifecycle.sh stage-tryboot.sh hp2r-boot-selector raspi-config; do
     printf 'writer-process-%s\n' "$writer"
   done
+  printf '%s\n' writer-script-bash-lifecycle writer-script-env-accepted \
+    writer-script-shebang-stage writer-script-selector writer-script-raspi-config \
+    writer-secret-argv writer-oversized-argv writer-token-substring writer-nonmatching-script
   printf '%s\n' writer-late-apt space-private space-firmware
   printf '%s\n' config-generated-output-overlong config-include config-autoboot \
     config-kernel config-initramfs config-ramfs config-os-prefix config-overlay-prefix \
@@ -3081,6 +3090,38 @@ exercise_inactive_kernel_prepare() {
         test -x "$fixture/writer-bin/$writer" || fail "unknown inactive writer process: $writer"
         "$fixture/writer-bin/$writer" 30 >/dev/null 2>&1 & pid="$!"
         ;;
+      writer-script-bash-lifecycle)
+        bash "$fixture/writer-bin/lifecycle-remote.sh" >/dev/null 2>&1 & pid="$!"
+        ;;
+      writer-script-env-accepted)
+        env bash "$fixture/writer-bin/accepted-lifecycle.sh" >/dev/null 2>&1 & pid="$!"
+        ;;
+      writer-script-shebang-stage)
+        "$fixture/writer-bin/stage-tryboot.sh" >/dev/null 2>&1 & pid="$!"
+        ;;
+      writer-script-selector)
+        "$fixture/writer-bin/hp2r-boot-selector" >/dev/null 2>&1 & pid="$!"
+        ;;
+      writer-script-raspi-config)
+        "$fixture/writer-bin/raspi-config" >/dev/null 2>&1 & pid="$!"
+        ;;
+      writer-secret-argv)
+        negative=false
+        writer_secret='HP2R_WRITER_SECRET_2cf885d5d42f'
+        "$fixture/writer-bin/reader" "$writer_secret" >/dev/null 2>&1 & pid="$!"
+        ;;
+      writer-oversized-argv)
+        writer_oversized="$(printf z%.0s {1..5000})"
+        "$fixture/writer-bin/reader" "$writer_oversized" >/dev/null 2>&1 & pid="$!"
+        ;;
+      writer-token-substring)
+        negative=false
+        "$fixture/writer-bin/reader" 'not-hp2r-boot-selector-not-a-script' >/dev/null 2>&1 & pid="$!"
+        ;;
+      writer-nonmatching-script)
+        negative=false
+        "$fixture/writer-bin/harmless-raspi-config-helper" >/dev/null 2>&1 & pid="$!"
+        ;;
       writer-late-apt)
         export HP2R_FIXTURE_LATE_WRITER=apt
         printf 'apt\n' > "$root/tmp/inactive-late-writer-class"
@@ -3122,7 +3163,15 @@ exercise_inactive_kernel_prepare() {
       inactive_assert_failure_preserves_state "$normal_state" "$module_state" "$overlay_state" "$companion_state"
       exit 0
     fi
-    if test "${HP2R_FIXTURE_DEBUG:-}" = 1 || test "$hostile" = baseline; then
+    if test "$hostile" = writer-secret-argv; then
+      run_inactive_prepare > "$root/tmp/inactive-secret-output" 2>&1 ||
+        fail 'inactive prepare rejected harmless secret argv sentinel'
+      for output in "$root/tmp/inactive-secret-output" "$log" \
+        "$root/tmp/accepted-controller-remote-command"; do
+        test ! -e "$output" || ! grep -Fq "$writer_secret" "$output" ||
+          fail 'writer secret argv escaped the privileged writer helper'
+      done
+    elif test "${HP2R_FIXTURE_DEBUG:-}" = 1 || test "$hostile" = baseline; then
       run_inactive_prepare || fail "inactive prepare rejected harmless $hostile"
     else
       run_inactive_prepare >/dev/null || fail "inactive prepare rejected harmless $hostile"
@@ -3189,6 +3238,10 @@ exercise_inactive_kernel_matrix() {
       bash "${BASH_SOURCE[0]}" >/dev/null; then
       count=$((count + 1))
       printf 'PASS inactive-kernel hostile %s\n' "$hostile"
+      # A case drives the public controller through nested shell/SSH fixture
+      # processes.  Let those exact controller processes reap before the next
+      # fresh target asks its fail-closed global writer scan.
+      sleep 1
     else
       fail "inactive-kernel hostile matrix failed: $hostile"
     fi

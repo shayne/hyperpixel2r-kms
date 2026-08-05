@@ -274,7 +274,7 @@ derive_normalized_normal_config() {
 }
 
 assert_no_boot_writers() {
-  local lock pid exe argv
+  local lock
 
   for lock in \
     "$root/var/lib/dpkg/lock" "$root/var/lib/dpkg/lock-frontend" \
@@ -288,22 +288,100 @@ assert_no_boot_writers() {
       sudo fuser -s -- "$lock" >/dev/null 2>&1 && return
     fi
   done
-  for pid in /proc/[0-9]*; do
-    pid="${pid#/proc/}"
-    # Never exempt a parent wholesale: a writer spawned during capture can be
-    # reparented there.  A benign controller parent simply fails the explicit
-    # classifier below, while a named writer must block publication.
-    test "$pid" = "$$" || {
-      # The lifecycle controller is an unprivileged SSH user.  Writer
-      # processes are normally root-owned, so inspect their proc identity at
-      # the same privilege boundary used for the lock probes.
-      exe="$(sudo readlink "/proc/$pid/exe" 2>/dev/null || true)"
-      argv="$(sudo sh -c 'tr "\\0" " " < "$1"' sh "/proc/$pid/cmdline" 2>/dev/null || true)"
-      case "${exe##*/}:$argv" in
-        apt:*|apt-get:*|dpkg:*|unattended-upgrade:*|update-initramfs:*|mkinitramfs:*|kernel-install:*|dkms:*|depmod:*|flash-kernel:*|rpi-eeprom-update:*|lifecycle-remote.sh:*|accepted-lifecycle.sh:*|stage-tryboot.sh:*|*boot-selector*:*|*raspi-config*:* ) return 1 ;;
+  # Keep root process identity and argv entirely inside this one fixed helper.
+  # Its only public contract is status: 0 means no bounded, exact writer
+  # match; nonzero is a deliberately redacted busy/ambiguous result.
+  sudo /bin/bash -c '
+    set -euo pipefail
+    PATH=/usr/bin:/bin
+    caller_pid="$1"
+    [[ "$caller_pid" =~ ^[0-9]+$ ]] || exit 1
+    caller_ancestors=()
+    ancestor="$caller_pid"
+    for ((ancestor_depth = 0; ancestor_depth < 16; ancestor_depth++)); do
+      ancestor="$(awk "/^PPid:/ { print \$2 }" "/proc/$ancestor/status")" || exit 1
+      [[ "$ancestor" =~ ^[0-9]+$ ]] || exit 1
+      test "$ancestor" = 0 && break
+      caller_ancestors+=("$ancestor")
+    done
+    max_processes=1024
+    max_argv_bytes=4096
+    max_argv_tokens=64
+    seen=0
+    temporary=""
+    cleanup() { test -z "$temporary" || rm -f -- "$temporary"; }
+    trap cleanup EXIT
+
+    known_script() {
+      case "${1##*/}" in
+        lifecycle-remote.sh|accepted-lifecycle.sh|stage-tryboot.sh|hp2r-boot-selector|raspi-config) return 0 ;;
+        *) return 1 ;;
       esac
     }
-  done
+    known_tool() {
+      case "$1" in
+        apt|apt-get|dpkg|unattended-upgrade|update-initramfs|mkinitramfs|kernel-install|dkms|depmod|flash-kernel|rpi-eeprom-update) return 0 ;;
+        *) return 1 ;;
+      esac
+    }
+    interpreter_script() {
+      local index=0 token base
+      ((${#argv[@]} >= 2)) || return 1
+      base="${argv[0]##*/}"
+      case "$base" in
+        bash|sh) known_script "${argv[1]}" ;;
+        env)
+          index=1
+          while ((index < ${#argv[@]})); do
+            token="${argv[index]}"
+            case "$token" in -[A-Za-z]*|*=*) index=$((index + 1)); continue ;; esac
+            break
+          done
+          ((index + 1 < ${#argv[@]})) || return 1
+          case "${argv[index]##*/}" in bash|sh) known_script "${argv[index + 1]}" ;; *) return 1 ;; esac
+          ;;
+        *) return 1 ;;
+      esac
+    }
+    trusted_prepare_controller_ancestor() {
+      local ancestor index
+      for ancestor in "${caller_ancestors[@]}"; do test "$pid" = "$ancestor" && break; done
+      test "$pid" = "$ancestor" || return 1
+      test "${argv[0]##*/}" = bash || return 1
+      test "${argv[1]##*/}" = accepted-lifecycle.sh || return 1
+      for ((index = 2; index + 1 < ${#argv[@]}; index++)); do
+        test "${argv[index]}" = --action && test "${argv[index + 1]}" = prepare-new && return 0
+      done
+      return 1
+    }
+
+    for proc in /proc/[0-9]*; do
+      pid="${proc#/proc/}"
+      test "$pid" = "$caller_pid" && continue
+      seen=$((seen + 1))
+      ((seen <= max_processes)) || exit 1
+      temporary="$(mktemp /tmp/hp2r-writer-argv.XXXXXX)" || exit 1
+      dd if="$proc/cmdline" of="$temporary" bs=$((max_argv_bytes + 1)) count=1 status=none 2>/dev/null || exit 1
+      bytes="$(wc -c < "$temporary")" || exit 1
+      ((bytes <= max_argv_bytes)) || exit 1
+      argv=()
+      while IFS= read -r -d "" token; do
+        test -n "$token" || exit 1
+        ((${#argv[@]} < max_argv_tokens)) || exit 1
+        argv+=("$token")
+      done < "$temporary"
+      test -z "$token" || exit 1
+      rm -f -- "$temporary"
+      temporary=""
+      ((${#argv[@]} == 0)) && continue
+      exe="$(readlink "$proc/exe" 2>/dev/null)" || exit 1
+      known_tool "${exe##*/}" && exit 1
+      trusted_prepare_controller_ancestor && continue
+      known_script "${argv[0]}" && exit 1
+      interpreter_script && exit 1
+    done
+    exit 0
+  ' hp2r-writer-helper "$$" >/dev/null 2>&1 || return
 }
 
 assert_transition_space() {
