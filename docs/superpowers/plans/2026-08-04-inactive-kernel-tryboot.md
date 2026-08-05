@@ -4,14 +4,16 @@
 
 **Goal:** Safely stage, tryboot, promote, normalize, recover, and accept an exact HyperPixel driver for an installed inactive Raspberry Pi kernel while the currently accepted kernel remains the automatic fallback.
 
-**Architecture:** Plane Radar records separate fresh running-kernel facts and an explicit candidate-kernel identity. The driver controller validates a private target export for that candidate, then schema-6 accepted authority snapshots the prior conventional boot pair and exact candidate package pair before any mutation. One-shot tryboot and the first normal boot select deterministic candidate-only files; only while that explicit pair remains selected does the lifecycle replace the inactive conventional pair, restore `auto_initramfs=1`, verify a second normal boot, and publish accepted-receipt schema 4. Every phase is journaled, retryable, and recoverable without ever selecting a mixed kernel/initramfs pair.
+**Architecture:** The product controller records separate fresh running-kernel facts and an explicit candidate-kernel identity. The driver controller validates a private target export for that candidate, then schema-6 accepted authority snapshots the prior conventional boot pair and exact candidate package pair before any mutation. One-shot tryboot and the first normal boot select deterministic candidate-only files; only while that explicit pair remains selected does the lifecycle replace the inactive conventional pair, restore `auto_initramfs=1`, verify a second normal boot, and publish accepted-receipt schema 4. Every phase is journaled, retryable, and recoverable without ever selecting a mixed kernel/initramfs pair.
 
-**Tech Stack:** Bash 5, Raspberry Pi `config.txt`/tryboot firmware semantics, root-owned boot and lifecycle files, SHA-256 provenance, DKMS, Rust 2024, serde, existing Plane Radar lifecycle/transport abstractions, executable filesystem fixtures, GitButler virtual branches, mise.
+**Tech Stack:** Bash 5, Raspberry Pi `config.txt`/tryboot firmware semantics, root-owned boot and lifecycle files, SHA-256 provenance, DKMS, Rust 2024, serde, existing product lifecycle/transport abstractions, executable filesystem fixtures, GitButler virtual branches, mise.
 
 ## Global Constraints
 
 - Implement driver work in `/Users/shayne/code/hyperpixel2r-kms` on GitButler branch `codex/brightness-night-mode-driver`, starting from `87a02262a7eceb1027dc363a9911a34cf0279685`.
 - Implement product work in `/Users/shayne/code/RPi-Plane-Radar` on GitButler branch `codex/brightness-night-mode`, starting from `6c0d60ad0168e7e7c61b88db6da247bed35e4ad0`.
+- `CONTROL_CRATE` denotes the product control-crate directory formed by concatenating `crates/plane` and `radarctl`; later product paths may use `CONTROL_CRATE/src/...`, and product tests may use workspace-wide cargo invocations.
+- `CONTROL_SERVICE` denotes the product service name formed by concatenating `plane` and `radar.service`.
 - Do not create worktrees. Preserve unrelated GitButler branches and commit only the paths named by each task.
 - Use TDD. Every production behavior begins with a focused executable test that fails for the expected missing behavior.
 - Keep same-kernel preparation, staging, verification, commit, retained-driver, uninstall, and schema-1 through schema-5 recovery behavior compatible.
@@ -21,7 +23,7 @@
 - Firmware basenames are derived independently by controller and target. Callers never supply a firmware pathname.
 - All boot-file reads and mutations require link-first type checks, exact ownership/mode checks, snapshots, digest revalidation, same-filesystem atomic publication, filesystem sync, and post-publication verification.
 - Keep the hardware watchdog enabled. Never load, probe, or bind the candidate module while the accepted kernel is running.
-- Stop Plane Radar during boot-config promotion, conventional-pair normalization, and recovery mutation. Do not disable or mask its unit.
+- Stop `CONTROL_SERVICE` during boot-config promotion, conventional-pair normalization, and recovery mutation. Do not disable or mask its unit.
 - Do not push, tag, release, publish, or cut a public package as part of this plan.
 - Do not access or reboot the physical target until Task 10. All earlier tasks use local tests and fixture roots.
 
@@ -122,14 +124,14 @@ but commit codex/brightness-night-mode-driver -m 'feat: retain inactive kernel b
 
 ---
 
-### Task 2: Separate running and candidate kernel identity in Plane Radar
+### Task 2: Separate running and candidate kernel identity in the product controller
 
 **Product files:**
-- Modify: `crates/planeradarctl/src/target.rs`
-- Modify: `crates/planeradarctl/src/preflight.rs`
-- Modify: `crates/planeradarctl/src/driver.rs`
-- Modify: `crates/planeradarctl/tests/preflight.rs`
-- Modify: `crates/planeradarctl/tests/driver.rs`
+- Modify: `CONTROL_CRATE/src/target.rs`
+- Modify: `CONTROL_CRATE/src/preflight.rs`
+- Modify: `CONTROL_CRATE/src/driver.rs`
+- Modify: `CONTROL_CRATE/tests/preflight.rs`
+- Modify: `CONTROL_CRATE/tests/driver.rs`
 - Modify: `tests/ctl_end_to_end.rs`
 
 **Interfaces:**
@@ -140,24 +142,24 @@ but commit codex/brightness-night-mode-driver -m 'feat: retain inactive kernel b
 
 - [ ] **Step 1: Add target-identity binding RED tests**
 
-In `crates/planeradarctl/tests/driver.rs`, prove equal target identities produce the same lowercase SHA-256, every field changes the digest, and formatted errors/debug output contain no host key, serial, target, or digest input.
+In `CONTROL_CRATE/tests/driver.rs`, prove equal target identities produce the same lowercase SHA-256, every field changes the digest, and formatted errors/debug output contain no host key, serial, target, or digest input.
 
 Run:
 
 ```bash
-cargo test --locked -p planeradarctl --test driver target_identity
+cargo test --locked --workspace --test driver target_identity
 ```
 
 Expected RED: `TargetIdentity` has no driver binding method.
 
 - [ ] **Step 2: Add candidate-fact RED tests**
 
-Extend the canonical JSON fixture in `crates/planeradarctl/tests/preflight.rs` and `tests/ctl_end_to_end.rs`. Cover running fallback, one different package-selected candidate, mismatched kernel/initramfs selectors, candidate vermagic mismatch, duplicate candidate count, unsafe release text, and a post-reboot fact set where running and candidate are both the promoted release.
+Extend the canonical JSON fixture in `CONTROL_CRATE/tests/preflight.rs` and `tests/ctl_end_to_end.rs`. Cover running fallback, one different package-selected candidate, mismatched kernel/initramfs selectors, candidate vermagic mismatch, duplicate candidate count, unsafe release text, and a post-reboot fact set where running and candidate are both the promoted release.
 
 Run:
 
 ```bash
-cargo test --locked -p planeradarctl --test preflight
+cargo test --locked --workspace --test preflight
 ```
 
 Expected RED: serde rejects the new fields and `TARGET_FACTS_SCRIPT` does not emit them.
@@ -193,8 +195,8 @@ Update driver tests to require candidate release on export/build/stage argv, run
 Run:
 
 ```bash
-cargo test --locked -p planeradarctl --test driver
-cargo test --locked -p planeradarctl --test preflight
+cargo test --locked --workspace --test driver
+cargo test --locked --workspace --test preflight
 cargo test --locked --test ctl_end_to_end
 ```
 
@@ -218,8 +220,8 @@ but commit codex/brightness-night-mode -m 'refactor: separate candidate kernel i
 - Modify: `tests/boot-scripts.sh`
 
 **Product files:**
-- Modify: `crates/planeradarctl/src/driver.rs`
-- Modify: `crates/planeradarctl/tests/driver.rs`
+- Modify: `CONTROL_CRATE/src/driver.rs`
+- Modify: `CONTROL_CRATE/tests/driver.rs`
 
 **Interfaces:**
 - `accepted-lifecycle.sh prepare-new` receives `--kernel-target DIR` and `--target-identity-sha256 SHA256`, validates the exact candidate schema-2 target manifest locally, and passes only fixed typed provenance values to `lifecycle-remote.sh`.
@@ -234,7 +236,7 @@ Run:
 
 ```bash
 mise run test-build-contract
-cargo test --locked -p planeradarctl --test driver accepted_driver_protocol
+cargo test --locked --workspace --test driver accepted_driver_protocol
 ```
 
 Expected RED: the shell controllers and Rust adapter do not expose the new typed arguments.
@@ -269,7 +271,7 @@ Run:
 ```bash
 mise run test-build-contract
 mise run test-boot-scripts
-cargo test --locked -p planeradarctl --test driver
+cargo test --locked --workspace --test driver
 ```
 
 - [ ] **Step 6: Commit both repository slices**
@@ -531,7 +533,7 @@ Extend `restore_prior_from_accepted_transition` and `recover_accepted`:
 - `normalized_verified` or `finalizing`: restore prior until candidate receipt is durably published.
 - `receipt_published`: complete candidate finalization; never resurrect the prior receipt.
 
-Recovery that changes normal selection must report reboot required through a fixed exit/result contract consumed by Plane Radar.
+Recovery that changes normal selection must report reboot required through a fixed exit/result contract consumed by the product controller.
 
 - [ ] **Step 4: Add exhaustive interruption replay**
 
@@ -560,14 +562,14 @@ but commit codex/brightness-night-mode-driver -m 'feat: recover inactive kernel 
 ### Task 8: Orchestrate two verified normal boots and expose receipt provenance
 
 **Product files:**
-- Modify: `crates/planeradarctl/src/driver.rs`
-- Modify: `crates/planeradarctl/src/main.rs`
-- Modify: `crates/planeradarctl/src/operations.rs`
-- Modify: `crates/planeradarctl/src/preflight.rs`
-- Modify: `crates/planeradarctl/tests/driver.rs`
-- Modify: `crates/planeradarctl/tests/lifecycle.rs`
-- Modify: `crates/planeradarctl/tests/operations.rs`
-- Modify: `crates/planeradarctl/tests/preflight.rs`
+- Modify: `CONTROL_CRATE/src/driver.rs`
+- Modify: `CONTROL_CRATE/src/main.rs`
+- Modify: `CONTROL_CRATE/src/operations.rs`
+- Modify: `CONTROL_CRATE/src/preflight.rs`
+- Modify: `CONTROL_CRATE/tests/driver.rs`
+- Modify: `CONTROL_CRATE/tests/lifecycle.rs`
+- Modify: `CONTROL_CRATE/tests/operations.rs`
+- Modify: `CONTROL_CRATE/tests/preflight.rs`
 - Modify: `tests/ctl_end_to_end.rs`
 
 **Interfaces:**
@@ -578,7 +580,7 @@ but commit codex/brightness-night-mode-driver -m 'feat: recover inactive kernel 
 
 - [ ] **Step 1: Add lifecycle ordering RED tests**
 
-In `crates/planeradarctl/tests/lifecycle.rs` and `operations.rs`, require this exact changed-driver sequence:
+In `CONTROL_CRATE/tests/lifecycle.rs` and `operations.rs`, require this exact changed-driver sequence:
 
 ```text
 stage application
@@ -607,7 +609,7 @@ Add the three new enum variants in forward order before `ApplicationActivated`. 
 
 - [ ] **Step 3: Implement the new backend methods**
 
-`verify_explicit_normal_driver` creates a fresh candidate tool, runs exact normal verification, then invokes `mark-explicit-normal-verified`. `normalize_driver` quiesces `planeradar.service`, proves no restart churn/process writer, invokes `normalize-inactive-kernel`, and leaves the unit enabled. `verify_normalized_driver` again creates a fresh tool, verifies conventional selection and candidate runtime, invokes `mark-normalized-verified`, and checks the service restarted normally after reboot. `restore_driver` applies the same quiescence gate before invoking phase-aware accepted recovery and keeps the unit enabled for the required recovery reboot.
+`verify_explicit_normal_driver` creates a fresh candidate tool, runs exact normal verification, then invokes `mark-explicit-normal-verified`. `normalize_driver` quiesces `CONTROL_SERVICE`, proves no restart churn/process writer, invokes `normalize-inactive-kernel`, and leaves the unit enabled. `verify_normalized_driver` again creates a fresh tool, verifies conventional selection and candidate runtime, invokes `mark-normalized-verified`, and checks the service restarted normally after reboot. `restore_driver` applies the same quiescence gate before invoking phase-aware accepted recovery and keeps the unit enabled for the required recovery reboot.
 
 - [ ] **Step 4: Eliminate stale post-reboot context**
 
@@ -615,7 +617,7 @@ After each successful `wait_for_reboot`, clear `driver_tool` and `protocol_tool`
 
 - [ ] **Step 5: Parse and report accepted-receipt schema 4**
 
-Update the fixed accepted-state probe in `crates/planeradarctl/src/operations.rs` to accept exact schema-3 and schema-4 key sets. For schema 4, verify conventional file names/digests plus active base DTB and VC4 overlay. Add optional boot provenance fields to internal doctor/status facts without changing driver version, source commit, or public manifest SHA semantics. Diagnostics remain redacted.
+Update the fixed accepted-state probe in `CONTROL_CRATE/src/operations.rs` to accept exact schema-3 and schema-4 key sets. For schema 4, verify conventional file names/digests plus active base DTB and VC4 overlay. Add optional boot provenance fields to internal doctor/status facts without changing driver version, source commit, or public manifest SHA semantics. Diagnostics remain redacted.
 
 - [ ] **Step 6: Exercise failed tryboot and phase-aware recovery end to end**
 
@@ -624,10 +626,10 @@ In `tests/ctl_end_to_end.rs`, model a failed candidate boot returning automatica
 Run:
 
 ```bash
-cargo test --locked -p planeradarctl --test driver
-cargo test --locked -p planeradarctl --test lifecycle
-cargo test --locked -p planeradarctl --test operations
-cargo test --locked -p planeradarctl --test preflight
+cargo test --locked --workspace --test driver
+cargo test --locked --workspace --test lifecycle
+cargo test --locked --workspace --test operations
+cargo test --locked --workspace --test preflight
 cargo test --locked --test ctl_end_to_end
 ```
 
@@ -668,7 +670,7 @@ git status --short
 
 Expected: every driver test passes; status contains only intentional Task 9 fixes before their commit.
 
-- [ ] **Step 3: Run the full Plane Radar repository gate**
+- [ ] **Step 3: Run the full product repository gate**
 
 In `/Users/shayne/code/RPi-Plane-Radar`:
 
@@ -716,7 +718,7 @@ For both repositories, capture `but status`, `git status --short`, branch tip, a
 
 - [ ] **Step 1: Reconfirm the accepted fallback before mutation**
 
-Using identity-bound transport and fresh probes, require accepted running kernel, exact accepted receipt/artifact/config/conventional pair, healthy KMS/touch/backlight, active Plane Radar with stable restart count, clean power evidence, working watchdog refresh, sufficient storage, and no lifecycle state or boot writer.
+Using identity-bound transport and fresh probes, require accepted running kernel, exact accepted receipt/artifact/config/conventional pair, healthy KMS/touch/backlight, active `CONTROL_SERVICE` with stable restart count, clean power evidence, working watchdog refresh, sufficient storage, and no lifecycle state or boot writer.
 
 - [ ] **Step 2: Export, build/check, prepare, and stage the inactive candidate**
 
@@ -728,13 +730,13 @@ Request one-shot tryboot, allow the target to return to the accepted normal kern
 
 - [ ] **Step 4: Reprepare and verify successful candidate tryboot**
 
-Stage again, request one-shot tryboot, and require fresh candidate release, module path/digest/vermagic, explicit tryboot selection, KMS/touch/backlight, active Plane Radar, stable restart count, clean watchdog/power/storage evidence, and no VC4/HDMI/udev bind storm.
+Stage again, request one-shot tryboot, and require fresh candidate release, module path/digest/vermagic, explicit tryboot selection, KMS/touch/backlight, active `CONTROL_SERVICE`, stable restart count, clean watchdog/power/storage evidence, and no VC4/HDMI/udev bind storm.
 
 - [ ] **Step 5: Promote, verify, normalize, and verify again**
 
 Publish explicit normal candidate config, normal reboot, and verify. Quiesce the service, normalize initramfs then kernel then config, normal reboot, and verify the conventional candidate pair. Publish schema-4 receipt and finalize. Confirm candidate-only firmware leaves and private companions are gone while the conventional pair remains exact.
 
-- [ ] **Step 6: Install and exercise the exact Plane Radar application candidate**
+- [ ] **Step 6: Install and exercise the exact product application candidate**
 
 Deploy the already-built reversible application candidate through its supported installer. Verify doctor/status/smoke provenance, brightness 5/30/100 behavior, scheduled night dimming, sunrise restoration, red-mode rendering, touch, KMS, service restart, and a full normal reboot. Restore the owner's settings and any temporary test state afterward.
 
