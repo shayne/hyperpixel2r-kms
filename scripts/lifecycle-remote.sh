@@ -290,11 +290,17 @@ assert_no_boot_writers() {
   done
   for pid in /proc/[0-9]*; do
     pid="${pid#/proc/}"
-    test "$pid" = "$$" || test "$pid" = "$PPID" || {
-      exe="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
-      argv="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+    # Never exempt a parent wholesale: a writer spawned during capture can be
+    # reparented there.  A benign controller parent simply fails the explicit
+    # classifier below, while a named writer must block publication.
+    test "$pid" = "$$" || {
+      # The lifecycle controller is an unprivileged SSH user.  Writer
+      # processes are normally root-owned, so inspect their proc identity at
+      # the same privilege boundary used for the lock probes.
+      exe="$(sudo readlink "/proc/$pid/exe" 2>/dev/null || true)"
+      argv="$(sudo sh -c 'tr "\\0" " " < "$1"' sh "/proc/$pid/cmdline" 2>/dev/null || true)"
       case "${exe##*/}:$argv" in
-        apt:|apt-get:*|dpkg:*|unattended-upgrade:*|update-initramfs:*|mkinitramfs:*|kernel-install:*|dkms:*|depmod:*|flash-kernel:*|rpi-eeprom-update:*|lifecycle-remote.sh:*|accepted-lifecycle.sh:*|stage-tryboot.sh:*|*boot-selector*:*|*raspi-config*:* ) return 1 ;;
+        apt:*|apt-get:*|dpkg:*|unattended-upgrade:*|update-initramfs:*|mkinitramfs:*|kernel-install:*|dkms:*|depmod:*|flash-kernel:*|rpi-eeprom-update:*|lifecycle-remote.sh:*|accepted-lifecycle.sh:*|stage-tryboot.sh:*|*boot-selector*:*|*raspi-config*:* ) return 1 ;;
       esac
     }
   done
