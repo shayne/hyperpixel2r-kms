@@ -3847,13 +3847,39 @@ authorize_inactive_stage() {
     test "$(sha "$normal_config")" = "$(accepted_value normal_config_sha256)" ||
     die 'schema-6 accepted authority does not bind the current accepted config'
   accepted_schema="$(accepted_value schema_version)"
-  test "$accepted_schema" = 3 || test "$accepted_schema" = 4 ||
-    die 'schema-6 accepted authority requires current backlight identity'
-  test "$(accepted_transition_value prior_backlight_rule_existed)" = \
-    "$(accepted_value prior_backlight_rule_existed)" &&
-    test "$(accepted_transition_value prior_backlight_rule_sha256)" = \
-      "$(accepted_value prior_backlight_rule_sha256)" ||
-    die 'schema-6 accepted authority does not bind current accepted backlight identity'
+  case "$accepted_schema" in
+    3|4)
+      test "$(accepted_transition_value prior_backlight_rule_existed)" = \
+        "$(accepted_value prior_backlight_rule_existed)" &&
+        test "$(accepted_transition_value prior_backlight_rule_sha256)" = \
+          "$(accepted_value prior_backlight_rule_sha256)" ||
+        die 'schema-6 accepted authority does not bind current accepted backlight identity'
+      ;;
+    1|2)
+      case "$(accepted_transition_value prior_backlight_rule_existed)" in
+        true)
+          [[ "$(accepted_transition_value prior_backlight_rule_sha256)" =~ ^[0-9a-f]{64}$ ]] &&
+            assert_owned_regular "$accepted_prior_backlight_rule" 600 &&
+            test "$(sha "$accepted_prior_backlight_rule")" = \
+              "$(accepted_transition_value prior_backlight_rule_sha256)" &&
+            assert_owned_regular "$backlight_rule_path" 644 &&
+            test "$(sha "$backlight_rule_path")" = \
+              "$(accepted_transition_value prior_backlight_rule_sha256)" &&
+            sudo cmp -s -- "$accepted_prior_backlight_rule" "$backlight_rule_path" ||
+            die 'schema-6 accepted authority does not bind current legacy backlight proof'
+          ;;
+        false)
+          test "$(accepted_transition_value prior_backlight_rule_sha256)" = none &&
+            test ! -L "$accepted_prior_backlight_rule" &&
+            test ! -e "$accepted_prior_backlight_rule" &&
+            test ! -L "$backlight_rule_path" && test ! -e "$backlight_rule_path" ||
+            die 'schema-6 accepted authority does not bind current legacy backlight absence'
+          ;;
+        *) die 'schema-6 accepted authority has an unsafe legacy backlight proof' ;;
+      esac
+      ;;
+    *) die 'schema-6 accepted authority requires current backlight identity' ;;
+  esac
   prior_status="$(validate_dkms_status "$(accepted_value driver_version)")" ||
     die 'schema-6 accepted authority cannot validate current accepted DKMS state'
   test "$(accepted_transition_value prior_dkms_status)" = "$prior_status" ||

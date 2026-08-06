@@ -3158,6 +3158,9 @@ exercise_inactive_kernel_prepare() {
   local prior_kernel_before="$fixture/inactive-prior-kernel-before"
   local prior_initramfs_before="$fixture/inactive-prior-initramfs-before"
   local revision12 release_tag kernel_name initramfs_name companion prepared_in_hostile=false accepted_pre_stage_sha
+  local legacy_artifact legacy_backlight_initial legacy_backlight_drift legacy_stage_output
+  local legacy_live_before legacy_proof_before legacy_transition_before
+  local legacy_stage_completed=false
   local candidate_stage_repo=''
 
   new_target
@@ -3177,6 +3180,20 @@ exercise_inactive_kernel_prepare() {
   fi
   install_live_hardware
   run_controller commit-boot.sh >/dev/null
+  if test "${HP2R_FIXTURE_LEGACY_ACCEPTED:-}" = 1; then
+    legacy_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
+    downgrade_artifact_to_schema_one "$legacy_artifact"
+    legacy_backlight_initial="${HP2R_FIXTURE_LEGACY_BACKLIGHT_INITIAL:-present}"
+    case "$legacy_backlight_initial" in
+      present)
+        install -o root -g root -m 0644 \
+          "$repo_root/dist/artifacts/$release/$backlight_rule_file" \
+          "$backlight_rule_path"
+        ;;
+      absent) assert_absent "$backlight_rule_path" ;;
+      *) fail "unknown legacy backlight initial state: $legacy_backlight_initial" ;;
+    esac
+  fi
   if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-base-vc4; then
     # Production break: the inactive classifier must not count Raspberry Pi's
     # base VC4 KMS enablement as a second competing display selection.
@@ -3196,6 +3213,10 @@ exercise_inactive_kernel_prepare() {
     mv "$platform_config" "$root/boot/firmware/config.txt"
   fi
   run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" >/dev/null
+  if test "${HP2R_FIXTURE_LEGACY_ACCEPTED:-}" = 1; then
+    grep -Fxq 'schema_version=2' "$root/var/lib/hyperpixel2r-kms/accepted-state" ||
+      fail 'inactive legacy accepted fixture is not schema 2'
+  fi
   cp "$root/boot/firmware/config.txt" "$normal_before"
   cp "$root/boot/firmware/config.txt" "$conventional_before"
 
@@ -3669,6 +3690,99 @@ exercise_inactive_kernel_prepare() {
   # stage branch becomes cross-kernel aware.
   : > "$log"
   accepted_pre_stage_sha="$(sha256sum "$state_dir/accepted-transition" | awk '{ print $1 }')"
+  if test "${HP2R_FIXTURE_LEGACY_ACCEPTED:-}" = 1; then
+    legacy_backlight_drift="${HP2R_FIXTURE_LEGACY_BACKLIGHT_DRIFT:-none}"
+    case "$legacy_backlight_initial" in
+      present)
+        grep -Fxq 'prior_backlight_rule_existed=true' "$state_dir/accepted-transition" ||
+          fail 'inactive legacy prepare did not record ambient backlight presence'
+        assert_file "$state_dir/accepted-prior-backlight-rule"
+        test "$(stat -c '%U:%G:%a' "$state_dir/accepted-prior-backlight-rule")" = root:root:600 ||
+          fail 'inactive legacy prepared backlight proof metadata drifted'
+        cmp -s "$backlight_rule_path" "$state_dir/accepted-prior-backlight-rule" ||
+          fail 'inactive legacy prepared backlight proof differs from live rule'
+        ;;
+      absent)
+        grep -Fxq 'prior_backlight_rule_existed=false' "$state_dir/accepted-transition" ||
+          fail 'inactive legacy prepare did not record ambient backlight absence'
+        grep -Fxq 'prior_backlight_rule_sha256=none' "$state_dir/accepted-transition" ||
+          fail 'inactive legacy prepare did not bind ambient backlight absence'
+        assert_absent "$state_dir/accepted-prior-backlight-rule"
+        assert_absent "$backlight_rule_path"
+        ;;
+    esac
+    case "$legacy_backlight_drift" in
+      none) ;;
+      appearance)
+        test "$legacy_backlight_initial" = absent || fail 'appearance drift requires absent setup'
+        install -o root -g root -m 0644 \
+          "$repo_root/dist/artifacts/$release/$backlight_rule_file" \
+          "$backlight_rule_path"
+        ;;
+      removal)
+        test "$legacy_backlight_initial" = present || fail 'removal drift requires present setup'
+        rm -- "$backlight_rule_path"
+        ;;
+      symlink)
+        rm -f -- "$backlight_rule_path"
+        ln -s /etc/passwd "$backlight_rule_path"
+        ;;
+      hash) printf 'legacy live rule drift\n' >> "$backlight_rule_path" ;;
+      mode) chmod 0600 "$backlight_rule_path" ;;
+      proof) printf 'legacy proof drift\n' >> "$state_dir/accepted-prior-backlight-rule" ;;
+      *) fail "unknown legacy backlight drift: $legacy_backlight_drift" ;;
+    esac
+    legacy_live_before="$fixture/legacy-live-before-stage"
+    legacy_proof_before="$fixture/legacy-proof-before-stage"
+    legacy_transition_before="$fixture/legacy-transition-before-stage"
+    capture_inactive_path "$backlight_rule_path" "$legacy_live_before"
+    capture_inactive_path "$state_dir/accepted-prior-backlight-rule" "$legacy_proof_before"
+    cp "$state_dir/accepted-transition" "$legacy_transition_before"
+    legacy_stage_output="$fixture/legacy-inactive-stage.out"
+    if test "$legacy_backlight_drift" != none; then
+      if run_inactive_stage >"$legacy_stage_output" 2>&1; then
+        fail "inactive legacy stage accepted backlight drift: $legacy_backlight_drift"
+      fi
+      cmp -s "$legacy_transition_before" "$state_dir/accepted-transition" ||
+        fail "rejected legacy $legacy_backlight_drift drift changed accepted authority"
+      grep -Fxq 'phase=prepared' "$state_dir/accepted-transition" ||
+        fail "rejected legacy $legacy_backlight_drift drift advanced accepted phase"
+      assert_inactive_path_preserved "$backlight_rule_path" "$legacy_live_before" \
+        "legacy $legacy_backlight_drift live backlight rule"
+      assert_inactive_path_preserved "$state_dir/accepted-prior-backlight-rule" \
+        "$legacy_proof_before" "legacy $legacy_backlight_drift backlight proof"
+      cmp -s "$normal_before" "$root/boot/firmware/config.txt" ||
+        fail "rejected legacy $legacy_backlight_drift drift changed normal config"
+      assert_absent "$state_dir/tryboot-state"
+      assert_absent "$root/boot/firmware/tryboot.txt"
+      assert_absent "$root/boot/firmware/$kernel_name"
+      assert_absent "$root/boot/firmware/$initramfs_name"
+      assert_absent "$root/lib/modules/$candidate_release/extra/hyperpixel2r_kms.ko"
+      assert_no_private_workspaces
+      exit 0
+    fi
+    if ! run_inactive_stage >"$legacy_stage_output" 2>&1; then
+      cmp -s "$legacy_transition_before" "$state_dir/accepted-transition" ||
+        fail 'rejected exact legacy backlight proof changed accepted authority'
+      grep -Fxq 'phase=prepared' "$state_dir/accepted-transition" ||
+        fail 'rejected exact legacy backlight proof advanced accepted phase'
+      assert_inactive_path_preserved "$backlight_rule_path" "$legacy_live_before" \
+        'exact legacy live backlight rule'
+      assert_inactive_path_preserved "$state_dir/accepted-prior-backlight-rule" \
+        "$legacy_proof_before" 'exact legacy backlight proof'
+      cmp -s "$normal_before" "$root/boot/firmware/config.txt" ||
+        fail 'rejected exact legacy backlight proof changed normal config'
+      assert_absent "$state_dir/tryboot-state"
+      assert_absent "$root/boot/firmware/tryboot.txt"
+      assert_absent "$root/boot/firmware/$kernel_name"
+      assert_absent "$root/boot/firmware/$initramfs_name"
+      assert_absent "$root/lib/modules/$candidate_release/extra/hyperpixel2r_kms.ko"
+      assert_no_private_workspaces
+      cat "$legacy_stage_output" >&2
+      fail "inactive stage rejected exact schema-2 accepted backlight proof: $legacy_backlight_initial"
+    fi
+    legacy_stage_completed=true
+  fi
   if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-state-digest; then
     if run_inactive_stage >/dev/null 2>&1; then
       fail 'inactive stage accepted an authority changed after controller authorization'
@@ -3789,7 +3903,7 @@ exercise_inactive_kernel_prepare() {
     assert_absent "$root/boot/firmware/$initramfs_name"
     exit 0
   fi
-  run_inactive_stage
+  if ! "$legacy_stage_completed"; then run_inactive_stage; fi
   grep -Fxq 'schema_version=5' "$state_dir/tryboot-state" ||
     fail 'inactive stage did not publish schema-5 generic state'
   grep -Fxq 'boot_transition=inactive-kernel' "$state_dir/tryboot-state" ||
@@ -5536,6 +5650,25 @@ exercise_legacy_accepted_upgrade() {
   assert_absent "$root/var/lib/hyperpixel2r-kms/accepted-prior-backlight-rule"
 }
 
+exercise_legacy_inactive_backlight_drift_matrix() {
+  local specification initial drift count=0
+
+  for specification in \
+    absent:appearance present:removal present:symlink present:hash present:mode present:proof
+  do
+    initial="${specification%%:*}"
+    drift="${specification#*:}"
+    HP2R_FIXTURE_CASE=inactive-kernel-legacy-backlight-one \
+      HP2R_FIXTURE_LEGACY_ACCEPTED=1 \
+      HP2R_FIXTURE_LEGACY_BACKLIGHT_INITIAL="$initial" \
+      HP2R_FIXTURE_LEGACY_BACKLIGHT_DRIFT="$drift" \
+      bash "${BASH_SOURCE[0]}" >/dev/null ||
+      fail "inactive legacy backlight drift fixture failed: $drift"
+    count=$((count + 1))
+  done
+  test "$count" = 6 || fail 'inactive legacy backlight drift inventory drifted'
+}
+
 exercise_rollback_transaction_retired_replay() {
   local failure_status
 
@@ -5564,6 +5697,26 @@ exercise_rollback_transaction_retired_replay() {
 assert_inactive_phase_guards_fail_closed
 
 case "${HP2R_FIXTURE_CASE:-}" in
+  inactive-kernel-legacy-accepted-present)
+    HP2R_FIXTURE_LEGACY_ACCEPTED=1 \
+      HP2R_FIXTURE_LEGACY_BACKLIGHT_INITIAL=present \
+      exercise_inactive_kernel_prepare
+    exit 0
+    ;;
+  inactive-kernel-legacy-accepted-absent)
+    HP2R_FIXTURE_LEGACY_ACCEPTED=1 \
+      HP2R_FIXTURE_LEGACY_BACKLIGHT_INITIAL=absent \
+      exercise_inactive_kernel_prepare
+    exit 0
+    ;;
+  inactive-kernel-legacy-backlight-drift)
+    exercise_legacy_inactive_backlight_drift_matrix
+    exit 0
+    ;;
+  inactive-kernel-legacy-backlight-one)
+    exercise_inactive_kernel_prepare
+    exit 0
+    ;;
   legacy-accepted-upgrade)
     exercise_legacy_accepted_upgrade
     exit 0
