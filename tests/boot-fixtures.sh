@@ -17,6 +17,7 @@ root="$fixture/root"
 backlight_rule_path="$root/etc/udev/rules.d/$backlight_rule_file"
 bin="$fixture/bin"
 bin_no_dkms="$fixture/bin-no-dkms"
+sbin="$fixture/sbin"
 log="$fixture/commands.log"
 
 cleanup() {
@@ -124,14 +125,15 @@ assert_incoming_stage_cleaned() {
 }
 
 new_target() {
-  rm -rf -- "$root" "$bin" "$bin_no_dkms" "$log"
+  rm -rf -- "$root" "$bin" "$bin_no_dkms" "$sbin" "$log"
   mkdir -p \
     "$root/boot/firmware/overlays" \
     "$root/lib/modules/$release" \
     "$root/etc/udev/rules.d" \
     "$root/tmp" \
     "$root/var/lib" \
-    "$bin"
+    "$bin" \
+    "$sbin"
   chmod 1777 "$root/tmp"
   : > "$log"
   chmod 0666 "$log"
@@ -455,8 +457,12 @@ if test "${1-}" = bash && test "${2-}" = -s; then
     set -- "${filtered[@]}"
   fi
   run_remote_stdin_action() {
+    remote_path="$PATH"
+    if test "${HP2R_FIXTURE_REMOTE_RESTRICTED_PATH:-}" = 1; then
+      remote_path="$HP2R_FIXTURE_REMOTE_BIN"
+    fi
     setpriv --reuid=65534 --regid=65534 --clear-groups \
-      env HP2R_INSTALL_ROOT="$HP2R_FIXTURE_ROOT" PATH="$PATH" \
+      env HP2R_INSTALL_ROOT="$HP2R_FIXTURE_ROOT" PATH="$remote_path" \
       HP2R_FIXTURE_REMOTE_RUNNING_RELEASE="${HP2R_FIXTURE_REMOTE_RUNNING_RELEASE:-}" \
       HP2R_FIXTURE_INTERRUPT_AFTER="${HP2R_FIXTURE_INTERRUPT_AFTER:-}" \
       HP2R_FIXTURE_PRESERVE_MUTATIONS="${HP2R_FIXTURE_PRESERVE_MUTATIONS:-}" \
@@ -471,7 +477,15 @@ if test "${1-}" = bash && test "${2-}" = -s; then
       schema5_staged_authority_allow_prepared="${schema5_staged_authority_allow_prepared:-}" \
       bash -c 'id -u > "$HP2R_FIXTURE_ROOT/tmp/remote-uid"; exec bash "$@"' bash "$@"
   }
-  if test "$remote_action" = authorize-inactive-stage &&
+  if test "${HP2R_FIXTURE_REMOTE_RESTRICTED_PATH:-}" = 1; then
+    restricted_remote="$HP2R_FIXTURE_ROOT/tmp/restricted-remote.sh"
+    sed "s#/usr/sbin:/sbin#$HP2R_FIXTURE_REMOTE_SBIN#g" > "$restricted_remote"
+    if run_remote_stdin_action "$@" < "$restricted_remote"; then
+      remote_status=0
+    else
+      remote_status=$?
+    fi
+  elif test "$remote_action" = authorize-inactive-stage &&
     test -n "${HP2R_FIXTURE_AUTHORIZATION_TUPLE_SHAPE:-}"; then
     if remote_output="$(run_remote_stdin_action "$@")"; then
       remote_status=0
@@ -1723,8 +1737,36 @@ run_verify() {
     HP2R_FIXTURE_RELEASE="$release" \
     HP2R_FIXTURE_LOG="$log" \
     HP2R_FIXTURE_REPO_ROOT="$repo_root" \
+    HP2R_FIXTURE_REMOTE_BIN="$bin" \
+    HP2R_FIXTURE_REMOTE_SBIN="$sbin" \
     HP2R_TARGET=pi@fixture \
     "$repo_root/scripts/verify-boot.sh" --expect-tryboot --json "$@"
+}
+
+exercise_verify_restricted_path() {
+  local command_name json resolved
+
+  new_target
+  run_stage >/dev/null
+  install_live_hardware
+  mv "$bin/modinfo" "$sbin/modinfo"
+  for command_name in bash id od tr awk grep readlink stat sha256sum dirname sed wc; do
+    test ! -e "$bin/$command_name" && test ! -L "$bin/$command_name" || continue
+    resolved="$(command -v "$command_name")"
+    test "${resolved#/}" != "$resolved" && test -x "$resolved" ||
+      fail "restricted verifier fixture is missing $command_name"
+    ln -s "$resolved" "$bin/$command_name"
+  done
+  export HP2R_FIXTURE_REMOTE_RESTRICTED_PATH=1
+  json="$(run_verify \
+    --expect-driver-version 0.1.1 \
+    --expect-overlay-file "$overlay_file" \
+    --expect-module-file hyperpixel2r_kms.ko \
+    --expect-module-sha256 "$(sha256sum "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko" | awk '{ print $1 }')")"
+  unset HP2R_FIXTURE_REMOTE_RESTRICTED_PATH
+  mv "$sbin/modinfo" "$bin/modinfo"
+  test "$json" = '{"schema_version":1,"driver_version":"0.1.1","kernel_release":"6.18.34+rpt-rpi-v8","module":"hyperpixel2r_kms","drm_mode":"480x480","touch":true,"sdl_driver":"KMSDRM","renderer":"opengles2","accepted":true}' ||
+    fail 'verify failed to resolve a target sbin-only modinfo'
 }
 
 assert_verify_rejects_binding() {
@@ -5898,6 +5940,10 @@ exercise_rollback_transaction_retired_replay() {
 assert_inactive_phase_guards_fail_closed
 
 case "${HP2R_FIXTURE_CASE:-}" in
+  verify-restricted-path)
+    exercise_verify_restricted_path
+    exit 0
+    ;;
   inactive-kernel-legacy-accepted-present)
     HP2R_FIXTURE_LEGACY_ACCEPTED=1 \
       HP2R_FIXTURE_LEGACY_BACKLIGHT_INITIAL=present \

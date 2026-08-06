@@ -91,6 +91,7 @@ remote_retired_tryboot_sha256="${retired_tryboot_sha256:-none}"
 
 ssh "${ssh_options[@]}" "$target" bash -s -- "$expected_boot" "$remote_expected_kernel_release" "$json" "$remote_expected_driver_version" "$remote_expected_overlay_file" "$allow_retired_tryboot_config" "$remote_expected_module_file" "$remote_expected_module_sha256" "$remote_retired_tryboot_mode" "$remote_retired_tryboot_sha256" <<'REMOTE'
 set -euo pipefail
+export PATH="${PATH:+$PATH:}/usr/sbin:/sbin"
 expected_boot="$1"
 release="$2"
 json="$3"
