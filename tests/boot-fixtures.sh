@@ -3264,17 +3264,17 @@ exercise_inactive_kernel_prepare() {
         --backlight-rule-sha256 "$(awk -F '\t' '$1 == "backlight_rule_sha256" { print $2 }' "$artifact_manifest")"
   }
   run_inactive_prepare() {
-    if test -n "${HP2R_FIXTURE_ANCESTOR_ACTION_ARGV:-}"; then
-      HP2R_FIXTURE_ANCESTOR_DRIVER_VERSION="$candidate_driver_version" \
-        HP2R_FIXTURE_ANCESTOR_SOURCE_REVISION="$source_revision" \
-        HP2R_FIXTURE_ANCESTOR_KERNEL_RELEASE="$candidate_release" \
-        HP2R_FIXTURE_ANCESTOR_KERNEL_TARGET="$candidate_parent" \
-        HP2R_FIXTURE_ANCESTOR_TARGET_IDENTITY=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
-        HP2R_FIXTURE_ANCESTOR_MANIFEST_SHA="$(sha256sum "$artifact_manifest" | awk '{ print $1 }')" \
-        HP2R_FIXTURE_ANCESTOR_MODULE_SHA="$(awk -F '\t' '$1 == "module_sha256" { print $2 }' "$artifact_manifest")" \
-        HP2R_FIXTURE_ANCESTOR_OVERLAY_FILE="$overlay_file" \
-        HP2R_FIXTURE_ANCESTOR_OVERLAY_SHA="$(awk -F '\t' '$1 == "overlay_sha256" { print $2 }' "$artifact_manifest")" \
-        HP2R_FIXTURE_ANCESTOR_BACKLIGHT_RULE_SHA="$(awk -F '\t' '$1 == "backlight_rule_sha256" { print $2 }' "$artifact_manifest")" \
+    if test "${HP2R_FIXTURE_OVERSIZED_TRANSPORT_ANCESTOR:-}" = 1; then
+      HP2R_FIXTURE_TRANSPORT_DRIVER_VERSION="$candidate_driver_version" \
+        HP2R_FIXTURE_TRANSPORT_SOURCE_REVISION="$source_revision" \
+        HP2R_FIXTURE_TRANSPORT_KERNEL_RELEASE="$candidate_release" \
+        HP2R_FIXTURE_TRANSPORT_KERNEL_TARGET="$candidate_parent" \
+        HP2R_FIXTURE_TRANSPORT_TARGET_IDENTITY=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+        HP2R_FIXTURE_TRANSPORT_MANIFEST_SHA="$(sha256sum "$artifact_manifest" | awk '{ print $1 }')" \
+        HP2R_FIXTURE_TRANSPORT_MODULE_SHA="$(awk -F '\t' '$1 == "module_sha256" { print $2 }' "$artifact_manifest")" \
+        HP2R_FIXTURE_TRANSPORT_OVERLAY_FILE="$overlay_file" \
+        HP2R_FIXTURE_TRANSPORT_OVERLAY_SHA="$(awk -F '\t' '$1 == "overlay_sha256" { print $2 }' "$artifact_manifest")" \
+        HP2R_FIXTURE_TRANSPORT_BACKLIGHT_RULE_SHA="$(awk -F '\t' '$1 == "backlight_rule_sha256" { print $2 }' "$artifact_manifest")" \
         PATH="$bin:$PATH" \
         HP2R_FIXTURE_ROOT="$root" \
         HP2R_FIXTURE_RELEASE="$release" \
@@ -3282,8 +3282,7 @@ exercise_inactive_kernel_prepare() {
         HP2R_FIXTURE_REPO_ROOT="$repo_root" \
         HP2R_FIXTURE_ACCEPTED_CONTROLLER=1 \
         HP2R_TARGET=pi@fixture \
-        bash "$repo_root/tests/accepted-lifecycle.sh" \
-        ${HP2R_FIXTURE_ANCESTOR_ACTION_ARGV}
+        bash "$repo_root/tests/transport-ancestor.sh" "$(printf z%.0s {1..5000})"
       return
     fi
     run_inactive_prepare_child
@@ -3298,26 +3297,16 @@ exercise_inactive_kernel_prepare() {
       --kernel-release "$candidate_release" \
       --target-identity-sha256 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   }
-  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-accepted-ancestor-one; then
-    local expected="${HP2R_FIXTURE_ANCESTOR_EXPECT:-}" before
-    test -n "$expected" || fail 'missing accepted ancestor expectation'
-    before="$fixture/accepted-ancestor-config-before"
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-transport-ancestor; then
+    local before="$fixture/transport-ancestor-config-before"
     cp "$root/boot/firmware/config.txt" "$before"
-    if run_inactive_prepare >/dev/null 2>&1; then
-      status=0
-    else
-      status=$?
-    fi
-    if test "$status" = 0; then
-      test "$expected" = pass || fail 'writer guard accepted malformed controller ancestor'
-      assert_file "$state_dir/accepted-transition"
-    else
-      test "$expected" = reject ||
-        fail "writer guard rejected allowed controller ancestor: $status"
-      assert_absent "$state_dir/accepted-transition"
+    if ! HP2R_FIXTURE_OVERSIZED_TRANSPORT_ANCESTOR=1 run_inactive_prepare >/dev/null 2>&1; then
       cmp -s "$before" "$root/boot/firmware/config.txt" ||
-        fail 'writer guard mutation escaped a rejected controller ancestor'
+        fail 'oversized transport ancestor rejection changed normal config'
+      assert_absent "$state_dir/accepted-transition"
+      fail 'writer guard treats the current transport ancestry as a competing process'
     fi
+    assert_file "$state_dir/accepted-transition"
     assert_no_private_workspaces
     exit 0
   fi
@@ -5382,29 +5371,6 @@ exercise_inactive_kernel_normalization_phase_hostiles() {
   test "$count" = 9 || fail 'normalization phase hostile inventory drifted'
 }
 
-exercise_accepted_controller_ancestor_argv() {
-  local vector action expected count=0
-
-  while IFS=$'\t' read -r vector action expected; do
-    test -n "$vector" || continue
-    if HP2R_FIXTURE_CASE=inactive-kernel-accepted-ancestor-one \
-      HP2R_FIXTURE_ANCESTOR_ACTION_ARGV="$action" \
-      HP2R_FIXTURE_ANCESTOR_EXPECT="$expected" \
-      bash "${BASH_SOURCE[0]}" >/dev/null; then
-      count=$((count + 1))
-    else
-      fail "accepted controller ancestor argv fixture failed: $vector"
-    fi
-  done <<'VECTORS'
-allowed	--action prepare-new	pass
-unsupported	--action unsupported	reject
-duplicate	--action prepare-new --action prepare-new	reject
-conflicting	--action prepare-new --action unsupported	reject
-missing-operand	--action	reject
-VECTORS
-  test "$count" = 5 || fail 'accepted controller ancestor argv inventory drifted'
-}
-
 assert_inactive_phase_guards_fail_closed() {
   local function_name body count=0
 
@@ -5608,7 +5574,6 @@ case "${HP2R_FIXTURE_CASE:-}" in
     ;;
   accepted-action-argv)
     exercise_accepted_action_argv_parser
-    exercise_accepted_controller_ancestor_argv
     exit 0
     ;;
   inactive-kernel-explicit-prephase-crash)
@@ -5736,7 +5701,7 @@ case "${HP2R_FIXTURE_CASE:-}" in
     exercise_inactive_kernel_prepare
     exit 0
     ;;
-  inactive-kernel-phase-authority-drift|inactive-kernel-final-module-drift|inactive-kernel-final-artifact-drift|inactive-kernel-final-dkms-drift|inactive-kernel-setter-snapshot|inactive-kernel-stale-authority|inactive-kernel-hostile-env|inactive-kernel-commit-rejected|inactive-kernel-explicit-promotion|inactive-kernel-explicit-normal-verified|inactive-kernel-explicit-normal-unhealthy|inactive-kernel-explicit-normal-conventional-drift|inactive-kernel-explicit-normal-vermagic-prefix|inactive-kernel-explicit-normal-module-resolution-drift|inactive-kernel-normalized-module-resolution-drift|inactive-kernel-normalization|inactive-kernel-finalization|inactive-kernel-finalization-interruption-one|inactive-kernel-recovery-normalized|inactive-kernel-recovery-phase-one|inactive-kernel-uninstall-orphan|inactive-kernel-normalization-interruption-one|inactive-kernel-normalization-race-one|inactive-kernel-normalization-post-atomic|inactive-kernel-verification-phase-atomic|inactive-kernel-verification-phase-prepared|inactive-kernel-normalized-unhealthy|inactive-kernel-normalization-phase-hostile-one|inactive-kernel-explicit-interruption-one|inactive-kernel-accepted-ancestor-one)
+  inactive-kernel-phase-authority-drift|inactive-kernel-final-module-drift|inactive-kernel-final-artifact-drift|inactive-kernel-final-dkms-drift|inactive-kernel-setter-snapshot|inactive-kernel-stale-authority|inactive-kernel-hostile-env|inactive-kernel-commit-rejected|inactive-kernel-explicit-promotion|inactive-kernel-explicit-normal-verified|inactive-kernel-explicit-normal-unhealthy|inactive-kernel-explicit-normal-conventional-drift|inactive-kernel-explicit-normal-vermagic-prefix|inactive-kernel-explicit-normal-module-resolution-drift|inactive-kernel-normalized-module-resolution-drift|inactive-kernel-normalization|inactive-kernel-finalization|inactive-kernel-finalization-interruption-one|inactive-kernel-recovery-normalized|inactive-kernel-recovery-phase-one|inactive-kernel-uninstall-orphan|inactive-kernel-normalization-interruption-one|inactive-kernel-normalization-race-one|inactive-kernel-normalization-post-atomic|inactive-kernel-verification-phase-atomic|inactive-kernel-verification-phase-prepared|inactive-kernel-normalized-unhealthy|inactive-kernel-normalization-phase-hostile-one|inactive-kernel-explicit-interruption-one|inactive-kernel-transport-ancestor)
     exercise_inactive_kernel_prepare
     exit 0
     ;;

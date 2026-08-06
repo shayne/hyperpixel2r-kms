@@ -39,14 +39,18 @@ git -C "$fixture_repo" checkout --quiet --detach "$source_revision"
 # change is tested too, while dist/ and other untracked deployment state stay
 # outside the fixture repository.
 while IFS= read -r -d '' relative_path; do
+  if ! test -e "$repo_root/$relative_path" && ! test -L "$repo_root/$relative_path"; then
+    rm -f -- "$fixture_repo/$relative_path"
+    continue
+  fi
   test -f "$repo_root/$relative_path" && test ! -L "$repo_root/$relative_path"
   mkdir -p "$fixture_repo/$(dirname "$relative_path")"
   cp -p "$repo_root/$relative_path" "$fixture_repo/$relative_path"
 done < <(git -C "$repo_root" ls-files -z)
 
-# Include the fixture-only ancestor wrapper in the working-tree overlay, even
+# Include the fixture-only transport wrapper in the working-tree overlay, even
 # before the introducing commit makes it part of the detached fixture source.
-relative_path='tests/accepted-lifecycle.sh'
+relative_path='tests/transport-ancestor.sh'
 test -f "$repo_root/$relative_path" && test ! -L "$repo_root/$relative_path"
 mkdir -p "$fixture_repo/$(dirname "$relative_path")"
 cp -p "$repo_root/$relative_path" "$fixture_repo/$relative_path"
@@ -163,8 +167,6 @@ docker run --rm \
   --env HP2R_FIXTURE_REPLAY_HOSTILE="${HP2R_FIXTURE_REPLAY_HOSTILE:-}" \
   --env HP2R_FIXTURE_RECOVERY_PHASE="${HP2R_FIXTURE_RECOVERY_PHASE:-}" \
   --env HP2R_FIXTURE_FINALIZE_BOUNDARY="${HP2R_FIXTURE_FINALIZE_BOUNDARY:-}" \
-  --env HP2R_FIXTURE_ANCESTOR_ACTION_ARGV="${HP2R_FIXTURE_ANCESTOR_ACTION_ARGV:-}" \
-  --env HP2R_FIXTURE_ANCESTOR_EXPECT="${HP2R_FIXTURE_ANCESTOR_EXPECT:-}" \
   "$image" \
   bash tests/boot-fixtures.sh
 

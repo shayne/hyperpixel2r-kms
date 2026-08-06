@@ -399,7 +399,7 @@ release_identity_token_allowed() {
         "$allowed_underscore_interface") return 0 ;;
       esac
       ;;
-    packaging/70-planeradar-backlight.rules|scripts/accepted-lifecycle.sh|scripts/build-driver.sh|scripts/stage-tryboot.sh|tests/accepted-lifecycle.sh|tests/boot-scripts.sh|tests/build-contract.sh|tests/release-contract.sh)
+    packaging/70-planeradar-backlight.rules|scripts/accepted-lifecycle.sh|scripts/build-driver.sh|scripts/stage-tryboot.sh|tests/transport-ancestor.sh|tests/boot-scripts.sh|tests/build-contract.sh|tests/release-contract.sh)
       case "$identity_token" in
         "$allowed_backlight_name"|"$allowed_backlight_rule") return 0 ;;
       esac
@@ -441,21 +441,21 @@ check_release_identity "$legitimate_rule_root" || {
   exit 1
 }
 
-accepted_lifecycle_compound_root="$(
-  identity_fixture accepted-lifecycle-compound tests/accepted-lifecycle.sh \
+transport_ancestor_compound_root="$(
+  identity_fixture transport-ancestor-compound tests/transport-ancestor.sh \
     "${allowed_backlight_rule}-private"
 )"
-if check_release_identity "$accepted_lifecycle_compound_root" >/dev/null 2>&1; then
-  printf 'release identity guard accepted hostile accepted-lifecycle compound\n' >&2
+if check_release_identity "$transport_ancestor_compound_root" >/dev/null 2>&1; then
+  printf 'release identity guard accepted hostile transport-ancestor compound\n' >&2
   exit 1
 fi
 
-accepted_lifecycle_credential_root="$(
-  identity_fixture accepted-lifecycle-credential tests/accepted-lifecycle.sh \
+transport_ancestor_credential_root="$(
+  identity_fixture transport-ancestor-credential tests/transport-ancestor.sh \
     "${legacy_host_marker}private"
 )"
-if check_release_identity "$accepted_lifecycle_credential_root" >/dev/null 2>&1; then
-  printf 'release identity guard accepted hostile accepted-lifecycle credential\n' >&2
+if check_release_identity "$transport_ancestor_credential_root" >/dev/null 2>&1; then
+  printf 'release identity guard accepted hostile transport-ancestor credential\n' >&2
   exit 1
 fi
 

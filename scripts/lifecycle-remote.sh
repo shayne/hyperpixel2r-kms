@@ -387,28 +387,12 @@ assert_no_boot_writers() {
         *) return 1 ;;
       esac
     }
-    trusted_accepted_controller_ancestor() {
-      local ancestor index action=''
-      for ancestor in "${caller_ancestors[@]}"; do test "$pid" = "$ancestor" && break; done
-      test "$pid" = "$ancestor" || return 1
-      test "${argv[0]##*/}" = bash || return 1
-      test "${argv[1]##*/}" = accepted-lifecycle.sh || return 1
-      for ((index = 2; index < ${#argv[@]}; index++)); do
-        test "${argv[index]}" = --action || continue
-        ((index + 1 < ${#argv[@]})) || return 1
-        test -z "$action" || return 1
-        action="${argv[index + 1]}"
-        index=$((index + 1))
-      done
-      case "$action" in
-        prepare-new|mark-explicit-normal-verified|normalize-inactive-kernel|mark-normalized-verified) return 0 ;;
-        *) return 1 ;;
-      esac
-    }
-
     for proc in /proc/[0-9]*; do
       pid="${proc#/proc/}"
       test "$pid" = "$caller_pid" && continue
+      for ancestor in "${caller_ancestors[@]}"; do
+        test "$pid" = "$ancestor" && continue 2
+      done
       seen=$((seen + 1))
       ((seen <= max_processes)) || exit 1
       temporary="$(mktemp /tmp/hp2r-writer-argv.XXXXXX)" || exit 1
@@ -427,7 +411,6 @@ assert_no_boot_writers() {
       ((${#argv[@]} == 0)) && continue
       exe="$(readlink "$proc/exe" 2>/dev/null)" || exit 1
       known_tool "${exe##*/}" && exit 1
-      trusted_accepted_controller_ancestor && continue
       known_script "${argv[0]}" && exit 1
       interpreter_script && exit 1
     done
