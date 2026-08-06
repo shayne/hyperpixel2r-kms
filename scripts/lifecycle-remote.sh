@@ -6490,7 +6490,7 @@ prepare_new_accepted() {
 }
 
 mark_committed_accepted() {
-  local normal_sha
+  local normal_sha schema artifact inventory_sha=''
 
   assert_accepted_transition || die 'accepted driver transition is missing or unsafe'
   test "$(accepted_transition_value phase)" = staged ||
@@ -6499,7 +6499,16 @@ mark_committed_accepted() {
     die 'legacy tryboot state survived commit'
   assert_owned_regular "$normal_config" boot || die 'committed normal config is unsafe'
   normal_sha="$(sha "$normal_config")"
-  set_accepted_transition_phase staged committed "$normal_sha" ||
+  schema="$(accepted_transition_value schema_version)"
+  if { test "$schema" = 3 || test "$schema" = 4 || test "$schema" = 5; } &&
+    test "$(accepted_transition_value candidate_dkms_inventory_sha256)" = pending; then
+    artifact="$artifact_root/$(accepted_transition_value candidate_driver_version)/$(accepted_transition_value candidate_source_revision)/$(accepted_transition_value candidate_kernel_release)"
+    assert_dkms_inventory_file "$artifact/dkms-prior-state" ||
+      die 'committed candidate DKMS inventory is unsafe'
+    inventory_sha="$(sha "$artifact/dkms-prior-state")" ||
+      die 'failed to hash committed candidate DKMS inventory'
+  fi
+  set_accepted_transition_phase staged committed "$normal_sha" "$inventory_sha" ||
     die 'failed to publish committed binding state'
   fixture_interrupt_after accepted-committed-published
   assert_accepted_transition || die 'committed binding failed validation'
