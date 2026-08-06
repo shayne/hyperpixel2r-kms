@@ -2858,7 +2858,10 @@ assert_inactive_stage_authority() {
   local expected_manifest_sha="$4" expected_module_file="$5" expected_module_sha="$6"
   local expected_overlay_file="$7" expected_overlay_sha="$8" expected_rule_file="$9"
   local expected_rule_sha="${10}" expected_normal_sha="${11}" expected_candidate_sha="${12}"
-  local prior_release expected_kernel_file expected_initramfs_file
+  local expected_stage_rule_existed="${13}" expected_stage_rule_sha="${14}"
+  local captured_stage_rule_existed="${15}" captured_stage_rule_sha="${16}"
+  local captured_stage_rule="${17}"
+  local prior_release expected_kernel_file expected_initramfs_file accepted_schema
 
   assert_accepted_state || return
   assert_accepted_transition || return
@@ -2883,6 +2886,34 @@ assert_inactive_stage_authority() {
   )" || return
   test "$(accepted_transition_value candidate_kernel_file)" = "$expected_kernel_file" &&
     test "$(accepted_transition_value candidate_initramfs_file)" = "$expected_initramfs_file" || return
+  test "$captured_stage_rule_existed" = "$expected_stage_rule_existed" &&
+    test "$captured_stage_rule_sha" = "$expected_stage_rule_sha" || return
+  case "$captured_stage_rule_existed" in
+    true)
+      [[ "$captured_stage_rule_sha" =~ ^[0-9a-f]{64}$ ]] &&
+        assert_owned_regular "$captured_stage_rule" 600 &&
+        test "$(sha "$captured_stage_rule")" = "$captured_stage_rule_sha" || return
+      ;;
+    false)
+      test "$captured_stage_rule_sha" = none && test -z "$captured_stage_rule" || return
+      ;;
+    *) return 1 ;;
+  esac
+  accepted_schema="$(accepted_value schema_version)" || return
+  if test "$accepted_schema" = 1 || test "$accepted_schema" = 2; then
+    test "$(accepted_transition_value prior_backlight_rule_existed)" = \
+      "$captured_stage_rule_existed" &&
+      test "$(accepted_transition_value prior_backlight_rule_sha256)" = \
+        "$captured_stage_rule_sha" || return
+    if test "$captured_stage_rule_existed" = true; then
+      assert_owned_regular "$accepted_prior_backlight_rule" 600 &&
+        test "$(sha "$accepted_prior_backlight_rule")" = "$captured_stage_rule_sha" &&
+        sudo cmp -s -- "$accepted_prior_backlight_rule" "$captured_stage_rule" || return
+    else
+      test ! -L "$accepted_prior_backlight_rule" &&
+        test ! -e "$accepted_prior_backlight_rule" || return
+    fi
+  fi
   prior_release="$(accepted_transition_value prior_kernel_release)" || return
   require_regular "${root}/boot/vmlinuz-$prior_release" &&
     require_regular "${root}/boot/initrd.img-$prior_release" || return
@@ -2950,6 +2981,8 @@ stage() {
   backlight_rule_file="$9"
   replacement="${10-}"
   expected_accepted_transition_sha="${11-}"
+  expected_stage_backlight_rule_existed="${12-}"
+  expected_stage_backlight_rule_sha="${13-}"
   incoming="${root}${incoming_logical}"
   artifact_dir="$artifact_root/$driver_version/$revision/$release"
   module_path="${root}/lib/modules/$release/extra/$module_file"
@@ -3083,6 +3116,19 @@ stage() {
   test -z "$expected_accepted_transition_sha" ||
     [[ "$expected_accepted_transition_sha" =~ ^[0-9a-f]{64}$ ]] ||
     die 'unsafe accepted transition digest'
+  if test -n "$expected_accepted_transition_sha"; then
+    case "$expected_stage_backlight_rule_existed" in
+      true) [[ "$expected_stage_backlight_rule_sha" =~ ^[0-9a-f]{64}$ ]] ||
+        die 'unsafe authorized stage backlight rule digest' ;;
+      false) test "$expected_stage_backlight_rule_sha" = none ||
+        die 'unsafe authorized stage backlight rule absence' ;;
+      *) die 'unsafe authorized stage backlight rule presence' ;;
+    esac
+  else
+    test -z "$expected_stage_backlight_rule_existed" &&
+      test -z "$expected_stage_backlight_rule_sha" ||
+      die 'stage backlight authority requires an accepted transition digest'
+  fi
   assert_kernel_module_root "$release" ||
     die 'running kernel module root is unsafe'
   test ! -L "$state_file" && test ! -e "$state_file" || die 'refusing active tryboot transaction'
@@ -3118,6 +3164,11 @@ stage() {
     prior_backlight_rule="$(privileged_snapshot "$backlight_rule_path" "$rollback_tmp" prior-backlight-rule)" || die 'failed to capture prior backlight rule'
     prior_backlight_rule_sha="$(sha "$prior_backlight_rule")" || die 'failed to hash prior backlight rule'
     prior_backlight_rule_existed=true
+  fi
+  if test -n "$expected_accepted_transition_sha"; then
+    test "$prior_backlight_rule_existed" = "$expected_stage_backlight_rule_existed" &&
+      test "$prior_backlight_rule_sha" = "$expected_stage_backlight_rule_sha" ||
+      die 'captured stage backlight rule differs from controller authorization'
   fi
   normal_snapshot="$(privileged_snapshot "$normal_config" "$rollback_tmp" normal)" || die 'failed to capture normal boot config'
   normal_sha="$(sha "$normal_snapshot")" || die 'failed to hash normal boot config snapshot'
@@ -3186,7 +3237,9 @@ stage() {
   if "$inactive_stage"; then
     if ! assert_inactive_stage_authority "$driver_version" "$revision" "$release" \
       "$manifest_sha" "$module_file" "$module_sha" "$overlay_file" "$overlay_sha" \
-      "$backlight_rule_file" "$backlight_rule_sha" "$normal_sha" "$candidate_sha"; then
+      "$backlight_rule_file" "$backlight_rule_sha" "$normal_sha" "$candidate_sha" \
+      "$expected_stage_backlight_rule_existed" "$expected_stage_backlight_rule_sha" \
+      "$prior_backlight_rule_existed" "$prior_backlight_rule_sha" "$prior_backlight_rule"; then
       die 'inactive accepted authority differs from staged preconditions'
     fi
     test "$accepted_transition_sha" = "$expected_accepted_transition_sha" ||
@@ -3420,7 +3473,9 @@ stage() {
   if "$inactive_stage"; then
     assert_inactive_stage_authority "$driver_version" "$revision" "$release" \
       "$manifest_sha" "$module_file" "$module_sha" "$overlay_file" "$overlay_sha" \
-      "$backlight_rule_file" "$backlight_rule_sha" "$normal_sha" "$candidate_sha" ||
+      "$backlight_rule_file" "$backlight_rule_sha" "$normal_sha" "$candidate_sha" \
+      "$expected_stage_backlight_rule_existed" "$expected_stage_backlight_rule_sha" \
+      "$prior_backlight_rule_existed" "$prior_backlight_rule_sha" "$prior_backlight_rule" ||
       die 'inactive accepted authority changed before generic state publication'
     test "$expected_accepted_transition_sha" = "$(sha "$accepted_transition")" ||
       die 'inactive accepted authority digest changed before generic state publication'
@@ -3491,7 +3546,9 @@ stage() {
       schema5_staged_authority_allow_prepared=true
       assert_inactive_stage_authority "$driver_version" "$revision" "$release" \
         "$manifest_sha" "$module_file" "$module_sha" "$overlay_file" "$overlay_sha" \
-        "$backlight_rule_file" "$backlight_rule_sha" "$normal_sha" "$candidate_sha" ||
+        "$backlight_rule_file" "$backlight_rule_sha" "$normal_sha" "$candidate_sha" \
+        "$expected_stage_backlight_rule_existed" "$expected_stage_backlight_rule_sha" \
+        "$prior_backlight_rule_existed" "$prior_backlight_rule_sha" "$prior_backlight_rule" ||
         die 'inactive accepted authority changed before staged phase publication'
       test "$accepted_transition_sha" = "$expected_accepted_transition_sha" ||
         die 'inactive accepted authority digest changed before staged phase publication'
@@ -3810,6 +3867,7 @@ accepted_normal_probe() {
 authorize_inactive_stage() {
   local schema key count candidate_release candidate_revision release_tag expected_kernel_file
   local expected_initramfs_file transition_sha target_identity prior_status accepted_schema
+  local stage_backlight_rule_existed stage_backlight_rule_sha
   local -a keys=()
 
   assert_accepted_state || die 'accepted driver state is missing or unsafe'
@@ -3854,6 +3912,18 @@ authorize_inactive_stage() {
         test "$(accepted_transition_value prior_backlight_rule_sha256)" = \
           "$(accepted_value prior_backlight_rule_sha256)" ||
         die 'schema-6 accepted authority does not bind current accepted backlight identity'
+      if sudo test -L "$backlight_rule_path"; then
+        die 'schema-6 accepted authority has an unsafe live backlight rule'
+      elif sudo test -e "$backlight_rule_path"; then
+        assert_owned_regular "$backlight_rule_path" 644 ||
+          die 'schema-6 accepted authority has an unsafe live backlight rule'
+        stage_backlight_rule_existed=true
+        stage_backlight_rule_sha="$(sha "$backlight_rule_path")" ||
+          die 'schema-6 accepted authority cannot hash the live backlight rule'
+      else
+        stage_backlight_rule_existed=false
+        stage_backlight_rule_sha=none
+      fi
       ;;
     1|2)
       case "$(accepted_transition_value prior_backlight_rule_existed)" in
@@ -3867,6 +3937,8 @@ authorize_inactive_stage() {
               "$(accepted_transition_value prior_backlight_rule_sha256)" &&
             sudo cmp -s -- "$accepted_prior_backlight_rule" "$backlight_rule_path" ||
             die 'schema-6 accepted authority does not bind current legacy backlight proof'
+          stage_backlight_rule_existed=true
+          stage_backlight_rule_sha="$(accepted_transition_value prior_backlight_rule_sha256)"
           ;;
         false)
           test "$(accepted_transition_value prior_backlight_rule_sha256)" = none &&
@@ -3874,6 +3946,8 @@ authorize_inactive_stage() {
             test ! -e "$accepted_prior_backlight_rule" &&
             test ! -L "$backlight_rule_path" && test ! -e "$backlight_rule_path" ||
             die 'schema-6 accepted authority does not bind current legacy backlight absence'
+          stage_backlight_rule_existed=false
+          stage_backlight_rule_sha=none
           ;;
         *) die 'schema-6 accepted authority has an unsafe legacy backlight proof' ;;
       esac
@@ -3919,12 +3993,13 @@ authorize_inactive_stage() {
     test "$(accepted_transition_value candidate_initramfs_file)" = "$expected_initramfs_file" ||
     die 'schema-6 accepted authority has non-deterministic firmware names'
   transition_sha="$(sha "$accepted_transition")" || die 'failed to hash accepted authority'
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$candidate_release" "$target_identity" "$expected_kernel_file" \
     "$(accepted_transition_value candidate_kernel_sha256)" "$expected_initramfs_file" \
     "$(accepted_transition_value candidate_initramfs_sha256)" \
     "$(accepted_transition_value candidate_base_dtb_sha256)" \
-    "$(accepted_transition_value candidate_vc4_overlay_sha256)" "$transition_sha"
+    "$(accepted_transition_value candidate_vc4_overlay_sha256)" "$transition_sha" \
+    "$stage_backlight_rule_existed" "$stage_backlight_rule_sha"
 }
 
 commit() {

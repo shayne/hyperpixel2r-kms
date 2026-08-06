@@ -478,11 +478,52 @@ if test "${1-}" = bash && test "${2-}" = -s; then
     sed -i 's/^target_identity_sha256=.*/target_identity_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/' \
       "$HP2R_FIXTURE_ROOT/var/lib/hyperpixel2r-kms/accepted-transition"
   fi
+  if test "$remote_action" = authorize-inactive-stage && \
+    test -n "${HP2R_FIXTURE_LEGACY_POST_AUTH_BACKLIGHT_DRIFT:-}"; then
+    backlight_rule="$HP2R_FIXTURE_ROOT/etc/udev/rules.d/70-planeradar-backlight.rules"
+    case "$HP2R_FIXTURE_LEGACY_POST_AUTH_BACKLIGHT_DRIFT" in
+      appearance)
+        install -o root -g root -m 0644 \
+          "$HP2R_FIXTURE_REPO_ROOT/dist/artifacts/$HP2R_FIXTURE_RELEASE/70-planeradar-backlight.rules" \
+          "$backlight_rule"
+        ;;
+      removal) rm -- "$backlight_rule" ;;
+      symlink)
+        rm -f -- "$backlight_rule"
+        ln -s /etc/passwd "$backlight_rule"
+        ;;
+      hash) printf 'legacy live rule post-authorization drift\n' >> "$backlight_rule" ;;
+      mode) chmod 0600 "$backlight_rule" ;;
+      proof)
+        printf 'legacy proof post-authorization drift\n' >> \
+          "$HP2R_FIXTURE_ROOT/var/lib/hyperpixel2r-kms/accepted-prior-backlight-rule"
+        ;;
+      *)
+        printf 'unknown post-authorization legacy backlight drift: %s\n' \
+          "$HP2R_FIXTURE_LEGACY_POST_AUTH_BACKLIGHT_DRIFT" >&2
+        exit 64
+        ;;
+    esac
+    : > "$HP2R_FIXTURE_ROOT/tmp/legacy-backlight-mutated-after-authorization"
+  fi
   exit "$remote_status"
 fi
 if test "${1-}" = bash && { [[ "${2-}" == /tmp/hp2r-tryboot-stage.*/* ]] || [[ "${2-}" == /tmp/hp2r-accepted.*/* ]]; }; then
   script="$HP2R_FIXTURE_ROOT$2"
   shift 2
+  if test "${HP2R_FIXTURE_FORGE_STAGE_BACKLIGHT_AUTHORITY:-}" = 1 &&
+    test "${1-}" = stage &&
+    test -e "$HP2R_FIXTURE_ROOT/tmp/legacy-backlight-mutated-after-authorization"; then
+    test "$#" = 14 || {
+      printf 'unexpected stage argument count while forging backlight authority: %s\n' "$#" >&2
+      exit 64
+    }
+    forged_backlight_rule="$HP2R_FIXTURE_ROOT/etc/udev/rules.d/70-planeradar-backlight.rules"
+    test ! -L "$forged_backlight_rule" && test -f "$forged_backlight_rule" || exit 64
+    forged_backlight_rule_sha="$(sha256sum "$forged_backlight_rule" | awk '{ print $1 }')"
+    set -- "${@:1:12}" true "$forged_backlight_rule_sha"
+    : > "$HP2R_FIXTURE_ROOT/tmp/stage-backlight-authority-forged"
+  fi
   if test "${HP2R_FIXTURE_DROP_EMPTY_SSH_ARGS:-}" = 1; then
     filtered=()
     for argument in "$@"; do
@@ -3158,7 +3199,8 @@ exercise_inactive_kernel_prepare() {
   local prior_kernel_before="$fixture/inactive-prior-kernel-before"
   local prior_initramfs_before="$fixture/inactive-prior-initramfs-before"
   local revision12 release_tag kernel_name initramfs_name companion prepared_in_hostile=false accepted_pre_stage_sha
-  local legacy_artifact legacy_backlight_initial legacy_backlight_drift legacy_stage_output
+  local legacy_artifact legacy_backlight_initial legacy_backlight_drift
+  local legacy_post_auth_backlight_drift legacy_stage_output
   local legacy_live_before legacy_proof_before legacy_transition_before
   local legacy_stage_completed=false
   local candidate_stage_repo=''
@@ -3692,6 +3734,7 @@ exercise_inactive_kernel_prepare() {
   accepted_pre_stage_sha="$(sha256sum "$state_dir/accepted-transition" | awk '{ print $1 }')"
   if test "${HP2R_FIXTURE_LEGACY_ACCEPTED:-}" = 1; then
     legacy_backlight_drift="${HP2R_FIXTURE_LEGACY_BACKLIGHT_DRIFT:-none}"
+    legacy_post_auth_backlight_drift="${HP2R_FIXTURE_LEGACY_POST_AUTH_BACKLIGHT_DRIFT:-none}"
     case "$legacy_backlight_initial" in
       present)
         grep -Fxq 'prior_backlight_rule_existed=true' "$state_dir/accepted-transition" ||
@@ -3739,6 +3782,54 @@ exercise_inactive_kernel_prepare() {
     capture_inactive_path "$state_dir/accepted-prior-backlight-rule" "$legacy_proof_before"
     cp "$state_dir/accepted-transition" "$legacy_transition_before"
     legacy_stage_output="$fixture/legacy-inactive-stage.out"
+    if test "$legacy_post_auth_backlight_drift" != none; then
+      if run_inactive_stage >"$legacy_stage_output" 2>&1; then
+        fail "inactive legacy stage accepted post-authorization backlight drift: $legacy_post_auth_backlight_drift"
+      fi
+      assert_file "$root/tmp/legacy-backlight-mutated-after-authorization"
+      if test "${HP2R_FIXTURE_FORGE_STAGE_BACKLIGHT_AUTHORITY:-}" = 1; then
+        assert_file "$root/tmp/stage-backlight-authority-forged"
+      fi
+      cmp -s "$legacy_transition_before" "$state_dir/accepted-transition" ||
+        fail "rejected post-authorization legacy $legacy_post_auth_backlight_drift drift changed accepted authority"
+      grep -Fxq 'phase=prepared' "$state_dir/accepted-transition" ||
+        fail "post-authorization legacy $legacy_post_auth_backlight_drift drift advanced accepted phase"
+      case "$legacy_post_auth_backlight_drift" in
+        appearance)
+          assert_file "$backlight_rule_path"
+          test "$(stat -c '%U:%G:%a' "$backlight_rule_path")" = root:root:644 ||
+            fail 'rejected post-authorization appearance did not preserve the new live rule'
+          ;;
+        removal) assert_absent "$backlight_rule_path" ;;
+        symlink)
+          test -L "$backlight_rule_path" &&
+            test "$(readlink "$backlight_rule_path")" = /etc/passwd ||
+            fail 'rejected post-authorization symlink did not preserve the live rule shape'
+          ;;
+        hash)
+          grep -Fxq 'legacy live rule post-authorization drift' "$backlight_rule_path" ||
+            fail 'rejected post-authorization hash drift did not preserve the live rule'
+          ;;
+        mode)
+          test "$(stat -c '%U:%G:%a' "$backlight_rule_path")" = root:root:600 ||
+            fail 'rejected post-authorization mode drift did not preserve the live rule'
+          ;;
+        proof)
+          grep -Fxq 'legacy proof post-authorization drift' \
+            "$state_dir/accepted-prior-backlight-rule" ||
+            fail 'rejected post-authorization proof drift did not preserve the proof mutation'
+          ;;
+      esac
+      cmp -s "$normal_before" "$root/boot/firmware/config.txt" ||
+        fail "rejected post-authorization legacy $legacy_post_auth_backlight_drift drift changed normal config"
+      assert_absent "$state_dir/tryboot-state"
+      assert_absent "$root/boot/firmware/tryboot.txt"
+      assert_absent "$root/boot/firmware/$kernel_name"
+      assert_absent "$root/boot/firmware/$initramfs_name"
+      assert_absent "$root/lib/modules/$candidate_release/extra/hyperpixel2r_kms.ko"
+      assert_no_private_workspaces
+      exit 0
+    fi
     if test "$legacy_backlight_drift" != none; then
       if run_inactive_stage >"$legacy_stage_output" 2>&1; then
         fail "inactive legacy stage accepted backlight drift: $legacy_backlight_drift"
@@ -5669,6 +5760,32 @@ exercise_legacy_inactive_backlight_drift_matrix() {
   test "$count" = 6 || fail 'inactive legacy backlight drift inventory drifted'
 }
 
+exercise_legacy_inactive_post_auth_backlight_drift_matrix() {
+  local specification initial drift count=0
+
+  for specification in \
+    absent:appearance present:removal present:symlink present:hash present:mode present:proof
+  do
+    initial="${specification%%:*}"
+    drift="${specification#*:}"
+    HP2R_FIXTURE_CASE=inactive-kernel-legacy-backlight-one \
+      HP2R_FIXTURE_LEGACY_ACCEPTED=1 \
+      HP2R_FIXTURE_LEGACY_BACKLIGHT_INITIAL="$initial" \
+      HP2R_FIXTURE_LEGACY_POST_AUTH_BACKLIGHT_DRIFT="$drift" \
+      bash "${BASH_SOURCE[0]}" >/dev/null ||
+      fail "inactive legacy post-authorization backlight drift fixture failed: $drift"
+    count=$((count + 1))
+  done
+  test "$count" = 6 || fail 'inactive legacy post-authorization backlight drift inventory drifted'
+  HP2R_FIXTURE_CASE=inactive-kernel-legacy-backlight-one \
+    HP2R_FIXTURE_LEGACY_ACCEPTED=1 \
+    HP2R_FIXTURE_LEGACY_BACKLIGHT_INITIAL=present \
+    HP2R_FIXTURE_LEGACY_POST_AUTH_BACKLIGHT_DRIFT=hash \
+    HP2R_FIXTURE_FORGE_STAGE_BACKLIGHT_AUTHORITY=1 \
+    bash "${BASH_SOURCE[0]}" >/dev/null ||
+    fail 'inactive legacy forged stage backlight authority fixture failed'
+}
+
 exercise_rollback_transaction_retired_replay() {
   local failure_status
 
@@ -5711,6 +5828,10 @@ case "${HP2R_FIXTURE_CASE:-}" in
     ;;
   inactive-kernel-legacy-backlight-drift)
     exercise_legacy_inactive_backlight_drift_matrix
+    exit 0
+    ;;
+  inactive-kernel-legacy-post-auth-backlight-drift)
+    exercise_legacy_inactive_post_auth_backlight_drift_matrix
     exit 0
     ;;
   inactive-kernel-legacy-backlight-one)
@@ -7430,11 +7551,12 @@ assert_file "$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release/mani
 prepare_inactive_authorization_target
 authorization_tuple="$(run_accepted_remote authorize-inactive-stage)" ||
   fail 'read-only inactive authorization rejected an otherwise exact schema-6 fixture'
-test "$(awk -F '\t' 'NF == 9 { count++ } END { print count + 0 }' <<<"$authorization_tuple")" = 1 ||
+test "$(awk -F '\t' 'NF == 11 { count++ } END { print count + 0 }' <<<"$authorization_tuple")" = 1 ||
   fail 'inactive authorization did not return the target identity in its fixed tuple'
 IFS=$'\t' read -r authorized_release authorized_identity authorized_kernel authorized_kernel_sha \
   authorized_initramfs authorized_initramfs_sha authorized_base_dtb_sha authorized_vc4_sha \
-  authorized_transition_sha <<<"$authorization_tuple"
+  authorized_transition_sha authorized_stage_rule_existed authorized_stage_rule_sha \
+  <<<"$authorization_tuple"
 test "$authorized_release" = "$authorization_candidate_release" &&
   test "$authorized_identity" = "$authorization_target_identity_sha256" &&
   test "$authorized_kernel" = "$authorization_candidate_kernel" &&
@@ -7444,7 +7566,9 @@ test "$authorized_release" = "$authorization_candidate_release" &&
   [[ "$authorized_base_dtb_sha" =~ ^[0-9a-f]{64}$ ]] &&
   [[ "$authorized_vc4_sha" =~ ^[0-9a-f]{64}$ ]] &&
   test "$authorized_transition_sha" = \
-    "$(sha256sum "$root/var/lib/hyperpixel2r-kms/accepted-transition" | awk '{ print $1 }')" ||
+    "$(sha256sum "$root/var/lib/hyperpixel2r-kms/accepted-transition" | awk '{ print $1 }')" &&
+  test "$authorized_stage_rule_existed" = true &&
+  test "$authorized_stage_rule_sha" = "$(sha256sum "$backlight_rule_path" | awk '{ print $1 }')" ||
   fail 'inactive authorization tuple did not exactly bind the candidate authority'
 
 # The remote authority is intentionally fail-closed before the controller can

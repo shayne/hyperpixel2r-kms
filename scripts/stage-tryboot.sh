@@ -124,7 +124,22 @@ if test -n "$requested_release"; then
   }
   IFS=$'\t' read -r authorized_release authorized_target_identity authorized_kernel_file authorized_kernel_sha \
     authorized_initramfs_file authorized_initramfs_sha authorized_base_dtb_sha \
-    authorized_vc4_overlay_sha authorized_transition_sha extra <<<"$authorization"
+    authorized_vc4_overlay_sha authorized_transition_sha authorized_stage_backlight_rule_existed \
+    authorized_stage_backlight_rule_sha extra <<<"$authorization"
+  case "$authorized_stage_backlight_rule_existed" in
+    true) [[ "$authorized_stage_backlight_rule_sha" =~ ^[0-9a-f]{64}$ ]] || {
+      echo 'inactive stage authorization has an unsafe backlight rule digest' >&2
+      exit 1
+    } ;;
+    false) test "$authorized_stage_backlight_rule_sha" = none || {
+      echo 'inactive stage authorization has an unsafe backlight rule absence' >&2
+      exit 1
+    } ;;
+    *)
+      echo 'inactive stage authorization has an unsafe backlight rule presence' >&2
+      exit 1
+      ;;
+  esac
   test -z "${extra:-}" &&
     test "$authorized_release" = "$release" &&
     test "$authorized_target_identity" = "$target_identity_sha256" &&
@@ -174,7 +189,8 @@ scp "${ssh_options[@]}" -rp "$payload/." "$target:$remote_stage/"
 ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" stage \
   "$remote_stage" "$driver_version" "$source_revision" "$source_tree" "$release" \
   "$module_file" "$overlay_file" "$applied_dtb_file" "$backlight_rule_file" "$replace_overlay" \
-  "${authorized_transition_sha:-}"
+  "${authorized_transition_sha:-}" "${authorized_stage_backlight_rule_existed:-}" \
+  "${authorized_stage_backlight_rule_sha:-}"
 
 # Delete the validated incoming payload before the reboot is requested.  The
 # transaction is fully published on target at this point; keeping /tmp input
