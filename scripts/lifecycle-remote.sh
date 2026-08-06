@@ -514,12 +514,16 @@ remove_inactive_candidate_firmware_leaves() {
   elif sudo test -e "$kernel_path"; then
     assert_owned_regular "$kernel_path" boot && test "$(sha "$kernel_path")" = "$kernel_sha" || return
     sudo rm -- "$kernel_path" || return
+    sudo sync || return
+    test ! -L "$kernel_path" && test ! -e "$kernel_path" || return
   fi
   fixture_interrupt_after accepted-candidate-kernel-retired
   if sudo test -L "$initramfs_path"; then return 1
   elif sudo test -e "$initramfs_path"; then
     assert_owned_regular "$initramfs_path" boot && test "$(sha "$initramfs_path")" = "$initramfs_sha" || return
     sudo rm -- "$initramfs_path" || return
+    sudo sync || return
+    test ! -L "$initramfs_path" && test ! -e "$initramfs_path" || return
   fi
   fixture_interrupt_after accepted-candidate-initramfs-retired
 }
@@ -539,13 +543,20 @@ clear_inactive_finalization_companions() {
     expected="${pair%%:*}"
     boundary="${pair#*:}"
     assert_absent_or_exact_private_companion "$path" "$expected" || return
-    if sudo test -e "$path"; then sudo rm -- "$path" || return; fi
+    if sudo test -e "$path"; then
+      sudo rm -- "$path" || return
+      sudo sync || return
+      test ! -L "$path" && test ! -e "$path" || return
+    fi
     fixture_interrupt_after "$boundary"
   done
   if sudo test -L "$accepted_transition_prepared_anchor"; then return 1
   elif sudo test -e "$accepted_transition_prepared_anchor"; then
     assert_prepared_transition_anchor || return
     sudo rm -- "$accepted_transition_prepared_anchor" || return
+    sudo sync || return
+    test ! -L "$accepted_transition_prepared_anchor" && \
+      test ! -e "$accepted_transition_prepared_anchor" || return
   fi
   fixture_interrupt_after accepted-prepared-anchor-retired
   assert_inactive_finalization_companions
@@ -2628,7 +2639,7 @@ cleanup_legacy_planeradar() {
   if ! "$pending" && test "$source_location" = absent; then
     printf 'result\talready-absent\n' | sudo tee -a "$events" >/dev/null ||
       die 'failed to record legacy cleanup no-op'
-    sudo sync
+    sudo sync || die 'failed to sync inactive transition companion retirement'
     printf 'legacy Plane Radar state already absent\n'
     return
   fi
@@ -2638,7 +2649,7 @@ cleanup_legacy_planeradar() {
       die 'failed to record exact legacy cleanup pending state'
     printf 'result\tpending\n' | sudo tee -a "$events" >/dev/null ||
       die 'failed to record pending legacy cleanup'
-    sudo sync
+    sudo sync || die 'failed to sync accepted transition prior tryboot proof retirement'
     pending=true
   fi
 
@@ -3537,7 +3548,7 @@ stage() {
   fi
   if ! "$inactive_stage"; then
     sudo depmod -a "$release"
-    sudo sync
+    sudo sync || die 'failed to sync accepted transition journal retirement'
   fi
   stage_complete=true
   remove_transaction_workspace "$rollback_tmp" || return 1
@@ -7956,12 +7967,21 @@ finalize_accepted() {
     fixture_interrupt_after accepted-candidate-leaves-retired
     clear_inactive_finalization_companions ||
       die 'failed to retire inactive transition companions'
+    sudo sync
+    assert_inactive_finalization_companions ||
+      die 'inactive transition companion retirement is not durable'
     fixture_interrupt_after accepted-companions-retired
     clear_accepted_prior_tryboot_proof "$prior_tryboot_existed" "$prior_tryboot_sha" ||
       die 'failed to clear accepted transition prior tryboot proof'
-    sudo rm -- "$accepted_transition" || die 'failed to clear accepted transition journal'
-    fixture_interrupt_after accepted-journal-cleared
     sudo sync
+    test ! -L "$accepted_transition_prior_tryboot" && \
+      test ! -e "$accepted_transition_prior_tryboot" ||
+      die 'accepted transition prior tryboot proof retirement is not durable'
+    sudo rm -- "$accepted_transition" || die 'failed to clear accepted transition journal'
+    sudo sync
+    test ! -L "$accepted_transition" && test ! -e "$accepted_transition" ||
+      die 'accepted transition journal retirement is not durable'
+    fixture_interrupt_after accepted-journal-cleared
     assert_accepted_state || die 'accepted receipt failed validation'
     printf 'accepted %s\n' "$revision"
     return
