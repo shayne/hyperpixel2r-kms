@@ -3444,6 +3444,46 @@ exercise_inactive_kernel_prepare() {
   release_tag="$(printf %s "$candidate_release" | sha256sum | awk '{ print substr($1, 1, 12) }')"
   kernel_name="hp2r-$revision12-$release_tag-kernel.img"
   initramfs_name="hp2r-$revision12-$release_tag-initramfs.img"
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-uninstall-orphan; then
+    local orphan_companion="$state_dir/accepted-transition-prior-kernel.img"
+
+    run_accepted_remote recover-accepted >/dev/null
+    ln -s "$root$prior_kernel" "$orphan_companion"
+    if run_accepted_remote uninstall-accepted \
+      0.1.1 "$source_revision" "$release" >/dev/null 2>&1; then
+      fail 'accepted uninstall ignored a symlinked inactive transition companion'
+    fi
+    test -L "$orphan_companion" ||
+      fail 'rejected accepted uninstall changed the symlinked inactive companion'
+    exit 0
+  fi
+  assert_inactive_recovered_prior() {
+    local expected_reboot="$1" output="$fixture/recovery-${HP2R_FIXTURE_RECOVERY_PHASE:-unknown}.out"
+    local candidate_installed_artifact="$root/usr/lib/hyperpixel2r-kms/$candidate_driver_version/$source_revision/$candidate_release"
+    run_accepted_remote recover-accepted >"$output"
+    grep -Fxq "reboot_required=$expected_reboot" "$output" ||
+      fail "recovery result contract drifted for ${HP2R_FIXTURE_RECOVERY_PHASE:-unknown}"
+    cmp -s "$normal_before" "$root/boot/firmware/config.txt" ||
+      fail "recovery did not restore prior normal config for ${HP2R_FIXTURE_RECOVERY_PHASE:-unknown}"
+    cmp -s "$root$prior_kernel" "$root/boot/firmware/kernel8.img" ||
+      fail "recovery did not restore prior kernel for ${HP2R_FIXTURE_RECOVERY_PHASE:-unknown}"
+    cmp -s "$root$prior_initramfs" "$root/boot/firmware/initramfs8" ||
+      fail "recovery did not restore prior initramfs for ${HP2R_FIXTURE_RECOVERY_PHASE:-unknown}"
+    grep -Fxq "kernel_release=$release" "$state_dir/accepted-state" ||
+      fail "recovery replaced prior receipt for ${HP2R_FIXTURE_RECOVERY_PHASE:-unknown}"
+    assert_absent "$candidate_installed_artifact"
+    assert_absent "$root/boot/firmware/$kernel_name"
+    assert_absent "$root/boot/firmware/$initramfs_name"
+    assert_absent "$state_dir/accepted-transition"
+    for companion in \
+      accepted-transition-prior-config.txt accepted-transition-prepared.sha256 \
+      accepted-transition-prior-kernel.img accepted-transition-prior-initramfs.img \
+      accepted-transition-candidate-kernel.img accepted-transition-candidate-initramfs.img
+    do
+      assert_absent "$state_dir/$companion"
+    done
+    run_accepted_remote recover-accepted >/dev/null
+  }
   grep -Fxq 'schema_version=6' "$state_dir/accepted-transition" ||
     fail 'inactive prepare did not publish schema-6 authority'
   grep -Fxq 'target_identity_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
@@ -3481,6 +3521,11 @@ exercise_inactive_kernel_prepare() {
       fail 'inactive prepare changed the accepted prior tryboot config'
   else
     assert_absent "$root/boot/firmware/tryboot.txt"
+  fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-recovery-phase-one &&
+    test "${HP2R_FIXTURE_RECOVERY_PHASE:-}" = prepared; then
+    assert_inactive_recovered_prior false
+    exit 0
   fi
 
   # Task 5 must stage the prepared inactive candidate through the public
@@ -3662,6 +3707,83 @@ exercise_inactive_kernel_prepare() {
     fail 'inactive stage loaded or probed a module'
   ! grep -Fq 'bind ' "$log" ||
     fail 'inactive stage bound a candidate device during staging'
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-recovery-phase-one; then
+    local recovery_phase="${HP2R_FIXTURE_RECOVERY_PHASE:-}" recovery_boundary='' recovery_output
+    case "$recovery_phase" in
+      staged)
+        assert_inactive_recovered_prior false
+        exit 0
+        ;;
+      explicit_normal_published|explicit_normal_verified|canonical_initramfs_published|canonical_pair_published|normalized_config_published|normalized_verified|finalizing|receipt_published) ;;
+      *) fail "unknown inactive recovery phase: $recovery_phase" ;;
+    esac
+    mkdir -p "$root/proc/device-tree/chosen/bootloader"
+    printf '\0\0\0\1' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    install_live_hardware
+    export HP2R_FIXTURE_RELEASE_OVERRIDE="$candidate_release"
+    run_controller commit-boot.sh >/dev/null
+    if test "$recovery_phase" = explicit_normal_published; then
+      assert_inactive_recovered_prior true
+      unset HP2R_FIXTURE_RELEASE_OVERRIDE
+      exit 0
+    fi
+    printf '\0\0\0\0' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    run_controller accepted-lifecycle.sh --action mark-explicit-normal-verified >/dev/null
+    if test "$recovery_phase" = explicit_normal_verified; then
+      assert_inactive_recovered_prior true
+      unset HP2R_FIXTURE_RELEASE_OVERRIDE
+      exit 0
+    fi
+    case "$recovery_phase" in
+      canonical_initramfs_published) recovery_boundary=inactive-normalize-initramfs-published ;;
+      canonical_pair_published) recovery_boundary=inactive-normalize-pair-published ;;
+      normalized_config_published) recovery_boundary=inactive-normalize-config-published ;;
+      finalizing|receipt_published) ;;
+    esac
+    if test -n "$recovery_boundary"; then
+      if HP2R_FIXTURE_INTERRUPT_AFTER="$recovery_boundary" \
+        HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
+        run_controller accepted-lifecycle.sh --action normalize-inactive-kernel >/dev/null 2>&1; then
+        fail "normalization ignored recovery-phase interruption: $recovery_phase"
+      fi
+      find "$state_dir" -mindepth 1 -maxdepth 1 -type d \
+        -name '.hp2r-transaction.*' -exec rm -rf -- {} +
+      assert_inactive_recovered_prior true
+      unset HP2R_FIXTURE_RELEASE_OVERRIDE
+      exit 0
+    fi
+    run_controller accepted-lifecycle.sh --action normalize-inactive-kernel >/dev/null
+    run_controller accepted-lifecycle.sh --action mark-normalized-verified >/dev/null
+    if test "$recovery_phase" = normalized_verified; then
+      assert_inactive_recovered_prior true
+      unset HP2R_FIXTURE_RELEASE_OVERRIDE
+      exit 0
+    fi
+    case "$recovery_phase" in
+      finalizing) recovery_boundary=accepted-finalizing-published ;;
+      receipt_published) recovery_boundary=accepted-receipt-phase-published ;;
+    esac
+    if HP2R_FIXTURE_INTERRUPT_AFTER="$recovery_boundary" \
+      run_controller accepted-lifecycle.sh --action finalize >/dev/null 2>&1; then
+      fail "finalization ignored recovery-phase interruption: $recovery_phase"
+    fi
+    if test "$recovery_phase" = finalizing; then
+      assert_inactive_recovered_prior true
+    else
+      recovery_output="$fixture/recovery-receipt-published.out"
+      run_accepted_remote recover-accepted >"$recovery_output"
+      grep -Fxq 'reboot_required=false' "$recovery_output" ||
+        fail 'receipt-published recovery reported a reboot'
+      grep -Fxq 'schema_version=4' "$state_dir/accepted-state" ||
+        fail 'receipt-published recovery resurrected the prior receipt'
+      assert_absent "$state_dir/accepted-transition"
+      run_accepted_remote recover-accepted >/dev/null
+      run_accepted_remote finalize-accepted >/dev/null
+      run_accepted_remote finalize-accepted >/dev/null
+    fi
+    unset HP2R_FIXTURE_RELEASE_OVERRIDE
+    exit 0
+  fi
   if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-stale-authority; then
     replace_equals_value "$state_dir/accepted-transition" target_identity_sha256 \
       dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
@@ -3902,6 +4024,173 @@ exercise_inactive_kernel_prepare() {
     run_controller accepted-lifecycle.sh --action mark-normalized-verified >/dev/null
     grep -Fxq 'phase=normalized_verified' "$state_dir/accepted-transition" ||
       fail 'normalized normal verifier did not publish its typed phase'
+    unset HP2R_FIXTURE_RELEASE_OVERRIDE
+    exit 0
+  fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-finalization; then
+    local receipt="$state_dir/accepted-state"
+    local prior_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
+    local candidate_accepted_artifact="$root/usr/lib/hyperpixel2r-kms/$candidate_driver_version/$source_revision/$candidate_release"
+    local expected_kernel_sha expected_initramfs_sha expected_base_dtb_sha expected_vc4_sha
+
+    cp "$root$prior_kernel" "$root/boot/firmware/kernel8.img"
+    cp "$root$prior_initramfs" "$root/boot/firmware/initramfs8"
+    chown root:root "$root/boot/firmware/kernel8.img" "$root/boot/firmware/initramfs8"
+    chmod 0644 "$root/boot/firmware/kernel8.img" "$root/boot/firmware/initramfs8"
+    mkdir -p "$root/proc/device-tree/chosen/bootloader"
+    printf '\0\0\0\1' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    install_live_hardware
+    export HP2R_FIXTURE_RELEASE_OVERRIDE="$candidate_release"
+    run_controller commit-boot.sh >/dev/null
+    printf '\0\0\0\0' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    run_controller accepted-lifecycle.sh --action mark-explicit-normal-verified >/dev/null
+    run_controller accepted-lifecycle.sh --action normalize-inactive-kernel >/dev/null
+    run_controller accepted-lifecycle.sh --action mark-normalized-verified >/dev/null
+
+    expected_kernel_sha="$(sha256sum "$root/boot/firmware/kernel8.img" | awk '{ print $1 }')"
+    expected_initramfs_sha="$(sha256sum "$root/boot/firmware/initramfs8" | awk '{ print $1 }')"
+    expected_base_dtb_sha="$(sha256sum "$root/boot/firmware/bcm2710-rpi-zero-2-w.dtb" | awk '{ print $1 }')"
+    expected_vc4_sha="$(sha256sum "$root/boot/firmware/overlays/vc4-kms-v3d.dtbo" | awk '{ print $1 }')"
+    run_controller accepted-lifecycle.sh --action finalize >/dev/null
+
+    test "$(awk 'END { print NR }' "$receipt")" = 22 ||
+      fail 'inactive finalization did not publish the exact 22-row receipt'
+    test "$(sed -n '1p' "$receipt")" = schema_version=4 ||
+      fail 'inactive finalization did not publish accepted schema 4'
+    grep -Fxq 'normal_kernel_file=kernel8.img' "$receipt" ||
+      fail 'inactive finalization lost the conventional kernel name'
+    grep -Fxq "normal_kernel_sha256=$expected_kernel_sha" "$receipt" ||
+      fail 'inactive finalization lost the conventional kernel digest'
+    grep -Fxq 'normal_initramfs_file=initramfs8' "$receipt" ||
+      fail 'inactive finalization lost the conventional initramfs name'
+    grep -Fxq "normal_initramfs_sha256=$expected_initramfs_sha" "$receipt" ||
+      fail 'inactive finalization lost the conventional initramfs digest'
+    grep -Fxq "base_dtb_sha256=$expected_base_dtb_sha" "$receipt" ||
+      fail 'inactive finalization lost the target base-DTB digest'
+    grep -Fxq "vc4_overlay_sha256=$expected_vc4_sha" "$receipt" ||
+      fail 'inactive finalization lost the target VC4-overlay digest'
+    assert_file "$candidate_accepted_artifact/manifest.txt"
+    assert_absent "$prior_artifact"
+    assert_absent "$root/boot/firmware/$kernel_name"
+    assert_absent "$root/boot/firmware/$initramfs_name"
+    for companion in \
+      accepted-transition-prior-config.txt accepted-transition-prepared.sha256 \
+      accepted-transition-prior-kernel.img accepted-transition-prior-initramfs.img \
+      accepted-transition-candidate-kernel.img accepted-transition-candidate-initramfs.img
+    do
+      assert_absent "$state_dir/$companion"
+    done
+    assert_absent "$state_dir/accepted-transition"
+    assert_absent "$root/boot/firmware/tryboot.txt"
+    assert_no_private_workspaces
+    printf 'unrelated hp2r firmware\n' > "$root/boot/firmware/hp2r-keep-me.img"
+    run_accepted_remote uninstall-accepted \
+      "$candidate_driver_version" "$source_revision" "$candidate_release" >/dev/null
+    run_accepted_remote finalize-uninstall-accepted >/dev/null
+    assert_file "$root/boot/firmware/hp2r-keep-me.img"
+    unset HP2R_FIXTURE_RELEASE_OVERRIDE
+    exit 0
+  fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-finalization-interruption-one; then
+    local boundary="${HP2R_FIXTURE_FINALIZE_BOUNDARY:-}"
+    local candidate_accepted_artifact="$root/usr/lib/hyperpixel2r-kms/$candidate_driver_version/$source_revision/$candidate_release"
+    local prior_accepted_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
+    local recovery_output="$fixture/finalization-recovery-$boundary.out"
+
+    test -n "$boundary" || fail 'missing inactive finalization interruption boundary'
+    cp "$root$prior_kernel" "$root/boot/firmware/kernel8.img"
+    cp "$root$prior_initramfs" "$root/boot/firmware/initramfs8"
+    chown root:root "$root/boot/firmware/kernel8.img" "$root/boot/firmware/initramfs8"
+    chmod 0644 "$root/boot/firmware/kernel8.img" "$root/boot/firmware/initramfs8"
+    mkdir -p "$root/proc/device-tree/chosen/bootloader"
+    printf '\0\0\0\1' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    install_live_hardware
+    export HP2R_FIXTURE_RELEASE_OVERRIDE="$candidate_release"
+    run_controller commit-boot.sh >/dev/null
+    printf '\0\0\0\0' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    run_controller accepted-lifecycle.sh --action mark-explicit-normal-verified >/dev/null
+    run_controller accepted-lifecycle.sh --action normalize-inactive-kernel >/dev/null
+    run_controller accepted-lifecycle.sh --action mark-normalized-verified >/dev/null
+    if HP2R_FIXTURE_INTERRUPT_AFTER="$boundary" HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
+      run_controller accepted-lifecycle.sh --action finalize >/dev/null 2>&1; then
+      fail "inactive finalization ignored interruption: $boundary"
+    fi
+    find "$state_dir" -mindepth 1 -maxdepth 1 -type d -name '.hp2r-transaction.*' \
+      -exec rm -rf -- {} +
+    run_accepted_remote recover-accepted >"$recovery_output"
+    run_accepted_remote recover-accepted >>"$recovery_output"
+    run_controller accepted-lifecycle.sh --action finalize >/dev/null
+    run_controller accepted-lifecycle.sh --action finalize >/dev/null
+    if test "$boundary" = accepted-finalizing-published; then
+      grep -Fxq 'reboot_required=true' "$recovery_output" ||
+        fail 'pre-receipt finalization recovery did not require reboot'
+      grep -Fxq "kernel_release=$release" "$state_dir/accepted-state" ||
+        fail 'pre-receipt finalization recovery did not retain prior receipt'
+      cmp -s "$normal_before" "$root/boot/firmware/config.txt" ||
+        fail 'pre-receipt finalization recovery did not restore prior config'
+      cmp -s "$root$prior_kernel" "$root/boot/firmware/kernel8.img" ||
+        fail 'pre-receipt finalization recovery did not restore prior kernel'
+      cmp -s "$root$prior_initramfs" "$root/boot/firmware/initramfs8" ||
+        fail 'pre-receipt finalization recovery did not restore prior initramfs'
+      assert_file "$prior_accepted_artifact/manifest.txt"
+      assert_absent "$candidate_accepted_artifact"
+    else
+      grep -Fxq 'reboot_required=false' "$recovery_output" ||
+        fail 'post-receipt finalization recovery unexpectedly required reboot'
+      grep -Fxq 'schema_version=4' "$state_dir/accepted-state" ||
+        fail 'post-receipt finalization recovery lost schema-4 receipt'
+      grep -Fxq "kernel_release=$candidate_release" "$state_dir/accepted-state" ||
+        fail 'post-receipt finalization recovery resurrected prior receipt'
+      assert_file "$candidate_accepted_artifact/manifest.txt"
+      assert_absent "$prior_accepted_artifact"
+    fi
+    assert_absent "$root/boot/firmware/$kernel_name"
+    assert_absent "$root/boot/firmware/$initramfs_name"
+    assert_absent "$state_dir/accepted-transition"
+    for companion in \
+      accepted-transition-prior-config.txt accepted-transition-prepared.sha256 \
+      accepted-transition-prior-kernel.img accepted-transition-prior-initramfs.img \
+      accepted-transition-candidate-kernel.img accepted-transition-candidate-initramfs.img
+    do
+      assert_absent "$state_dir/$companion"
+    done
+    assert_no_private_workspaces
+    unset HP2R_FIXTURE_RELEASE_OVERRIDE
+    exit 0
+  fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-recovery-normalized; then
+    local recovery_output="$fixture/inactive-normalized-recovery.out"
+    local candidate_installed_artifact="$root/usr/lib/hyperpixel2r-kms/$candidate_driver_version/$source_revision/$candidate_release"
+
+    cp "$root$prior_kernel" "$root/boot/firmware/kernel8.img"
+    cp "$root$prior_initramfs" "$root/boot/firmware/initramfs8"
+    chown root:root "$root/boot/firmware/kernel8.img" "$root/boot/firmware/initramfs8"
+    chmod 0644 "$root/boot/firmware/kernel8.img" "$root/boot/firmware/initramfs8"
+    mkdir -p "$root/proc/device-tree/chosen/bootloader"
+    printf '\0\0\0\1' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    install_live_hardware
+    export HP2R_FIXTURE_RELEASE_OVERRIDE="$candidate_release"
+    run_controller commit-boot.sh >/dev/null
+    printf '\0\0\0\0' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    run_controller accepted-lifecycle.sh --action mark-explicit-normal-verified >/dev/null
+    run_controller accepted-lifecycle.sh --action normalize-inactive-kernel >/dev/null
+    run_controller accepted-lifecycle.sh --action mark-normalized-verified >/dev/null
+    run_accepted_remote recover-accepted >"$recovery_output"
+    grep -Fxq 'reboot_required=true' "$recovery_output" ||
+      fail 'normal-selection recovery did not report its fixed reboot result'
+    cmp -s "$normal_before" "$root/boot/firmware/config.txt" ||
+      fail 'normalized recovery did not restore the prior normal config'
+    cmp -s "$root$prior_kernel" "$root/boot/firmware/kernel8.img" ||
+      fail 'normalized recovery did not restore the prior conventional kernel'
+    cmp -s "$root$prior_initramfs" "$root/boot/firmware/initramfs8" ||
+      fail 'normalized recovery did not restore the prior conventional initramfs'
+    grep -Fxq "kernel_release=$release" "$state_dir/accepted-state" ||
+      fail 'normalized recovery replaced the prior accepted receipt'
+    assert_absent "$candidate_installed_artifact"
+    assert_absent "$root/boot/firmware/$kernel_name"
+    assert_absent "$root/boot/firmware/$initramfs_name"
+    assert_absent "$state_dir/accepted-transition"
+    run_accepted_remote recover-accepted >/dev/null
     unset HP2R_FIXTURE_RELEASE_OVERRIDE
     exit 0
   fi
@@ -4984,6 +5273,44 @@ exercise_inactive_kernel_retirement_interruptions() {
   test "$count" = 5 || fail 'inactive retirement interruption inventory drifted'
 }
 
+exercise_inactive_kernel_recovery_phases() {
+  local phase count=0
+
+  for phase in prepared staged explicit_normal_published explicit_normal_verified \
+    canonical_initramfs_published canonical_pair_published normalized_config_published \
+    normalized_verified finalizing receipt_published
+  do
+    HP2R_FIXTURE_CASE=inactive-kernel-recovery-phase-one \
+      HP2R_FIXTURE_RECOVERY_PHASE="$phase" bash "${BASH_SOURCE[0]}" >/dev/null ||
+      fail "inactive recovery phase fixture failed: $phase"
+    count=$((count + 1))
+  done
+  test "$count" = 10 || fail 'inactive recovery phase inventory drifted'
+}
+
+exercise_inactive_kernel_finalization_interruptions() {
+  local boundary count=0
+
+  for boundary in \
+    accepted-finalizing-published accepted-receipt-published \
+    accepted-receipt-phase-published accepted-prior-retired \
+    accepted-candidate-kernel-retired accepted-candidate-initramfs-retired \
+    accepted-candidate-leaves-retired accepted-prior-config-retired \
+    accepted-prior-kernel-companion-retired \
+    accepted-prior-initramfs-companion-retired \
+    accepted-candidate-kernel-companion-retired \
+    accepted-candidate-initramfs-companion-retired \
+    accepted-prepared-anchor-retired accepted-companions-retired \
+    accepted-journal-cleared
+  do
+    HP2R_FIXTURE_CASE=inactive-kernel-finalization-interruption-one \
+      HP2R_FIXTURE_FINALIZE_BOUNDARY="$boundary" bash "${BASH_SOURCE[0]}" >/dev/null ||
+      fail "inactive finalization interruption fixture failed: $boundary"
+    count=$((count + 1))
+  done
+  test "$count" = 15 || fail 'inactive finalization interruption inventory drifted'
+}
+
 exercise_legacy_accepted_upgrade() {
   local legacy_accepted_artifact legacy_accepted_receipt legacy_successor
   local legacy_transition prepare_output
@@ -5087,6 +5414,15 @@ case "${HP2R_FIXTURE_CASE:-}" in
     ;;
   inactive-kernel)
     exercise_inactive_kernel_prepare
+    for focused_case in inactive-kernel-finalization inactive-kernel-recovery-normalized \
+      inactive-kernel-uninstall-orphan; do
+      HP2R_FIXTURE_CASE="$focused_case" bash "${BASH_SOURCE[0]}" >/dev/null ||
+        fail "focused inactive-kernel fixture failed: $focused_case"
+    done
+    HP2R_FIXTURE_CASE=inactive-kernel-finalization-interruption-one \
+      HP2R_FIXTURE_FINALIZE_BOUNDARY=accepted-candidate-kernel-retired \
+      bash "${BASH_SOURCE[0]}" >/dev/null ||
+      fail 'focused inactive-kernel finalization replay failed'
     exit 0
     ;;
   inactive-kernel-state-digest)
@@ -5111,6 +5447,14 @@ case "${HP2R_FIXTURE_CASE:-}" in
     ;;
   inactive-kernel-retirement-interruptions)
     exercise_inactive_kernel_retirement_interruptions
+    exit 0
+    ;;
+  inactive-kernel-recovery-phases)
+    exercise_inactive_kernel_recovery_phases
+    exit 0
+    ;;
+  inactive-kernel-finalization-interruptions)
+    exercise_inactive_kernel_finalization_interruptions
     exit 0
     ;;
   inactive-kernel-retirement-one)
@@ -5169,7 +5513,7 @@ case "${HP2R_FIXTURE_CASE:-}" in
     exercise_inactive_kernel_prepare
     exit 0
     ;;
-  inactive-kernel-phase-authority-drift|inactive-kernel-final-module-drift|inactive-kernel-final-artifact-drift|inactive-kernel-final-dkms-drift|inactive-kernel-setter-snapshot|inactive-kernel-stale-authority|inactive-kernel-hostile-env|inactive-kernel-commit-rejected|inactive-kernel-explicit-promotion|inactive-kernel-explicit-normal-verified|inactive-kernel-explicit-normal-unhealthy|inactive-kernel-explicit-normal-conventional-drift|inactive-kernel-explicit-normal-vermagic-prefix|inactive-kernel-explicit-normal-module-resolution-drift|inactive-kernel-normalized-module-resolution-drift|inactive-kernel-normalization|inactive-kernel-normalization-interruption-one|inactive-kernel-normalization-race-one|inactive-kernel-normalization-post-atomic|inactive-kernel-verification-phase-atomic|inactive-kernel-verification-phase-prepared|inactive-kernel-normalized-unhealthy|inactive-kernel-normalization-phase-hostile-one|inactive-kernel-explicit-interruption-one|inactive-kernel-accepted-ancestor-one)
+  inactive-kernel-phase-authority-drift|inactive-kernel-final-module-drift|inactive-kernel-final-artifact-drift|inactive-kernel-final-dkms-drift|inactive-kernel-setter-snapshot|inactive-kernel-stale-authority|inactive-kernel-hostile-env|inactive-kernel-commit-rejected|inactive-kernel-explicit-promotion|inactive-kernel-explicit-normal-verified|inactive-kernel-explicit-normal-unhealthy|inactive-kernel-explicit-normal-conventional-drift|inactive-kernel-explicit-normal-vermagic-prefix|inactive-kernel-explicit-normal-module-resolution-drift|inactive-kernel-normalized-module-resolution-drift|inactive-kernel-normalization|inactive-kernel-finalization|inactive-kernel-finalization-interruption-one|inactive-kernel-recovery-normalized|inactive-kernel-recovery-phase-one|inactive-kernel-uninstall-orphan|inactive-kernel-normalization-interruption-one|inactive-kernel-normalization-race-one|inactive-kernel-normalization-post-atomic|inactive-kernel-verification-phase-atomic|inactive-kernel-verification-phase-prepared|inactive-kernel-normalized-unhealthy|inactive-kernel-normalization-phase-hostile-one|inactive-kernel-explicit-interruption-one|inactive-kernel-accepted-ancestor-one)
     exercise_inactive_kernel_prepare
     exit 0
     ;;
@@ -5207,6 +5551,8 @@ case "${HP2R_FIXTURE_CASE:-}" in
   '')
     exercise_inactive_uninstall_backlight_matrix
     exercise_prior_absent_accepted_uninstall_proof_guard
+    exercise_inactive_kernel_recovery_phases
+    exercise_inactive_kernel_finalization_interruptions
     ;;
   *) fail "unknown fixture case: $HP2R_FIXTURE_CASE" ;;
 esac
