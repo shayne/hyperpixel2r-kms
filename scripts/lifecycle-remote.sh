@@ -244,7 +244,7 @@ assert_firmware_line_cap() {
 
 assert_supported_inactive_config() {
   local path="$1"
-  local active='all' line section display_count=0
+  local active='all' line section base_vc4_count=0 display_count=0
 
   require_regular "$path" || return
   assert_firmware_line_cap "$path" || return
@@ -263,6 +263,11 @@ assert_supported_inactive_config() {
     esac
     case "$line" in
       include*|*autoboot.txt*|kernel=*|initramfs*|ramfs*|os_prefix=*|overlay_prefix=*) return 1 ;;
+      dtoverlay=vc4-kms-v3d)
+        test "$active" = all || return
+        base_vc4_count=$((base_vc4_count + 1))
+        test "$base_vc4_count" = 1 || return
+        ;;
       dtoverlay=*)
         test "$active" = all || return
         display_count=$((display_count + 1))
