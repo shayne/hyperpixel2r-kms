@@ -244,7 +244,7 @@ assert_firmware_line_cap() {
 
 assert_supported_inactive_config() {
   local path="$1"
-  local active='all' line section base_vc4_count=0 display_count=0
+  local active='all' line section='all' base_vc4_count=0 display_count=0
 
   require_regular "$path" || return
   assert_firmware_line_cap "$path" || return
@@ -260,6 +260,9 @@ assert_supported_inactive_config() {
         case "$section" in all) active=all ;; *) active=conditional ;; esac
         continue
         ;;
+    esac
+    case "$section:$line" in
+      cm5:dtoverlay=dwc2,dr_mode=host|pi5:dtoverlay=nospi10) continue ;;
     esac
     case "$line" in
       include*|*autoboot.txt*|kernel=*|initramfs*|ramfs*|os_prefix=*|overlay_prefix=*) return 1 ;;

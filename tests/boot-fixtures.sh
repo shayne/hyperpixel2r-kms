@@ -3006,6 +3006,8 @@ inactive_hostile_cases() {
   printf '%s\n' config-generated-output-overlong config-include config-autoboot \
     config-kernel config-initramfs config-ramfs config-os-prefix config-overlay-prefix \
     config-display-duplicate config-display-conditional config-display-competing \
+    config-base-vc4-conditional config-platform-section-swapped \
+    config-platform-parameter-drift config-platform-unknown \
     config-wrong-vc4-digest
 }
 
@@ -3180,6 +3182,18 @@ exercise_inactive_kernel_prepare() {
     # base VC4 KMS enablement as a second competing display selection.
     sed -i "/^dtoverlay=$overlay_file$/i dtoverlay=vc4-kms-v3d" \
       "$root/boot/firmware/config.txt"
+  fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-platform-overlays; then
+    # Production break: exact Raspberry Pi platform-only overlays must not be
+    # classified as conditional display selections.
+    platform_config="$fixture/inactive-platform-config"
+    {
+      printf '[cm5]\ndtoverlay=dwc2,dr_mode=host\n'
+      printf '[pi5]\ndtoverlay=nospi10\n'
+      cat "$root/boot/firmware/config.txt"
+    } > "$platform_config"
+    sed -i "/^dtoverlay=$overlay_file$/i dtoverlay=vc4-kms-v3d" "$platform_config"
+    mv "$platform_config" "$root/boot/firmware/config.txt"
   fi
   run_accepted_remote record-accepted 0.1.1 "$source_revision" "$release" >/dev/null
   cp "$root/boot/firmware/config.txt" "$normal_before"
@@ -3412,6 +3426,10 @@ exercise_inactive_kernel_prepare() {
       config-display-duplicate) printf 'dtoverlay=hyperpixel2r-kms-aaaaaaaaaaaa.dtbo\n' >> "$root/boot/firmware/config.txt" ;;
       config-display-conditional) printf '[pi4]\ndtoverlay=hyperpixel2r-kms-aaaaaaaaaaaa.dtbo\n' >> "$root/boot/firmware/config.txt" ;;
       config-display-competing) printf 'dtoverlay=vc4-fkms-v3d\n' >> "$root/boot/firmware/config.txt" ;;
+      config-base-vc4-conditional) printf '[cm5]\ndtoverlay=vc4-kms-v3d\n' >> "$root/boot/firmware/config.txt" ;;
+      config-platform-section-swapped) printf '[cm5]\ndtoverlay=nospi10\n' >> "$root/boot/firmware/config.txt" ;;
+      config-platform-parameter-drift) printf '[cm5]\ndtoverlay=dwc2,dr_mode=peripheral\n' >> "$root/boot/firmware/config.txt" ;;
+      config-platform-unknown) printf '[cm5]\ndtoverlay=foreign-platform\n' >> "$root/boot/firmware/config.txt" ;;
       config-wrong-vc4-digest) printf 'vc4 digest drift\n' >> "$root/boot/firmware/overlays/vc4-kms-v3d.dtbo" ;;
       *) fail "unknown inactive hostile case: $hostile" ;;
     esac
@@ -5627,6 +5645,10 @@ case "${HP2R_FIXTURE_CASE:-}" in
     exit 0
     ;;
   inactive-kernel-base-vc4)
+    exercise_inactive_kernel_prepare
+    exit 0
+    ;;
+  inactive-kernel-platform-overlays)
     exercise_inactive_kernel_prepare
     exit 0
     ;;
