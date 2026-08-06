@@ -91,6 +91,7 @@ base_dtb_path="/boot/firmware/bcm2710-rpi-zero-2-w.dtb"
 metadata="$(
   ssh "$target" bash -s -- "$requested_release" "$inactive_export" <<'REMOTE'
 set -eu
+export PATH="${PATH:+$PATH:}/usr/sbin:/sbin"
 release="${1-}"
 inactive_export="${2-}"
 if test -z "$release"; then

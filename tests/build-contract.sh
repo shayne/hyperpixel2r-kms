@@ -629,6 +629,8 @@ test "$post_build_stability_line" -lt "$post_build_durable_line" &&
 
 fake_remote_root="$temporary_dir/fake-remote-root"
 fake_bin="$temporary_dir/fake-bin"
+fake_usr_sbin="$temporary_dir/fake-usr-sbin"
+fake_system_sbin="$temporary_dir/fake-system-sbin"
 fake_ssh_log="$temporary_dir/fake-ssh.log"
 fake_source_deb="$temporary_dir/kernel-source.deb"
 fake_export_parent="$temporary_dir/kernel-target"
@@ -637,6 +639,8 @@ running_release='6.18.34+rpt-rpi-v8'
 requested_identity_sha256='cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
 mkdir -p \
   "$fake_bin" \
+  "$fake_usr_sbin" \
+  "$fake_system_sbin" \
   "$fake_remote_root/lib/modules/$requested_release" \
   "$fake_remote_root/usr/src/linux-headers-$requested_release/include/config" \
   "$fake_remote_root/usr/src/linux-headers-6.18.39+rpt-common-rpi/include" \
@@ -679,10 +683,10 @@ case "$1" in
     program="$(cat)"
     printf '%s\n' "$program" >> "$HP2R_FAKE_SSH_LOG"
     transformed_program="$(printf '%s\n' "$program" | sed \
-      "s|/lib/modules|$HP2R_FAKE_REMOTE_ROOT/lib/modules|g; s|/boot|$HP2R_FAKE_REMOTE_ROOT/boot|g")"
+      "s|/lib/modules|$HP2R_FAKE_REMOTE_ROOT/lib/modules|g; s|/boot|$HP2R_FAKE_REMOTE_ROOT/boot|g; s|/usr/sbin|$HP2R_FAKE_USR_SBIN|g; s|/sbin|$HP2R_FAKE_SYSTEM_SBIN|g")"
     output="$(
       printf '%s\n' "$transformed_program" |
-        PATH="$HP2R_FAKE_BIN:$PATH" bash -s -- "${@:4}"
+        PATH="$HP2R_FAKE_BIN:/usr/bin:/bin" bash -s -- "${@:4}"
     )"
     printf '%s\n' "$output" | sed "s|$HP2R_FAKE_REMOTE_ROOT||g"
     ;;
@@ -722,7 +726,7 @@ case "${1-}" in
   *) exit 64 ;;
 esac
 FAKE_UNAME
-cat > "$fake_bin/modinfo" <<'FAKE_MODINFO'
+cat > "$fake_usr_sbin/modinfo" <<'FAKE_MODINFO'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'modinfo %s\n' "$*" >> "$HP2R_FAKE_SSH_LOG"
@@ -733,6 +737,10 @@ test "$4" = vermagic
 test "$5" = vc4
 printf '%s SMP preempt\n' "$2"
 FAKE_MODINFO
+host_sha256sum="$(command -v sha256sum)"
+test "${host_sha256sum#/}" != "$host_sha256sum" && test -x "$host_sha256sum"
+ln -s "$host_sha256sum" "$fake_bin/sha256sum"
+test ! -e "$fake_bin/modinfo" && test ! -L "$fake_bin/modinfo"
 cat > "$fake_bin/dpkg-query" <<'FAKE_DPKG_QUERY'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -776,12 +784,14 @@ done
 test -n "$output"
 cp "$HP2R_FAKE_SOURCE_DEB" "$output"
 FAKE_CURL
-chmod +x "$fake_bin/ssh" "$fake_bin/curl" "$fake_bin/readlink" "$fake_bin/uname" "$fake_bin/modinfo" \
-  "$fake_bin/dpkg-query" "$fake_bin/apt-cache" "$fake_bin/stat"
+chmod +x "$fake_bin/ssh" "$fake_bin/curl" "$fake_bin/readlink" "$fake_bin/uname" \
+  "$fake_usr_sbin/modinfo" "$fake_bin/dpkg-query" "$fake_bin/apt-cache" "$fake_bin/stat"
 PATH="$fake_bin:$PATH" \
   HP2R_FAKE_SSH_LOG="$fake_ssh_log" \
   HP2R_FAKE_REMOTE_ROOT="$fake_remote_root" \
   HP2R_FAKE_BIN="$fake_bin" \
+  HP2R_FAKE_USR_SBIN="$fake_usr_sbin" \
+  HP2R_FAKE_SYSTEM_SBIN="$fake_system_sbin" \
   HP2R_FAKE_RUNNING_RELEASE="$running_release" \
   HP2R_FAKE_OWNER='0:0' \
   HP2R_FAKE_REQUESTED_RELEASE="$requested_release" \
@@ -832,6 +842,8 @@ PATH="$fake_bin:$PATH" \
   HP2R_FAKE_SSH_LOG="$fake_ssh_log" \
   HP2R_FAKE_REMOTE_ROOT="$fake_remote_root" \
   HP2R_FAKE_BIN="$fake_bin" \
+  HP2R_FAKE_USR_SBIN="$fake_usr_sbin" \
+  HP2R_FAKE_SYSTEM_SBIN="$fake_system_sbin" \
   HP2R_FAKE_RUNNING_RELEASE="$running_release" \
   HP2R_FAKE_OWNER='501:20' \
   HP2R_FAKE_REQUESTED_RELEASE="$requested_release" \
@@ -865,6 +877,8 @@ PATH="$fake_bin:$PATH" \
   HP2R_FAKE_SSH_LOG="$fake_ssh_log" \
   HP2R_FAKE_REMOTE_ROOT="$fake_remote_root" \
   HP2R_FAKE_BIN="$fake_bin" \
+  HP2R_FAKE_USR_SBIN="$fake_usr_sbin" \
+  HP2R_FAKE_SYSTEM_SBIN="$fake_system_sbin" \
   HP2R_FAKE_RUNNING_RELEASE="$running_release" \
   HP2R_FAKE_OWNER='0:0' \
   HP2R_FAKE_REQUESTED_RELEASE="$requested_release" \
