@@ -454,21 +454,47 @@ if test "${1-}" = bash && test "${2-}" = -s; then
     done
     set -- "${filtered[@]}"
   fi
-  if setpriv --reuid=65534 --regid=65534 --clear-groups \
-    env HP2R_INSTALL_ROOT="$HP2R_FIXTURE_ROOT" PATH="$PATH" \
-    HP2R_FIXTURE_REMOTE_RUNNING_RELEASE="${HP2R_FIXTURE_REMOTE_RUNNING_RELEASE:-}" \
-    HP2R_FIXTURE_INTERRUPT_AFTER="${HP2R_FIXTURE_INTERRUPT_AFTER:-}" \
-    HP2R_FIXTURE_PRESERVE_MUTATIONS="${HP2R_FIXTURE_PRESERVE_MUTATIONS:-}" \
-    HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH:-}" \
-    HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH:-}" \
-    HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH:-}" \
-    HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH:-}" \
-    HP2R_FIXTURE_FAIL_AFTER_STAGED_PUBLICATION="${HP2R_FIXTURE_FAIL_AFTER_STAGED_PUBLICATION:-}" \
-    HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY="${HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY:-}" \
-    HP2R_FIXTURE_MUTATE_NORMALIZATION_BOUND_LEAF="${HP2R_FIXTURE_MUTATE_NORMALIZATION_BOUND_LEAF:-}" \
-    schema5_staged_authority_asserting="${schema5_staged_authority_asserting:-}" \
-    schema5_staged_authority_allow_prepared="${schema5_staged_authority_allow_prepared:-}" \
-    bash -c 'id -u > "$HP2R_FIXTURE_ROOT/tmp/remote-uid"; exec bash "$@"' bash "$@"; then
+  run_remote_stdin_action() {
+    setpriv --reuid=65534 --regid=65534 --clear-groups \
+      env HP2R_INSTALL_ROOT="$HP2R_FIXTURE_ROOT" PATH="$PATH" \
+      HP2R_FIXTURE_REMOTE_RUNNING_RELEASE="${HP2R_FIXTURE_REMOTE_RUNNING_RELEASE:-}" \
+      HP2R_FIXTURE_INTERRUPT_AFTER="${HP2R_FIXTURE_INTERRUPT_AFTER:-}" \
+      HP2R_FIXTURE_PRESERVE_MUTATIONS="${HP2R_FIXTURE_PRESERVE_MUTATIONS:-}" \
+      HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH:-}" \
+      HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH:-}" \
+      HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH:-}" \
+      HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH:-}" \
+      HP2R_FIXTURE_FAIL_AFTER_STAGED_PUBLICATION="${HP2R_FIXTURE_FAIL_AFTER_STAGED_PUBLICATION:-}" \
+      HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY="${HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY:-}" \
+      HP2R_FIXTURE_MUTATE_NORMALIZATION_BOUND_LEAF="${HP2R_FIXTURE_MUTATE_NORMALIZATION_BOUND_LEAF:-}" \
+      schema5_staged_authority_asserting="${schema5_staged_authority_asserting:-}" \
+      schema5_staged_authority_allow_prepared="${schema5_staged_authority_allow_prepared:-}" \
+      bash -c 'id -u > "$HP2R_FIXTURE_ROOT/tmp/remote-uid"; exec bash "$@"' bash "$@"
+  }
+  if test "$remote_action" = authorize-inactive-stage &&
+    test -n "${HP2R_FIXTURE_AUTHORIZATION_TUPLE_SHAPE:-}"; then
+    if remote_output="$(run_remote_stdin_action "$@")"; then
+      remote_status=0
+      case "$HP2R_FIXTURE_AUTHORIZATION_TUPLE_SHAPE" in
+        valid) ;;
+        empty-interior) remote_output="${remote_output/$'\t'/$'\t\t'}" ;;
+        trailing-empty) remote_output+=$'\t' ;;
+        leading-empty) remote_output=$'\t'"$remote_output" ;;
+        nonempty-extra) remote_output+=$'\tforeign' ;;
+        *)
+          printf 'unknown authorization tuple shape: %s\n' \
+            "$HP2R_FIXTURE_AUTHORIZATION_TUPLE_SHAPE" >&2
+          exit 64
+          ;;
+      esac
+      printf '%s\t%s\n' "$HP2R_FIXTURE_AUTHORIZATION_TUPLE_SHAPE" \
+        "$(awk -F '\t' '{ print NF }' <<<"$remote_output")" \
+        > "$HP2R_FIXTURE_ROOT/tmp/authorization-tuple-shape"
+      printf '%s\n' "$remote_output"
+    else
+      remote_status=$?
+    fi
+  elif run_remote_stdin_action "$@"; then
     remote_status=0
   else
     remote_status=$?
@@ -3202,6 +3228,7 @@ exercise_inactive_kernel_prepare() {
   local legacy_artifact legacy_backlight_initial legacy_backlight_drift
   local legacy_post_auth_backlight_drift legacy_stage_output
   local legacy_live_before legacy_proof_before legacy_transition_before
+  local authorization_tuple_shape authorization_stage_output
   local legacy_stage_completed=false
   local candidate_stage_repo=''
 
@@ -3732,6 +3759,45 @@ exercise_inactive_kernel_prepare() {
   # stage branch becomes cross-kernel aware.
   : > "$log"
   accepted_pre_stage_sha="$(sha256sum "$state_dir/accepted-transition" | awk '{ print $1 }')"
+  authorization_tuple_shape="${HP2R_FIXTURE_AUTHORIZATION_TUPLE_SHAPE:-none}"
+  if test "$authorization_tuple_shape" != none; then
+    authorization_stage_output="$fixture/inactive-authorization-tuple-stage.out"
+    if test "$authorization_tuple_shape" = valid; then
+      run_inactive_stage >"$authorization_stage_output" 2>&1 || {
+        cat "$authorization_stage_output" >&2
+        fail 'inactive stage rejected a valid raw 11-field authorization tuple'
+      }
+      grep -Fxq 'valid	11' "$root/tmp/authorization-tuple-shape" ||
+        fail 'valid inactive authorization fixture did not emit exactly 11 raw fields'
+      assert_file "$state_dir/tryboot-state"
+      grep -Fxq 'phase=staged' "$state_dir/accepted-transition" ||
+        fail 'valid inactive authorization tuple did not stage the candidate'
+      exit 0
+    fi
+    if run_inactive_stage >"$authorization_stage_output" 2>&1; then
+      fail "inactive stage accepted malformed raw authorization tuple: $authorization_tuple_shape"
+    fi
+    assert_file "$root/tmp/authorization-tuple-shape"
+    grep -Fxq "$authorization_tuple_shape"$'\t''12' \
+      "$root/tmp/authorization-tuple-shape" ||
+      fail "malformed authorization fixture did not emit 12 raw fields: $authorization_tuple_shape"
+    grep -Fxq 'inactive stage authorization has an unsafe tuple shape' \
+      "$authorization_stage_output" ||
+      fail "malformed authorization tuple missed raw shape validation: $authorization_tuple_shape"
+    test ! -e "$log" || ! grep -q '^scp ' "$log" ||
+      fail "malformed raw authorization tuple reached payload upload: $authorization_tuple_shape"
+    test "$(sha256sum "$state_dir/accepted-transition" | awk '{ print $1 }')" = \
+      "$accepted_pre_stage_sha" ||
+      fail "malformed raw authorization tuple changed accepted authority: $authorization_tuple_shape"
+    grep -Fxq 'phase=prepared' "$state_dir/accepted-transition" ||
+      fail "malformed raw authorization tuple advanced accepted phase: $authorization_tuple_shape"
+    assert_absent "$state_dir/tryboot-state"
+    assert_absent "$root/boot/firmware/tryboot.txt"
+    assert_absent "$root/boot/firmware/$kernel_name"
+    assert_absent "$root/boot/firmware/$initramfs_name"
+    assert_no_private_workspaces
+    exit 0
+  fi
   if test "${HP2R_FIXTURE_LEGACY_ACCEPTED:-}" = 1; then
     legacy_backlight_drift="${HP2R_FIXTURE_LEGACY_BACKLIGHT_DRIFT:-none}"
     legacy_post_auth_backlight_drift="${HP2R_FIXTURE_LEGACY_POST_AUTH_BACKLIGHT_DRIFT:-none}"
@@ -5786,6 +5852,24 @@ exercise_legacy_inactive_post_auth_backlight_drift_matrix() {
     fail 'inactive legacy forged stage backlight authority fixture failed'
 }
 
+exercise_inactive_authorization_tuple_shapes() {
+  local shape count=0
+
+  for shape in empty-interior trailing-empty leading-empty nonempty-extra
+  do
+    HP2R_FIXTURE_CASE=inactive-kernel-authorization-tuple-shape-one \
+      HP2R_FIXTURE_AUTHORIZATION_TUPLE_SHAPE="$shape" \
+      bash "${BASH_SOURCE[0]}" >/dev/null ||
+      fail "inactive authorization tuple-shape fixture failed: $shape"
+    count=$((count + 1))
+  done
+  test "$count" = 4 || fail 'inactive malformed authorization tuple inventory drifted'
+  HP2R_FIXTURE_CASE=inactive-kernel-authorization-tuple-shape-one \
+    HP2R_FIXTURE_AUTHORIZATION_TUPLE_SHAPE=valid \
+    bash "${BASH_SOURCE[0]}" >/dev/null ||
+    fail 'inactive valid authorization tuple fixture failed'
+}
+
 exercise_rollback_transaction_retired_replay() {
   local failure_status
 
@@ -5835,6 +5919,14 @@ case "${HP2R_FIXTURE_CASE:-}" in
     exit 0
     ;;
   inactive-kernel-legacy-backlight-one)
+    exercise_inactive_kernel_prepare
+    exit 0
+    ;;
+  inactive-kernel-authorization-tuple-shapes)
+    exercise_inactive_authorization_tuple_shapes
+    exit 0
+    ;;
+  inactive-kernel-authorization-tuple-shape-one)
     exercise_inactive_kernel_prepare
     exit 0
     ;;

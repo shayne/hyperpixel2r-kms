@@ -122,6 +122,11 @@ if test -n "$requested_release"; then
     echo 'inactive stage authorization has an unsafe tuple shape' >&2
     exit 1
   }
+  awk -F '\t' 'NF != 11 { exit 1 } { for (field = 1; field <= NF; field++) if ($field == "") exit 1 }' \
+    <<<"$authorization" || {
+      echo 'inactive stage authorization has an unsafe tuple shape' >&2
+      exit 1
+    }
   IFS=$'\t' read -r authorized_release authorized_target_identity authorized_kernel_file authorized_kernel_sha \
     authorized_initramfs_file authorized_initramfs_sha authorized_base_dtb_sha \
     authorized_vc4_overlay_sha authorized_transition_sha authorized_stage_backlight_rule_existed \
