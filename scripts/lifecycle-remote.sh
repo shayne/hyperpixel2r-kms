@@ -6155,8 +6155,7 @@ set_accepted_transition_phase() {
   transition_schema="$(sudo awk -F= '$1 == "schema_version" { print $2 }' "$transition_source")"
   transition_inventory="$(sudo awk -F= '$1 == "candidate_dkms_inventory_sha256" { print $2 }' "$transition_source")"
   schema="$transition_schema"
-  if { test "$schema" = 3 || test "$schema" = 4 || test "$schema" = 5 || test "$schema" = 6; } &&
-    test "$transition_inventory" = pending; then
+  if test "$schema" = 6 && test "$transition_inventory" = pending; then
     test "$expected:$next" = prepared:staged || return
     [[ "$inventory_sha" =~ ^[0-9a-f]{64}$ ]] || return
   elif test -n "$inventory_sha"; then
@@ -6933,7 +6932,7 @@ assert_accepted_transition() {
   if test "$schema" = 6 && test "$(accepted_transition_value candidate_dkms_inventory_sha256)" != pending; then
     marker="$candidate_artifact/dkms-candidate-state"
   fi
-  if test "$schema" = 3 || test "$schema" = 4 || test "$schema" = 5 || test "$schema" = 6; then
+  if test "$schema" = 6; then
     if test "$(accepted_transition_value candidate_dkms_inventory_sha256)" = pending; then
       test "$kind:$phase" = new:prepared || return
     else
@@ -6943,6 +6942,12 @@ assert_accepted_transition() {
       test "$(sha "$marker")" = \
         "$(accepted_transition_value candidate_dkms_inventory_sha256)" || return
     fi
+  elif { test "$schema" = 3 || test "$schema" = 4 || test "$schema" = 5; } &&
+    test "$(accepted_transition_value candidate_dkms_inventory_sha256)" = pending; then
+    case "$kind:$phase" in
+      new:prepared|new:staged) ;;
+      *) return 1 ;;
+    esac
   elif sudo test -e "$marker" || sudo test -L "$marker"; then
     assert_dkms_inventory_file "$marker" || return
     test "$(sudo sed -n '1p' "$marker")" != schema_version=2 || return

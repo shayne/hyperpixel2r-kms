@@ -399,7 +399,7 @@ release_identity_token_allowed() {
         "$allowed_underscore_interface") return 0 ;;
       esac
       ;;
-    packaging/70-planeradar-backlight.rules|scripts/accepted-lifecycle.sh|scripts/build-driver.sh|scripts/stage-tryboot.sh|tests/boot-scripts.sh|tests/build-contract.sh|tests/release-contract.sh)
+    packaging/70-planeradar-backlight.rules|scripts/accepted-lifecycle.sh|scripts/build-driver.sh|scripts/stage-tryboot.sh|tests/accepted-lifecycle.sh|tests/boot-scripts.sh|tests/build-contract.sh|tests/release-contract.sh)
       case "$identity_token" in
         "$allowed_backlight_name"|"$allowed_backlight_rule") return 0 ;;
       esac
@@ -440,6 +440,15 @@ check_release_identity "$legitimate_rule_root" || {
   printf 'release identity guard rejected the exact public backlight rule token\n' >&2
   exit 1
 }
+
+accepted_lifecycle_hostile_root="$(
+  identity_fixture accepted-lifecycle-hostile tests/accepted-lifecycle.sh \
+    "${allowed_backlight_rule}-private ${legacy_host_marker}private"
+)"
+if check_release_identity "$accepted_lifecycle_hostile_root" >/dev/null 2>&1; then
+  printf 'release identity guard accepted hostile accepted-lifecycle compound or credential\n' >&2
+  exit 1
+fi
 
 binary_identity_root="$temporary_dir/identity-binary"
 binary_identity_path=overlays/hyperpixel2r-kms-overlay.dts
