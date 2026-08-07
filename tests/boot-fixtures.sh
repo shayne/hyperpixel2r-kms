@@ -7913,7 +7913,7 @@ run_stage >/dev/null
 state="$root/var/lib/hyperpixel2r-kms/tryboot-state"
 assert_file "$state"
 test "$(stat -c '%U:%G:%a' "$state")" = root:root:600 || fail 'state ownership or mode is not exact'
-test "$(awk 'END {print NR}' "$state")" = 23 || fail 'state schema cardinality changed'
+test "$(awk 'END {print NR}' "$state")" = 25 || fail 'state schema cardinality changed'
 grep -Fxq 'schema_version=4' "$state"
 grep -Eq '^candidate_config_sha256=[0-9a-f]{64}$' "$state"
 grep -Eq '^prior_dkms_inventory_sha256=[0-9a-f]{64}$' "$state"
@@ -7924,6 +7924,8 @@ grep -Fxq 'backlight_rule_file=70-planeradar-backlight.rules' "$state"
 grep -Eq '^backlight_rule_sha256=[0-9a-f]{64}$' "$state"
 grep -Fxq 'prior_backlight_rule_existed=false' "$state"
 grep -Fxq 'prior_backlight_rule_sha256=none' "$state"
+grep -Fxq 'backlight_metadata_capability=exact-backlight-metadata-v1' "$state"
+grep -Eq '^prior_backlight_metadata_sha256=[0-9a-f]{64}$' "$state"
 grep -Fq 'fixture committed source: hyperpixel2r_kms_main.c' \
   "$root/usr/src/hyperpixel2r-kms-0.2.0/hyperpixel2r_kms_main.c" ||
   fail 'DKMS source was not materialized from the committed source identity'
