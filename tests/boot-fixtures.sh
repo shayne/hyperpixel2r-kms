@@ -145,6 +145,19 @@ new_target() {
   cc "$repo_root/tests/fixture-sudo.c" -o "$bin/sudo"
   chown root:root "$bin/sudo"
   chmod 4755 "$bin/sudo"
+  install -m 0755 /bin/sh "$bin/cap-shell"
+  python3 - "$bin/cap-shell" <<'PY'
+import os
+import struct
+import sys
+
+# VFS_CAP_REVISION_2 | VFS_CAP_FLAGS_EFFECTIVE with CAP_DAC_OVERRIDE permitted.
+os.setxattr(
+    sys.argv[1],
+    "security.capability",
+    struct.pack("<IIIII", 0x02000001, 1 << 1, 0, 0, 0),
+)
+PY
 
   install -m 0755 /dev/stdin "$bin/id" <<'SCRIPT'
 #!/usr/bin/env bash
@@ -168,6 +181,18 @@ SCRIPT
   install -m 0755 /dev/stdin "$bin/setpriv" <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
+if test "${HP2R_FIXTURE_RETAIN_BACKLIGHT_CAPABILITY:-}" = 1 &&
+  test "${1-}" = --reuid=65534 && test "${2-}" = --regid=44 &&
+  test "${3-}" = --clear-groups; then
+  reuid="$1"
+  regid="$2"
+  shift 3
+  test "${1-}" = sh || exit 64
+  shift
+  : > "$HP2R_FIXTURE_ROOT/tmp/backlight-capability-retained"
+  exec /usr/bin/setpriv "$reuid" "$regid" --clear-groups \
+    "${HP2R_FIXTURE_ROOT%/root}/bin/cap-shell" "$@"
+fi
 if test "${HP2R_FIXTURE_RETAIN_BACKLIGHT_PRIVILEGE:-}" = 1 &&
   test "${1-}" = --reuid=65534 && test "${2-}" = --regid=44 &&
   test "${3-}" = --clear-groups; then
@@ -403,6 +428,57 @@ set -euo pipefail
 brightness="$HP2R_FIXTURE_ROOT/sys/class/backlight/planeradar-backlight/brightness"
 if test "${3-}" = "$brightness"; then
   case "${2-}:${HP2R_FIXTURE_BACKLIGHT_IDENTITY_SHAPE:-}" in
+    %U:%G:%a:%u:%g:metadata-gid-race)
+      numeric_gid="$(/usr/bin/stat -c %g "$brightness")"
+      chown "root:$((numeric_gid + 1))" "$brightness"
+      : > "$HP2R_FIXTURE_ROOT/tmp/backlight-metadata-gid-race"
+      printf 'root:video:660:0:%s\n' "$numeric_gid"
+      exit 0
+      ;;
+    %U:%G:%a:%u:%g:metadata-postwrite-drift)
+      if test -f "$HP2R_FIXTURE_ROOT/tmp/backlight-metadata-first-snapshot"; then
+        numeric_gid="$(/usr/bin/stat -c %g "$brightness")"
+        chown "root:$((numeric_gid + 1))" "$brightness"
+        : > "$HP2R_FIXTURE_ROOT/tmp/backlight-metadata-postwrite-drift"
+        printf 'root:video:660:0:%s\n' "$((numeric_gid + 1))"
+      else
+        : > "$HP2R_FIXTURE_ROOT/tmp/backlight-metadata-first-snapshot"
+        printf 'root:video:660:0:%s\n' \
+          "$(/usr/bin/stat -c %g "$brightness")"
+      fi
+      exit 0
+      ;;
+    %U:%G:%a:%u:%g:metadata-owner) printf '%s\n' root:root:660:0:0; exit 0 ;;
+    %U:%G:%a:%u:%g:metadata-mode)
+      printf 'root:video:640:0:%s\n' "$(/usr/bin/stat -c %g "$brightness")"
+      exit 0
+      ;;
+    %U:%G:%a:%u:%g:gid-missing) exit 1 ;;
+    %U:%G:%a:%u:%g:gid-ambiguous)
+      printf '%s\n' root:video:660:0:44 root:video:660:0:45
+      exit 0
+      ;;
+    %U:%G:%a:%u:%g:gid-nonnumeric) printf '%s\n' root:video:660:0:video; exit 0 ;;
+    %U:%G:%a:%u:%g:gid-zero) printf '%s\n' root:video:660:0:0; exit 0 ;;
+    %U:%G:%a:%u:%g:gid-unsafe) printf '%s\n' root:video:660:0:4294967295; exit 0 ;;
+    %U:%G:%a:%u:%g:*)
+      printf 'root:video:660:0:%s\n' "$(/usr/bin/stat -c %g "$brightness")"
+      exit 0
+      ;;
+    %U:%G:%a:metadata-gid-race) printf '%s\n' root:video:660; exit 0 ;;
+    %g:metadata-gid-race)
+      numeric_gid="$(/usr/bin/stat -c %g "$brightness")"
+      chown "root:$((numeric_gid + 1))" "$brightness"
+      : > "$HP2R_FIXTURE_ROOT/tmp/backlight-metadata-gid-race"
+      printf '%s\n' "$((numeric_gid + 1))"
+      exit 0
+      ;;
+    %U:%G:%a:metadata-postwrite-drift) printf '%s\n' root:video:660; exit 0 ;;
+    %g:metadata-postwrite-drift)
+      : > "$HP2R_FIXTURE_ROOT/tmp/backlight-metadata-postwrite-drift"
+      /usr/bin/stat -c %g "$brightness"
+      exit 0
+      ;;
     %U:%G:%a:metadata-owner) printf '%s\n' root:root:660; exit 0 ;;
     %U:%G:%a:metadata-mode) printf '%s\n' root:video:640; exit 0 ;;
     %U:%G:%a:*) printf '%s\n' root:video:660; exit 0 ;;
@@ -4705,6 +4781,90 @@ exercise_inactive_kernel_prepare() {
     unset HP2R_FIXTURE_RELEASE_OVERRIDE
     exit 0
   fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-backlight-capability; then
+    local brightness="$root/sys/class/backlight/planeradar-backlight/brightness"
+    local brightness_before receipt_before
+
+    prepare_inactive_normalized_verified_for_backlight_probe \
+      "$prior_kernel" "$prior_initramfs" "$candidate_release"
+    brightness_before="$(cat "$brightness")"
+    receipt_before="$(sha256sum "$state_dir/accepted-state" | awk '{ print $1 }')"
+    export HP2R_FIXTURE_REJECT_SUDO_RUNAS=1
+    export HP2R_FIXTURE_RETAIN_BACKLIGHT_CAPABILITY=1
+    if ! PATH="$bin:$PATH" HP2R_FIXTURE_ROOT="$root" \
+      "$bin/sudo" setpriv --reuid=65534 --regid=44 --clear-groups \
+      sh -eu -c '
+        actual_uid="$(id -u)"
+        actual_gid="$(id -g)"
+        actual_groups="$(id -G)"
+        writer_capabilities="$(sed -n "s/^CapEff:[[:space:]]*//p" "/proc/$$/status")"
+        observer_capabilities="$(sed -n "s/^CapEff:[[:space:]]*//p" /proc/self/status)"
+        test "$actual_uid" = 65534
+        test "$actual_gid" = 44
+        test "$actual_groups" = 44
+        case "$writer_capabilities" in ""|*[!0-9a-fA-F]*) exit 1;; esac
+        case "$writer_capabilities" in *[1-9a-fA-F]*) ;; *) exit 1;; esac
+        case "$observer_capabilities" in ""|*[!0]*) exit 1;; esac
+      ' sh >"$fixture/backlight-capability-preflight.out" 2>&1; then
+      cat "$fixture/backlight-capability-preflight.out" >&2
+      fail 'capability-retaining backlight fixture preflight failed'
+    fi
+    rm -f "$root/tmp/backlight-capability-retained"
+    if run_controller accepted-lifecycle.sh --action finalize \
+      >"$fixture/backlight-hostile-capability.out" 2>&1; then
+      assert_file "$root/tmp/backlight-capability-retained"
+      fail 'accepted finalizer trusted a capability-retaining writer shell'
+    fi
+    assert_file "$root/tmp/backlight-capability-retained"
+    grep -Fxq 'phase=normalized_verified' "$state_dir/accepted-transition" ||
+      fail 'retained-capability backlight probe advanced finalization'
+    test "$(sha256sum "$state_dir/accepted-state" | awk '{ print $1 }')" = \
+      "$receipt_before" || fail 'retained-capability backlight probe changed receipt'
+    test "$(cat "$brightness")" = "$brightness_before" ||
+      fail 'retained-capability backlight probe changed brightness'
+    unset HP2R_FIXTURE_RETAIN_BACKLIGHT_CAPABILITY HP2R_FIXTURE_REJECT_SUDO_RUNAS
+    unset HP2R_FIXTURE_RELEASE_OVERRIDE
+    exit 0
+  fi
+  if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-backlight-metadata-race ||
+    test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-backlight-metadata-postwrite; then
+    local brightness="$root/sys/class/backlight/planeradar-backlight/brightness"
+    local brightness_before receipt_before shape marker
+    local -a metadata_shapes
+
+    if test "$HP2R_FIXTURE_CASE" = inactive-kernel-backlight-metadata-race; then
+      metadata_shapes=(metadata-gid-race)
+    else
+      metadata_shapes=(metadata-postwrite-drift)
+    fi
+
+    prepare_inactive_normalized_verified_for_backlight_probe \
+      "$prior_kernel" "$prior_initramfs" "$candidate_release"
+    brightness_before="$(cat "$brightness")"
+    receipt_before="$(sha256sum "$state_dir/accepted-state" | awk '{ print $1 }')"
+    export HP2R_FIXTURE_REJECT_SUDO_RUNAS=1
+    for shape in "${metadata_shapes[@]}"; do
+      export HP2R_FIXTURE_BACKLIGHT_IDENTITY_SHAPE="$shape"
+      rm -f "$root/tmp/backlight-metadata-first-snapshot"
+      marker="$root/tmp/backlight-$shape"
+      rm -f "$marker"
+      if run_controller accepted-lifecycle.sh --action finalize \
+        >"$fixture/backlight-hostile-$shape.out" 2>&1; then
+        assert_file "$marker"
+        fail "accepted finalizer trusted backlight metadata drift: $shape"
+      fi
+      assert_file "$marker"
+      grep -Fxq 'phase=normalized_verified' "$state_dir/accepted-transition" ||
+        fail "backlight metadata drift advanced finalization: $shape"
+      test "$(sha256sum "$state_dir/accepted-state" | awk '{ print $1 }')" = \
+        "$receipt_before" || fail "backlight metadata drift changed receipt: $shape"
+      test "$(cat "$brightness")" = "$brightness_before" ||
+        fail "backlight metadata drift changed brightness: $shape"
+    done
+    unset HP2R_FIXTURE_BACKLIGHT_IDENTITY_SHAPE HP2R_FIXTURE_REJECT_SUDO_RUNAS
+    unset HP2R_FIXTURE_RELEASE_OVERRIDE
+    exit 0
+  fi
   if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-finalization; then
     local receipt="$state_dir/accepted-state"
     local prior_artifact="$root/usr/lib/hyperpixel2r-kms/0.1.1/$source_revision/$release"
@@ -6279,7 +6439,9 @@ case "${HP2R_FIXTURE_CASE:-}" in
     exercise_inactive_kernel_prepare
     for focused_case in inactive-kernel-finalization inactive-kernel-recovery-normalized \
       inactive-kernel-uninstall-orphan inactive-kernel-backlight-policy \
-      inactive-kernel-backlight-hostiles; do
+      inactive-kernel-backlight-hostiles inactive-kernel-backlight-capability \
+      inactive-kernel-backlight-metadata-race \
+      inactive-kernel-backlight-metadata-postwrite; do
       HP2R_FIXTURE_CASE="$focused_case" bash "${BASH_SOURCE[0]}" >/dev/null ||
         fail "focused inactive-kernel fixture failed: $focused_case"
     done
@@ -6385,7 +6547,7 @@ case "${HP2R_FIXTURE_CASE:-}" in
     exercise_inactive_kernel_prepare
     exit 0
     ;;
-  commit-readiness-expiry|commit-intent-tuple-drift|commit-boot-id-drift|inactive-kernel-phase-authority-drift|inactive-kernel-final-module-drift|inactive-kernel-final-artifact-drift|inactive-kernel-final-dkms-drift|inactive-kernel-setter-snapshot|inactive-kernel-stale-authority|inactive-kernel-hostile-env|inactive-kernel-commit-rejected|inactive-kernel-explicit-promotion|inactive-kernel-explicit-normal-verified|inactive-kernel-explicit-normal-unhealthy|inactive-kernel-explicit-normal-conventional-drift|inactive-kernel-explicit-normal-vermagic-prefix|inactive-kernel-explicit-normal-module-resolution-drift|inactive-kernel-normalized-module-resolution-drift|inactive-kernel-normalization|inactive-kernel-finalization|inactive-kernel-finalization-interruption-one|inactive-kernel-recovery-normalized|inactive-kernel-recovery-phase-one|inactive-kernel-uninstall-orphan|inactive-kernel-backlight-policy|inactive-kernel-backlight-hostiles|inactive-kernel-normalization-interruption-one|inactive-kernel-normalization-race-one|inactive-kernel-normalization-post-atomic|inactive-kernel-verification-phase-atomic|inactive-kernel-verification-phase-prepared|inactive-kernel-normalized-unhealthy|inactive-kernel-normalization-phase-hostile-one|inactive-kernel-explicit-interruption-one|inactive-kernel-transport-ancestor)
+  commit-readiness-expiry|commit-intent-tuple-drift|commit-boot-id-drift|inactive-kernel-phase-authority-drift|inactive-kernel-final-module-drift|inactive-kernel-final-artifact-drift|inactive-kernel-final-dkms-drift|inactive-kernel-setter-snapshot|inactive-kernel-stale-authority|inactive-kernel-hostile-env|inactive-kernel-commit-rejected|inactive-kernel-explicit-promotion|inactive-kernel-explicit-normal-verified|inactive-kernel-explicit-normal-unhealthy|inactive-kernel-explicit-normal-conventional-drift|inactive-kernel-explicit-normal-vermagic-prefix|inactive-kernel-explicit-normal-module-resolution-drift|inactive-kernel-normalized-module-resolution-drift|inactive-kernel-normalization|inactive-kernel-finalization|inactive-kernel-finalization-interruption-one|inactive-kernel-recovery-normalized|inactive-kernel-recovery-phase-one|inactive-kernel-uninstall-orphan|inactive-kernel-backlight-policy|inactive-kernel-backlight-hostiles|inactive-kernel-backlight-capability|inactive-kernel-backlight-metadata-race|inactive-kernel-backlight-metadata-postwrite|inactive-kernel-normalization-interruption-one|inactive-kernel-normalization-race-one|inactive-kernel-normalization-post-atomic|inactive-kernel-verification-phase-atomic|inactive-kernel-verification-phase-prepared|inactive-kernel-normalized-unhealthy|inactive-kernel-normalization-phase-hostile-one|inactive-kernel-explicit-interruption-one|inactive-kernel-transport-ancestor)
     exercise_inactive_kernel_prepare
     exit 0
     ;;

@@ -657,17 +657,22 @@ assert_exact_backlight_rule() {
   }
 }
 
-valid_nonroot_linux_id() {
+valid_linux_id() {
   local value="$1"
 
-  [[ "$value" =~ ^[1-9][0-9]{0,9}$ ]] || return 1
+  [[ "$value" =~ ^(0|[1-9][0-9]{0,9})$ ]] || return 1
   (( 10#$value <= 4294967294 ))
+}
+
+valid_nonroot_linux_id() {
+  valid_linux_id "$1" && test "$1" != 0
 }
 
 reload_backlight_permissions() {
   local verify_candidate="${1:-false}"
   local brightness="$backlight_sysfs/brightness"
   local maximum current nobody_uid video_gid
+  local backlight_metadata owner_name group_name mode owner_uid metadata_extra
 
   sudo udevadm control --reload-rules || return
   if sudo test -e "$backlight_sysfs" || sudo test -L "$backlight_sysfs"; then
@@ -690,7 +695,16 @@ reload_backlight_permissions() {
     echo 'backlight max_brightness is not a positive integer' >&2
     return 1
   }
-  test "$(sudo stat -c '%U:%G:%a' "$brightness")" = root:video:660 || {
+  backlight_metadata="$(sudo stat -c '%U:%G:%a:%u:%g' "$brightness")" || {
+    echo 'backlight brightness permissions are unavailable' >&2
+    return 1
+  }
+  IFS=: read -r owner_name group_name mode owner_uid video_gid metadata_extra \
+    <<< "$backlight_metadata"
+  test -z "$metadata_extra" &&
+    valid_linux_id "$owner_uid" && test "$owner_uid" = 0 &&
+    valid_nonroot_linux_id "$video_gid" &&
+    test "$backlight_metadata" = "root:video:660:0:$video_gid" || {
     echo 'backlight brightness permissions do not match the video-group contract' >&2
     return 1
   }
@@ -702,14 +716,6 @@ reload_backlight_permissions() {
     echo 'backlight probe user identity is unsafe' >&2
     return 1
   }
-  video_gid="$(sudo stat -c '%g' "$brightness")" || {
-    echo 'backlight probe group identity is unavailable' >&2
-    return 1
-  }
-  valid_nonroot_linux_id "$video_gid" || {
-    echo 'backlight probe group identity is unsafe' >&2
-    return 1
-  }
   current="$(sudo cat "$brightness")" || return
   [[ "$current" =~ ^[0-9]+$ ]] && test "$current" -le "$maximum" || return
   sudo setpriv --reuid="$nobody_uid" --regid="$video_gid" --clear-groups \
@@ -717,13 +723,24 @@ reload_backlight_permissions() {
       test "$(id -u)" = "$2"
       test "$(id -g)" = "$3"
       test "$(id -G)" = "$3"
-      capabilities="$(sed -n "s/^CapEff:[[:space:]]*//p" /proc/self/status)"
+      capabilities=
+      while read -r key value; do
+        if test "$key" = CapEff:; then
+          capabilities="$value"
+          break
+        fi
+      done < "/proc/$$/status"
       case "$capabilities" in ""|*[!0]*) exit 1;; esac
       value="$(cat "$1")"
       test "$value" = "$4"
       printf "%s\n" "$value" > "$1"
       test "$(cat "$1")" = "$4"
     ' sh "$brightness" "$nobody_uid" "$video_gid" "$current" || return
+  test "$(sudo stat -c '%U:%G:%a:%u:%g' "$brightness")" = \
+    "$backlight_metadata" || {
+    echo 'backlight brightness permissions changed during the operational probe' >&2
+    return 1
+  }
   test "$(sudo cat "$brightness")" = "$current"
 }
 
