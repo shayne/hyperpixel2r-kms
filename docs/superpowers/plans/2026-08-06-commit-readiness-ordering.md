@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Work only in `/Users/shayne/code/hyperpixel2r-kms` on GitButler stack `codex/legacy-inactive-backlight-authority`.
+- Work only in this repository on GitButler stack `codex/legacy-inactive-backlight-authority`.
 - Preserve unrelated GitButler stacks and commit only the files named below.
 - Use strict TDD: the expiring-readiness behavioral fixture must fail for the old ordering before production code changes.
 - The physical target remains frozen staged/uncommitted. Do not access, mutate, or reboot it.
