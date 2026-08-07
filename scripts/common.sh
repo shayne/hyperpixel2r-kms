@@ -3,6 +3,7 @@
 HP2R_DRIVER_VERSION="0.2.0"
 HP2R_DEFAULT_BUILD_IMAGE="hyperpixel2r-kms-kernel-builder:debian-trixie-gcc14"
 HP2R_BACKLIGHT_CAPABILITY="pwm-backlight-v1"
+HP2R_LIFECYCLE_CAPABILITY="exact-backlight-metadata-v1"
 HP2R_BACKLIGHT_RULE_FILE="70-planeradar-backlight.rules"
 
 hp2r_validate_target() {
@@ -391,7 +392,7 @@ hp2r_release_source_file() {
 
 hp2r_validate_artifact_manifest() {
   local manifest="$1"
-  local required_keys=(
+  local required_keys_v2=(
     schema_version
     driver_version
     source_revision
@@ -410,16 +411,18 @@ hp2r_validate_artifact_manifest() {
     backlight_rule_file
     backlight_rule_sha256
   )
+  local required_keys=()
   local key
   local value
   local release
   local source_revision
 
+  case "$(hp2r_manifest_value "$manifest" schema_version)" in
+    2) required_keys=("${required_keys_v2[@]}") ;;
+    3) required_keys=("${required_keys_v2[@]}" lifecycle_capability) ;;
+    *) echo "unsupported artifact manifest schema version" >&2; return 1 ;;
+  esac
   hp2r_validate_exact_manifest_rows "$manifest" "${required_keys[@]}" || return
-  test "$(hp2r_manifest_value "$manifest" schema_version)" = 2 || {
-    echo "unsupported artifact manifest schema version" >&2
-    return 1
-  }
   test "$(hp2r_manifest_value "$manifest" driver_version)" = \
     "$HP2R_DRIVER_VERSION" || {
     echo "artifact driver version is unsupported" >&2
@@ -446,6 +449,13 @@ hp2r_validate_artifact_manifest() {
     echo "artifact capability is unsupported" >&2
     return 1
   }
+  if test "$(hp2r_manifest_value "$manifest" schema_version)" = 3; then
+    test "$(hp2r_manifest_value "$manifest" lifecycle_capability)" = \
+      "$HP2R_LIFECYCLE_CAPABILITY" || {
+      echo "artifact lifecycle capability is unsupported" >&2
+      return 1
+    }
+  fi
   for key in \
     base_dtb_sha256 \
     module_sha256 \

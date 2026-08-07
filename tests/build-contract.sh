@@ -263,6 +263,7 @@ PATH="$no_probe_bin:$PATH" \
     --overlay-sha256 cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
     --backlight-rule-file 70-planeradar-backlight.rules \
     --backlight-rule-sha256 dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+    --lifecycle-capability exact-backlight-metadata-v1 \
     --kernel-target "$temporary_dir/candidate-target" \
     >"$accepted_missing_identity_error" 2>&1
 accepted_missing_identity_status=$?

@@ -21,4 +21,5 @@ test "${#oversized}" -gt 4096
   --overlay-file "${HP2R_FIXTURE_TRANSPORT_OVERLAY_FILE:?}" \
   --overlay-sha256 "${HP2R_FIXTURE_TRANSPORT_OVERLAY_SHA:?}" \
   --backlight-rule-file 70-planeradar-backlight.rules \
-  --backlight-rule-sha256 "${HP2R_FIXTURE_TRANSPORT_BACKLIGHT_RULE_SHA:?}"
+  --backlight-rule-sha256 "${HP2R_FIXTURE_TRANSPORT_BACKLIGHT_RULE_SHA:?}" \
+  --lifecycle-capability exact-backlight-metadata-v1

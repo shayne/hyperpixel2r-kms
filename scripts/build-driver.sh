@@ -441,7 +441,7 @@ test "$module_license" = GPL || {
 }
 
 {
-  printf 'schema_version\t2\n'
+  printf 'schema_version\t3\n'
   printf 'driver_version\t%s\n' "$HP2R_DRIVER_VERSION"
   printf 'source_revision\t%s\n' "$source_revision"
   printf 'source_tree\t%s\n' "$source_tree"
@@ -449,6 +449,7 @@ test "$module_license" = GPL || {
   printf 'architecture\taarch64\n'
   printf 'base_dtb_sha256\t%s\n' "$base_dtb_sha256"
   printf 'capability\t%s\n' "$HP2R_BACKLIGHT_CAPABILITY"
+  printf 'lifecycle_capability\t%s\n' "$HP2R_LIFECYCLE_CAPABILITY"
   printf 'module_file\thyperpixel2r_kms.ko\n'
   printf 'module_sha256\t%s\n' "$module_sha256"
   printf 'module_vermagic\t%s\n' "$module_vermagic"

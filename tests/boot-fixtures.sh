@@ -875,7 +875,7 @@ case "${1-}" in
     printf 'udevadm reload\n' >> "$HP2R_FIXTURE_LOG"
     ;;
   trigger)
-    test "$*" = 'trigger --action=add --subsystem-match=backlight --sysname-match=planeradar-backlight'
+    test "$*" = 'trigger --action=add --subsystem-match=backlight --sysname-match=planeradar-backlight --settle'
     rule="$HP2R_FIXTURE_ROOT/etc/udev/rules.d/70-planeradar-backlight.rules"
     brightness="$HP2R_FIXTURE_ROOT/sys/class/backlight/planeradar-backlight/brightness"
     if test -f "$brightness" && test -f "$rule"; then
@@ -889,7 +889,7 @@ case "${1-}" in
         chmod 0660 "$brightness"
       fi
     fi
-    printf 'udevadm trigger planeradar-backlight\n' >> "$HP2R_FIXTURE_LOG"
+    printf 'udevadm trigger --settle planeradar-backlight\n' >> "$HP2R_FIXTURE_LOG"
     ;;
   *) exit 64 ;;
 esac
@@ -1723,7 +1723,8 @@ run_accepted_prepare_controller() {
       --overlay-file "$overlay_file" \
       --overlay-sha256 "$(awk -F '\t' '$1 == "overlay_sha256" { print $2 }' "$manifest")" \
       --backlight-rule-file "$backlight_rule_file" \
-      --backlight-rule-sha256 "$(awk -F '\t' '$1 == "backlight_rule_sha256" { print $2 }' "$manifest")"
+      --backlight-rule-sha256 "$(awk -F '\t' '$1 == "backlight_rule_sha256" { print $2 }' "$manifest")" \
+      --lifecycle-capability exact-backlight-metadata-v1
 }
 
 prepare_recoverable_record_orphan() {
@@ -1898,6 +1899,258 @@ install_live_hardware() {
   printf '255\n' > "$root/sys/class/backlight/planeradar-backlight/max_brightness"
   printf '128\n' > "$root/sys/class/backlight/planeradar-backlight/brightness"
   printf 'EDT FT5406\n' > "$root/sys/class/input/event0/device/name"
+}
+
+exercise_backlight_udev_settle() {
+  new_target
+  run_stage >/dev/null
+  install_live_hardware
+  run_controller commit-boot.sh >/dev/null
+  grep -Fxq 'udevadm trigger --settle planeradar-backlight' "$log" ||
+    fail 'candidate permission reload did not settle its targeted udev event'
+}
+
+assert_backlight_brightness_metadata() {
+  local expected="$1"
+  local brightness="$root/sys/class/backlight/planeradar-backlight/brightness"
+
+  test "$(stat -c '%u:%g:%a' "$brightness")" = "$expected" ||
+    fail "backlight brightness metadata differs from $expected"
+}
+
+apply_fixture_candidate_backlight_permissions() {
+  HP2R_FIXTURE_ROOT="$root" HP2R_FIXTURE_LOG="$log" \
+    "$bin/udevadm" trigger --action=add --subsystem-match=backlight \
+      --sysname-match=planeradar-backlight --settle
+}
+
+exercise_backlight_permission_restore() {
+  local original_metadata artifact metadata
+
+  new_target
+  install_live_hardware
+  chown 0:4242 "$root/sys/class/backlight/planeradar-backlight/brightness"
+  chmod 0640 "$root/sys/class/backlight/planeradar-backlight/brightness"
+  original_metadata="$(stat -c '%u:%g:%a' \
+    "$root/sys/class/backlight/planeradar-backlight/brightness")"
+  test "$original_metadata" = 0:4242:640 ||
+    fail 'fixture backlight did not begin with non-default metadata'
+  run_stage >/dev/null
+  apply_fixture_candidate_backlight_permissions
+  test "$(stat -c '%U:%G:%a' \
+    "$root/sys/class/backlight/planeradar-backlight/brightness")" = root:video:660 ||
+    fail 'candidate udev policy did not change backlight metadata'
+  run_controller rollback-boot.sh >/dev/null
+  assert_backlight_brightness_metadata "$original_metadata"
+  artifact="$root/usr/lib/hyperpixel2r-kms/0.2.0/$source_revision/$release"
+  cp "$artifact/$backlight_rule_file" "$backlight_rule_path"
+  chown root:root "$backlight_rule_path"
+  chmod 0644 "$backlight_rule_path"
+  apply_fixture_candidate_backlight_permissions
+  run_controller uninstall.sh >/dev/null
+  assert_backlight_brightness_metadata "$original_metadata"
+
+  new_target
+  install_live_hardware
+  chown 0:4242 "$root/sys/class/backlight/planeradar-backlight/brightness"
+  chmod 0640 "$root/sys/class/backlight/planeradar-backlight/brightness"
+  original_metadata="$(stat -c '%u:%g:%a' \
+    "$root/sys/class/backlight/planeradar-backlight/brightness")"
+  run_stage >/dev/null
+  apply_fixture_candidate_backlight_permissions
+  if HP2R_FIXTURE_INTERRUPT_AFTER=rollback-boot-restored-unpublished \
+    HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
+    run_controller rollback-boot.sh >/dev/null 2>&1; then
+    fail 'rollback ignored the backlight-restoration interruption'
+  else
+    test "$?" = 97 || fail 'interrupted backlight rollback returned the wrong status'
+  fi
+  assert_backlight_brightness_metadata "$original_metadata"
+  find "$root/var/lib/hyperpixel2r-kms" -mindepth 1 -maxdepth 1 \
+    -type d -name '.hp2r-transaction.*' -exec rm -rf -- {} +
+  run_controller rollback-boot.sh >/dev/null
+  assert_backlight_brightness_metadata "$original_metadata"
+
+  new_target
+  install_live_hardware
+  chown 0:4242 "$root/sys/class/backlight/planeradar-backlight/brightness"
+  chmod 0640 "$root/sys/class/backlight/planeradar-backlight/brightness"
+  original_metadata="$(stat -c '%u:%g:%a' \
+    "$root/sys/class/backlight/planeradar-backlight/brightness")"
+  run_stage >/dev/null
+  run_controller commit-boot.sh >/dev/null
+  run_accepted_remote record-accepted \
+    0.2.0 "$source_revision" "$release" >/dev/null
+  test "$(stat -c '%U:%G:%a' \
+    "$root/sys/class/backlight/planeradar-backlight/brightness")" = root:video:660 ||
+    fail 'accepted candidate did not retain its backlight permissions'
+  if HP2R_FIXTURE_INTERRUPT_AFTER=uninstall-rule-restored \
+    run_accepted_remote uninstall-accepted \
+      0.2.0 "$source_revision" "$release" >/dev/null 2>&1; then
+    fail 'accepted uninstall ignored the rule-restoration interruption'
+  fi
+  run_accepted_remote uninstall-accepted \
+    0.2.0 "$source_revision" "$release" >/dev/null
+  run_accepted_remote finalize-uninstall-accepted >/dev/null
+  assert_backlight_brightness_metadata "$original_metadata"
+
+  new_target
+  printf 'fixture inert prior backlight policy\n' > "$backlight_rule_path"
+  chown root:root "$backlight_rule_path"
+  chmod 0644 "$backlight_rule_path"
+  run_stage >/dev/null
+  install_live_hardware
+  apply_fixture_candidate_backlight_permissions
+  run_controller rollback-boot.sh >/dev/null
+  assert_backlight_brightness_metadata 0:0:644
+
+  new_target
+  install_live_hardware
+  chown 0:4242 "$root/sys/class/backlight/planeradar-backlight/brightness"
+  chmod 0640 "$root/sys/class/backlight/planeradar-backlight/brightness"
+  run_stage >/dev/null
+  artifact="$root/usr/lib/hyperpixel2r-kms/0.2.0/$source_revision/$release"
+  metadata="$artifact/prior-backlight-metadata"
+  assert_file "$metadata"
+  rm -rf -- "$root/sys/class/backlight/planeradar-backlight"
+  if run_controller rollback-boot.sh >/dev/null 2>&1; then
+    fail 'rollback retired present backlight metadata while the device was missing'
+  fi
+  assert_file "$metadata"
+}
+
+exercise_backlight_metadata_authority() {
+  local artifact metadata metadata_sha transition uninstall
+
+  new_target
+  install_live_hardware
+  chown 0:4242 "$root/sys/class/backlight/planeradar-backlight/brightness"
+  chmod 0640 "$root/sys/class/backlight/planeradar-backlight/brightness"
+  run_stage >/dev/null
+  apply_fixture_candidate_backlight_permissions
+  artifact="$root/usr/lib/hyperpixel2r-kms/0.2.0/$source_revision/$release"
+  metadata="$artifact/prior-backlight-metadata"
+  rm -- "$metadata"
+  if run_controller rollback-boot.sh >/dev/null 2>&1; then
+    fail 'rollback accepted missing exact backlight metadata authority'
+  fi
+
+  new_target
+  install_live_hardware
+  chown 0:4242 "$root/sys/class/backlight/planeradar-backlight/brightness"
+  chmod 0640 "$root/sys/class/backlight/planeradar-backlight/brightness"
+  run_stage >/dev/null
+  apply_fixture_candidate_backlight_permissions
+  artifact="$root/usr/lib/hyperpixel2r-kms/0.2.0/$source_revision/$release"
+  metadata="$artifact/prior-backlight-metadata"
+  sed -i 's/^mode=.*/mode=600/' "$metadata"
+  if run_controller rollback-boot.sh >/dev/null 2>&1; then
+    fail 'rollback accepted modified exact backlight metadata authority'
+  fi
+
+  prepare_accepted_prior_tryboot_target
+  prepare_prior_tryboot_candidate_source
+  run_prior_tryboot_candidate_prepare >/dev/null
+  HP2R_FIXTURE_REPLACE_OVERLAY="$overlay_file" \
+    HP2R_FIXTURE_ARTIFACT_DIR_OVERRIDE="$candidate_artifact" \
+    HP2R_FIXTURE_SOURCE_ROOT_OVERRIDE="$candidate_source" \
+    run_stage >/dev/null
+  artifact="$root/usr/lib/hyperpixel2r-kms/0.2.0/$candidate_revision/$release"
+  metadata="$artifact/prior-backlight-metadata"
+  transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  metadata_sha="$(sha256sum "$metadata" | awk '{ print $1 }')"
+  grep -Fxq "candidate_prior_backlight_metadata_sha256=$metadata_sha" "$transition" ||
+    fail 'staged accepted transition did not bind exact backlight metadata'
+  sed -i 's/^mode=.*/mode=600/' "$metadata"
+  if run_accepted_remote recover-accepted >/dev/null 2>&1; then
+    fail 'accepted transition recovery trusted modified backlight metadata'
+  fi
+  assert_file "$transition"
+
+  new_target
+  install_live_hardware
+  chown 0:4242 "$root/sys/class/backlight/planeradar-backlight/brightness"
+  chmod 0640 "$root/sys/class/backlight/planeradar-backlight/brightness"
+  run_stage >/dev/null
+  run_controller commit-boot.sh >/dev/null
+  run_accepted_remote record-accepted \
+    0.2.0 "$source_revision" "$release" >/dev/null
+  artifact="$root/usr/lib/hyperpixel2r-kms/0.2.0/$source_revision/$release"
+  metadata="$artifact/prior-backlight-metadata"
+  metadata_sha="$(sha256sum "$metadata" | awk '{ print $1 }')"
+  if HP2R_FIXTURE_INTERRUPT_AFTER=uninstall-journal-published \
+    run_accepted_remote uninstall-accepted \
+      0.2.0 "$source_revision" "$release" >/dev/null 2>&1; then
+    fail 'accepted uninstall ignored metadata journal interruption'
+  fi
+  uninstall="$root/var/lib/hyperpixel2r-kms/accepted-uninstall"
+  grep -Fxq 'backlight_metadata_capability=exact-backlight-metadata-v1' "$uninstall" ||
+    fail 'accepted uninstall journal lost backlight metadata capability'
+  grep -Fxq "prior_backlight_metadata_sha256=$metadata_sha" "$uninstall" ||
+    fail 'accepted uninstall journal lost exact backlight metadata digest'
+  sed -i 's/^mode=.*/mode=600/' "$metadata"
+  if run_accepted_remote uninstall-accepted \
+    0.2.0 "$source_revision" "$release" >/dev/null 2>&1; then
+    fail 'accepted uninstall trusted modified backlight metadata authority'
+  fi
+  assert_file "$uninstall"
+}
+
+exercise_schema_two_candidate_upgrade() {
+  local candidate_source candidate_artifact candidate_manifest
+  local candidate_manifest_sha candidate_module_sha candidate_overlay_sha candidate_rule_sha
+  local candidate_revision candidate_overlay transition
+
+  new_target
+  run_stage >/dev/null
+  install_live_hardware
+  run_controller commit-boot.sh >/dev/null
+  run_accepted_remote record-accepted \
+    0.2.0 "$source_revision" "$release" >/dev/null
+
+  candidate_source="$fixture/schema-two-candidate-source"
+  candidate_artifact="$candidate_source/dist/artifacts/$release"
+  mkdir -p "$(dirname "$candidate_artifact")"
+  cp -a "$repo_root/dist/artifacts/$release" "$candidate_artifact"
+  candidate_manifest="$candidate_artifact/manifest.txt"
+  candidate_revision='cccccccccccccccccccccccccccccccccccccccc'
+  candidate_overlay='hyperpixel2r-kms-cccccccccccc.dtbo'
+  mv "$candidate_artifact/$overlay_file" "$candidate_artifact/$candidate_overlay"
+  sed -i \
+    -e 's/^schema_version\t3$/schema_version\t2/' \
+    -e '/^lifecycle_capability\t/d' \
+    -e "s/^source_revision\t.*/source_revision\t$candidate_revision/" \
+    -e "s/^overlay_file\t.*/overlay_file\t$candidate_overlay/" \
+    "$candidate_manifest"
+  candidate_manifest_sha="$(sha256sum "$candidate_manifest" | awk '{ print $1 }')"
+  candidate_module_sha="$(awk -F '\t' '$1 == "module_sha256" { print $2 }' "$candidate_manifest")"
+  candidate_overlay_sha="$(awk -F '\t' '$1 == "overlay_sha256" { print $2 }' "$candidate_manifest")"
+  candidate_rule_sha="$(awk -F '\t' '$1 == "backlight_rule_sha256" { print $2 }' "$candidate_manifest")"
+
+  run_accepted_remote prepare-new-accepted \
+    0.2.0 "$candidate_revision" "$release" "$candidate_manifest_sha" \
+    hyperpixel2r_kms.ko "$candidate_module_sha" \
+    "$candidate_overlay" "$candidate_overlay_sha" \
+    "$backlight_rule_file" "$candidate_rule_sha" >/dev/null
+  transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
+  if grep -q '^backlight_metadata_capability=' "$transition"; then
+    fail 'schema-2 candidate transition falsely advertised metadata authority'
+  fi
+  if ! HP2R_FIXTURE_REPLACE_OVERLAY="$overlay_file" \
+    HP2R_FIXTURE_ARTIFACT_DIR_OVERRIDE="$candidate_artifact" \
+    HP2R_FIXTURE_SOURCE_ROOT_OVERRIDE="$candidate_source" \
+    run_stage >"$fixture/schema-two-stage.out" 2>&1; then
+    cat "$fixture/schema-two-stage.out" >&2
+    fail 'schema-2 candidate could not stage through the legacy boundary'
+  fi
+  assert_absent \
+    "$root/usr/lib/hyperpixel2r-kms/0.2.0/$candidate_revision/$release/prior-backlight-metadata"
+  if ! run_accepted_remote recover-accepted \
+    >"$fixture/schema-two-recover.out" 2>&1; then
+    cat "$fixture/schema-two-recover.out" >&2
+    fail 'schema-2 candidate could not recover through the legacy boundary'
+  fi
+  assert_absent "$transition"
 }
 
 run_verify() {
@@ -2207,7 +2460,8 @@ downgrade_artifact_to_schema_one() {
 
   awk -F '\t' '
     $1 == "schema_version" { print "schema_version\t1"; next }
-    $1 == "capability" || $1 == "backlight_rule_file" ||
+    $1 == "capability" || $1 == "lifecycle_capability" ||
+      $1 == "backlight_rule_file" ||
       $1 == "backlight_rule_sha256" { next }
     { print }
   ' "$manifest" > "$temporary"
@@ -2215,7 +2469,8 @@ downgrade_artifact_to_schema_one() {
   chown root:root "$manifest"
   chmod 0644 "$manifest"
   rm -f -- "$artifact/$backlight_rule_file" \
-    "$artifact/prior-backlight-rule" "$backlight_rule_path"
+    "$artifact/prior-backlight-rule" \
+    "$artifact/prior-backlight-metadata" "$backlight_rule_path"
 }
 
 prepare_shared_module_inactive_retirement() {
@@ -2487,7 +2742,8 @@ run_prior_tryboot_candidate_prepare() {
     0.2.0 "$candidate_revision" "$release" "$candidate_manifest_sha" \
     hyperpixel2r_kms.ko "$candidate_module_sha" \
     "$candidate_overlay" "$candidate_overlay_sha" \
-    "$backlight_rule_file" "$candidate_rule_sha"
+    "$backlight_rule_file" "$candidate_rule_sha" \
+    exact-backlight-metadata-v1
 }
 
 prepare_prior_tryboot_candidate_source() {
@@ -3583,7 +3839,8 @@ exercise_inactive_kernel_prepare() {
         --overlay-file "$overlay_file" \
         --overlay-sha256 "$(awk -F '\t' '$1 == "overlay_sha256" { print $2 }' "$artifact_manifest")" \
         --backlight-rule-file "$backlight_rule_file" \
-        --backlight-rule-sha256 "$(awk -F '\t' '$1 == "backlight_rule_sha256" { print $2 }' "$artifact_manifest")"
+        --backlight-rule-sha256 "$(awk -F '\t' '$1 == "backlight_rule_sha256" { print $2 }' "$artifact_manifest")" \
+        --lifecycle-capability exact-backlight-metadata-v1
   }
   run_inactive_prepare() {
     if test "${HP2R_FIXTURE_OVERSIZED_TRANSPORT_ANCESTOR:-}" = 1; then
@@ -6252,7 +6509,8 @@ exercise_legacy_accepted_upgrade() {
       0.2.0 "$legacy_successor" "$release" "$(printf d%.0s {1..64})" \
       hyperpixel2r_kms.ko "$(printf e%.0s {1..64})" \
       hyperpixel2r-kms-eeeeeeeeeeee.dtbo "$(printf f%.0s {1..64})" \
-      "$backlight_rule_file" "$(printf a%.0s {1..64})" >"$prepare_output" 2>&1; then
+      "$backlight_rule_file" "$(printf a%.0s {1..64})" \
+      exact-backlight-metadata-v1 >"$prepare_output" 2>&1; then
     fail 'legacy accepted upgrade ignored transition publication interruption'
   fi
   legacy_transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
@@ -6363,6 +6621,22 @@ exercise_rollback_transaction_retired_replay() {
 assert_inactive_phase_guards_fail_closed
 
 case "${HP2R_FIXTURE_CASE:-}" in
+  backlight-udev-settle)
+    exercise_backlight_udev_settle
+    exit 0
+    ;;
+  backlight-permission-restore)
+    exercise_backlight_permission_restore
+    exit 0
+    ;;
+  backlight-metadata-authority)
+    exercise_backlight_metadata_authority
+    exit 0
+    ;;
+  schema-two-candidate-upgrade)
+    exercise_schema_two_candidate_upgrade
+    exit 0
+    ;;
   verify-restricted-path)
     exercise_verify_restricted_path
     exit 0
@@ -7213,7 +7487,8 @@ if HP2R_FIXTURE_INTERRUPT_AFTER=accepted-transition-published \
     0.2.0 "$new_revision" "$release" "$(printf d%.0s {1..64})" \
     hyperpixel2r_kms.ko "$(printf e%.0s {1..64})" \
     "$new_overlay" "$(printf f%.0s {1..64})" \
-    "$backlight_rule_file" "$(printf a%.0s {1..64})" >/dev/null 2>&1; then
+    "$backlight_rule_file" "$(printf a%.0s {1..64})" \
+    exact-backlight-metadata-v1 >/dev/null 2>&1; then
   fail 'new transition ignored interruption after pre-mutation journal publication'
 fi
 new_transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
@@ -7274,7 +7549,8 @@ do
     0.2.0 "$new_stage_revision" "$release" "$new_stage_manifest_sha" \
     hyperpixel2r_kms.ko "$new_stage_module_sha" \
     "$new_stage_overlay" "$new_stage_overlay_sha" \
-    "$backlight_rule_file" "$(awk -F '\t' '$1 == "backlight_rule_sha256" { print $2 }' "$new_stage_artifact/manifest.txt")" >/dev/null
+    "$backlight_rule_file" "$(awk -F '\t' '$1 == "backlight_rule_sha256" { print $2 }' "$new_stage_artifact/manifest.txt")" \
+    exact-backlight-metadata-v1 >/dev/null
   if HP2R_FIXTURE_INTERRUPT_AFTER="$boundary" \
     HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
     HP2R_FIXTURE_ARTIFACT_DIR_OVERRIDE="$new_stage_artifact" \
@@ -8220,7 +8496,8 @@ test "$(sed -n '1p' "$prepare_command")" = prepare-new-accepted &&
     "$(awk -F '\t' '$1 == "base_dtb_sha256" { print $2 }' "$prepare_target_manifest")" &&
   test "$(sed -n '16p' "$prepare_command")" = \
     "$(awk -F '\t' '$1 == "vc4_overlay_sha256" { print $2 }' "$prepare_target_manifest")" &&
-  test "$(awk 'END { print NR }' "$prepare_command")" = 16 ||
+  test "$(sed -n '17p' "$prepare_command")" = exact-backlight-metadata-v1 &&
+  test "$(awk 'END { print NR }' "$prepare_command")" = 17 ||
   fail 'accepted prepare did not forward fixed inactive target provenance'
 
 # Supplying inactive-only flags for the running kernel is rejected by the

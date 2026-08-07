@@ -98,7 +98,7 @@ base_dtb_sha256="$(sha256sum "$target_root$base_dtb_path" | awk '{print $1}')"
 vc4_overlay_sha256="$(sha256sum "$target_root$vc4_overlay_path" | awk '{print $1}')"
 
 {
-  printf 'schema_version\t2\n'
+  printf 'schema_version\t3\n'
   printf 'driver_version\t0.2.0\n'
   printf 'source_revision\t%s\n' "$source_revision"
   printf 'source_tree\t%s\n' "$source_tree"
@@ -106,6 +106,7 @@ vc4_overlay_sha256="$(sha256sum "$target_root$vc4_overlay_path" | awk '{print $1
   printf 'architecture\taarch64\n'
   printf 'base_dtb_sha256\t%s\n' "$base_dtb_sha256"
   printf 'capability\tpwm-backlight-v1\n'
+  printf 'lifecycle_capability\texact-backlight-metadata-v1\n'
   printf 'module_file\t%s\n' "$module_file"
   printf 'module_sha256\t%s\n' "$module_sha256"
   printf 'module_vermagic\t%s fixture\n' "$release"

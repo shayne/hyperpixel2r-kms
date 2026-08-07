@@ -23,6 +23,7 @@ overlay_file=''
 overlay_sha256=''
 backlight_rule_file=''
 backlight_rule_sha256=''
+lifecycle_capability=''
 while test "$#" -gt 0; do
   case "$1" in
     --target) test "$#" -ge 2 || exit 64; target="$2"; shift 2 ;;
@@ -44,6 +45,7 @@ while test "$#" -gt 0; do
     --overlay-sha256) test "$#" -ge 2 || exit 64; overlay_sha256="$2"; shift 2 ;;
     --backlight-rule-file) test "$#" -ge 2 || exit 64; backlight_rule_file="$2"; shift 2 ;;
     --backlight-rule-sha256) test "$#" -ge 2 || exit 64; backlight_rule_sha256="$2"; shift 2 ;;
+    --lifecycle-capability) test "$#" -ge 2 || exit 64; lifecycle_capability="$2"; shift 2 ;;
     -h|--help)
       echo 'Usage: accepted-lifecycle.sh --target TARGET --action ACTION [exact identity] [--kernel-target DIR --target-identity-sha256 SHA256]'
       exit 0
@@ -72,6 +74,10 @@ if test "$action" = prepare-new; then
   [[ "$overlay_sha256" =~ ^[0-9a-f]{64}$ ]] || exit 64
   test "$backlight_rule_file" = 70-planeradar-backlight.rules || exit 64
   [[ "$backlight_rule_sha256" =~ ^[0-9a-f]{64}$ ]] || exit 64
+  case "$lifecycle_capability" in
+    ''|exact-backlight-metadata-v1) ;;
+    *) exit 64 ;;
+  esac
   if test -n "$target_identity_sha256"; then
     [[ "$target_identity_sha256" =~ ^[0-9a-f]{64}$ ]] || exit 64
   elif "$kernel_target_explicit"; then
@@ -79,7 +85,7 @@ if test "$action" = prepare-new; then
     exit 64
   fi
 else
-  test -z "$manifest_sha256$module_file$module_sha256$overlay_file$overlay_sha256$backlight_rule_file$backlight_rule_sha256$target_identity_sha256" || exit 64
+  test -z "$manifest_sha256$module_file$module_sha256$overlay_file$overlay_sha256$backlight_rule_file$backlight_rule_sha256$lifecycle_capability$target_identity_sha256" || exit 64
 fi
 
 ssh_options=(-o BatchMode=yes -o ConnectTimeout=8 -o ConnectionAttempts=1)
@@ -165,6 +171,9 @@ case "$action" in
         "$candidate_kernel_sha256" "$candidate_initramfs_sha256" \
         "$candidate_base_dtb_sha256" "$candidate_vc4_overlay_sha256"
       )
+    fi
+    if test -n "$lifecycle_capability"; then
+      prepare_args+=("$lifecycle_capability")
     fi
     ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" \
       "${prepare_args[@]}"

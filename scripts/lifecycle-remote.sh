@@ -48,9 +48,10 @@ manifest_keys_v1=(
   base_dtb_sha256 module_file module_sha256 module_vermagic overlay_file overlay_sha256
   applied_dtb_file applied_dtb_sha256
 )
-manifest_keys=(
+manifest_keys_v2=(
   "${manifest_keys_v1[@]}" capability backlight_rule_file backlight_rule_sha256
 )
+manifest_keys=("${manifest_keys_v2[@]}" lifecycle_capability)
 state_keys_v1=(
   schema_version driver_version source_revision source_tree kernel_release module_file
   module_sha256 overlay_file overlay_sha256 applied_dtb_file applied_dtb_sha256
@@ -65,9 +66,20 @@ state_keys=(
   "${state_keys_v2[@]}"
   prior_dkms_inventory_sha256
 )
-state_keys_v4=(
+state_keys_v4_legacy=(
   "${state_keys[@]}" backlight_rule_file backlight_rule_sha256
   prior_backlight_rule_existed prior_backlight_rule_sha256
+)
+state_keys_v4=(
+  "${state_keys_v4_legacy[@]}" backlight_metadata_capability
+  prior_backlight_metadata_sha256
+)
+state_keys_v5_legacy=(
+  "${state_keys_v4_legacy[@]}" boot_transition
+  candidate_kernel_file candidate_kernel_sha256
+  candidate_initramfs_file candidate_initramfs_sha256
+  prior_normal_kernel_sha256 prior_normal_initramfs_sha256
+  accepted_transition_sha256
 )
 state_keys_v5=(
   "${state_keys_v4[@]}" boot_transition
@@ -85,9 +97,17 @@ accepted_keys=(
   "${accepted_keys_v1[@]}"
   prior_dkms_inventory_sha256
 )
-accepted_keys_v3=(
+accepted_keys_v3_legacy=(
   "${accepted_keys[@]}" backlight_rule_file backlight_rule_sha256
   prior_backlight_rule_existed prior_backlight_rule_sha256
+)
+accepted_keys_v3=(
+  "${accepted_keys_v3_legacy[@]}" backlight_metadata_capability
+  prior_backlight_metadata_sha256
+)
+accepted_keys_v4_legacy=(
+  "${accepted_keys_v3_legacy[@]}" normal_kernel_file normal_kernel_sha256
+  normal_initramfs_file normal_initramfs_sha256 base_dtb_sha256 vc4_overlay_sha256
 )
 accepted_keys_v4=(
   "${accepted_keys_v3[@]}" normal_kernel_file normal_kernel_sha256
@@ -105,10 +125,18 @@ accepted_transition_keys=(
   "${accepted_transition_keys_v2[@]}"
   candidate_dkms_inventory_sha256
 )
-accepted_transition_keys_v4=(
+accepted_transition_keys_v4_legacy=(
   "${accepted_transition_keys[@]}" candidate_backlight_rule_file
   candidate_backlight_rule_sha256 prior_backlight_rule_existed
   prior_backlight_rule_sha256
+)
+accepted_transition_keys_v4=(
+  "${accepted_transition_keys_v4_legacy[@]}" backlight_metadata_capability
+  candidate_prior_backlight_metadata_sha256
+)
+accepted_transition_keys_v5_legacy=(
+  "${accepted_transition_keys_v4_legacy[@]}" prior_tryboot_existed
+  prior_tryboot_sha256
 )
 accepted_transition_keys_v5=(
   "${accepted_transition_keys_v4[@]}" prior_tryboot_existed
@@ -116,6 +144,13 @@ accepted_transition_keys_v5=(
 )
 # Schema 6 is deliberately read-only in this release. Task 4 will write it,
 # but target identity is part of the authority contract now.
+accepted_transition_keys_v6_legacy=(
+  "${accepted_transition_keys_v5_legacy[@]}" target_identity_sha256 boot_transition
+  prior_normal_kernel_sha256 prior_normal_initramfs_sha256
+  candidate_kernel_file candidate_kernel_sha256 candidate_initramfs_file
+  candidate_initramfs_sha256 candidate_base_dtb_sha256 candidate_vc4_overlay_sha256
+  explicit_normal_config_sha256 normalized_normal_config_sha256
+)
 accepted_transition_keys_v6=(
   "${accepted_transition_keys_v5[@]}" target_identity_sha256 boot_transition
   prior_normal_kernel_sha256 prior_normal_initramfs_sha256
@@ -132,9 +167,13 @@ accepted_uninstall_keys=(
   "${accepted_uninstall_keys_v2[@]}"
   prior_dkms_inventory_sha256
 )
-accepted_uninstall_keys_v4=(
+accepted_uninstall_keys_v4_legacy=(
   "${accepted_uninstall_keys[@]}" backlight_rule_file backlight_rule_sha256
   prior_backlight_rule_existed prior_backlight_rule_sha256
+)
+accepted_uninstall_keys_v4=(
+  "${accepted_uninstall_keys_v4_legacy[@]}" backlight_metadata_capability
+  prior_backlight_metadata_sha256
 )
 rollback_keys=(
   schema_version mode phase transaction_sha256 driver_version source_revision
@@ -142,9 +181,17 @@ rollback_keys=(
   overlay_sha256 candidate_dkms_inventory_sha256 prior_dkms_inventory_sha256
   candidate_tryboot_sha256 tryboot_existed module_existed overlay_existed
 )
-rollback_keys_v2=(
+rollback_keys_v2_legacy=(
   "${rollback_keys[@]}" backlight_rule_file backlight_rule_sha256
   prior_backlight_rule_existed prior_backlight_rule_sha256
+)
+rollback_keys_v2=(
+  "${rollback_keys_v2_legacy[@]}" backlight_metadata_capability
+  prior_backlight_metadata_sha256
+)
+rollback_keys_v3_legacy=(
+  "${rollback_keys_v2_legacy[@]}" candidate_kernel_file candidate_kernel_sha256
+  candidate_initramfs_file candidate_initramfs_sha256
 )
 rollback_keys_v3=(
   "${rollback_keys_v2[@]}" candidate_kernel_file candidate_kernel_sha256
@@ -668,6 +715,115 @@ valid_nonroot_linux_id() {
   valid_linux_id "$1" && test "$1" != 0
 }
 
+assert_backlight_metadata_record() {
+  local record="$1"
+  local key count present owner_uid group_gid mode
+
+  assert_owned_regular "$record" 600 || return
+  test "$(sudo stat -c '%s' "$record")" -le 160 || return
+  test "$(sudo awk 'END { print NR }' "$record")" = 5 || return
+  sudo awk -F= 'NF != 2 || $1 == "" || $2 == "" { exit 1 }' "$record" || return
+  for key in schema_version present owner_uid group_gid mode; do
+    count="$(sudo awk -F= -v wanted="$key" '$1 == wanted { count++ } END { print count + 0 }' "$record")"
+    test "$count" = 1 || return
+  done
+  test "$(sudo awk -F= '$1 == "schema_version" { print $2 }' "$record")" = 1 || return
+  present="$(sudo awk -F= '$1 == "present" { print $2 }' "$record")"
+  owner_uid="$(sudo awk -F= '$1 == "owner_uid" { print $2 }' "$record")"
+  group_gid="$(sudo awk -F= '$1 == "group_gid" { print $2 }' "$record")"
+  mode="$(sudo awk -F= '$1 == "mode" { print $2 }' "$record")"
+  case "$present" in
+    true)
+      valid_linux_id "$owner_uid" && valid_linux_id "$group_gid" &&
+        [[ "$mode" =~ ^[0-7]{3}$ ]]
+      ;;
+    false)
+      test "$owner_uid:$group_gid:$mode" = none:none:none
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+backlight_metadata_value() {
+  local record="$1"
+  local key="$2"
+
+  assert_backlight_metadata_record "$record" || return
+  sudo awk -F= -v wanted="$key" '$1 == wanted { print $2 }' "$record"
+}
+
+capture_backlight_metadata() {
+  local output="$1"
+  local workspace="$2"
+  local brightness="$backlight_sysfs/brightness"
+  local metadata owner_uid group_gid mode extra present=false
+
+  assert_private_workspace "$workspace" || return
+  case "$output" in "$workspace"/*) ;; *) return 1;; esac
+  assert_owned_regular "$output" 600 || return
+  owner_uid=none
+  group_gid=none
+  mode=none
+  if sudo test -e "$brightness" || sudo test -L "$brightness"; then
+    require_regular "$brightness" || return
+    metadata="$(sudo stat -c '%u:%g:%a' "$brightness")" || return
+    IFS=: read -r owner_uid group_gid mode extra <<< "$metadata"
+    test -z "$extra" && valid_linux_id "$owner_uid" &&
+      valid_linux_id "$group_gid" && [[ "$mode" =~ ^[0-7]{3}$ ]] || return
+    present=true
+  fi
+  {
+    printf 'schema_version=1\n'
+    printf 'present=%s\n' "$present"
+    printf 'owner_uid=%s\n' "$owner_uid"
+    printf 'group_gid=%s\n' "$group_gid"
+    printf 'mode=%s\n' "$mode"
+  } | sudo tee "$output" >/dev/null || return
+  assert_backlight_metadata_record "$output"
+}
+
+restore_backlight_permissions() {
+  local prior_rule_existed="$1"
+  local metadata_record="${2:-}"
+  local brightness="$backlight_sysfs/brightness"
+  local present='' owner_uid='' group_gid='' mode='' restored
+
+  case "$prior_rule_existed" in true|false) ;; *) return 1;; esac
+  if test -n "$metadata_record" &&
+    { sudo test -e "$metadata_record" || sudo test -L "$metadata_record"; }; then
+    assert_backlight_metadata_record "$metadata_record" || return
+    present="$(backlight_metadata_value "$metadata_record" present)" || return
+    owner_uid="$(backlight_metadata_value "$metadata_record" owner_uid)" || return
+    group_gid="$(backlight_metadata_value "$metadata_record" group_gid)" || return
+    mode="$(backlight_metadata_value "$metadata_record" mode)" || return
+  fi
+  sudo udevadm control --reload-rules || return
+  if sudo test -e "$backlight_sysfs" || sudo test -L "$backlight_sysfs"; then
+    require_regular "$brightness" || return
+    if test "$present" = false; then
+      sudo chown 0:0 "$brightness" || return
+      sudo chmod 0644 "$brightness" || return
+    fi
+    sudo udevadm trigger --action=add --subsystem-match=backlight \
+      --sysname-match=planeradar-backlight --settle || return
+  else
+    test "$present" != true || return 1
+    return 0
+  fi
+  if test "$present" = true; then
+    sudo chown "$owner_uid:$group_gid" "$brightness" || return
+    sudo chmod "$mode" "$brightness" || return
+    restored="$owner_uid:$group_gid:$mode"
+  elif test "$prior_rule_existed" = false; then
+    sudo chown 0:0 "$brightness" || return
+    sudo chmod 0644 "$brightness" || return
+    restored=0:0:644
+  else
+    return 0
+  fi
+  test "$(sudo stat -c '%u:%g:%a' "$brightness")" = "$restored"
+}
+
 reload_backlight_permissions() {
   local verify_candidate="${1:-false}"
   local brightness="$backlight_sysfs/brightness"
@@ -677,7 +833,7 @@ reload_backlight_permissions() {
   sudo udevadm control --reload-rules || return
   if sudo test -e "$backlight_sysfs" || sudo test -L "$backlight_sysfs"; then
     sudo udevadm trigger --action=add --subsystem-match=backlight \
-      --sysname-match=planeradar-backlight || return
+      --sysname-match=planeradar-backlight --settle || return
   else
     test "$verify_candidate" = false || {
       echo 'named backlight device is missing' >&2
@@ -1342,7 +1498,8 @@ assert_exact_manifest() {
   schema="$(manifest_value "$manifest" schema_version)"
   case "$schema" in
     1) expected_keys=("${manifest_keys_v1[@]}") ;;
-    2) expected_keys=("${manifest_keys[@]}") ;;
+    2) expected_keys=("${manifest_keys_v2[@]}") ;;
+    3) expected_keys=("${manifest_keys[@]}") ;;
     *) echo 'unsupported artifact manifest schema' >&2; return 1 ;;
   esac
   test "$(sudo awk 'END { print NR }' "$manifest")" = "${#expected_keys[@]}" || {
@@ -1372,11 +1529,15 @@ assert_exact_manifest() {
   test "$(manifest_value "$manifest" overlay_file)" = \
     "hyperpixel2r-kms-$(manifest_value "$manifest" source_revision | cut -c1-12).dtbo" || return
   test "$(manifest_value "$manifest" applied_dtb_file)" = hyperpixel2r-kms-applied.dtb || return
-  if test "$schema" = 2; then
+  if test "$schema" = 2 || test "$schema" = 3; then
     test "$(manifest_value "$manifest" capability)" = pwm-backlight-v1 || return
     test "$(manifest_value "$manifest" backlight_rule_file)" = \
       70-planeradar-backlight.rules || return
     [[ "$(manifest_value "$manifest" backlight_rule_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
+  fi
+  if test "$schema" = 3; then
+    test "$(manifest_value "$manifest" lifecycle_capability)" = \
+      exact-backlight-metadata-v1 || return
   fi
 }
 
@@ -1604,10 +1765,13 @@ assert_artifact_tree() {
   allowed[dkms-prior-state]=1
   allowed[dkms-candidate-state]=1
   allowed[prior-dkms]=1
-  if test "$manifest_schema" = 2; then
+  if test "$manifest_schema" = 2 || test "$manifest_schema" = 3; then
     backlight_rule_file="$(manifest_value "$manifest" backlight_rule_file)"
     allowed["$backlight_rule_file"]=1
     allowed[prior-backlight-rule]=1
+    if test "$manifest_schema" = 3; then
+      allowed[prior-backlight-metadata]=1
+    fi
   fi
   if test "$require_prior" = true; then allowed[prior-tryboot.txt]=1; fi
   while IFS= read -r -d '' entry; do
@@ -1624,7 +1788,8 @@ assert_artifact_tree() {
       assert_source_tree_shape "$entry" || return
     elif test "$name" = dkms-prior-state || test "$name" = dkms-candidate-state; then
       assert_owned_regular "$entry" 600 || return
-    elif test "$name" = prior-tryboot.txt || test "$name" = prior-backlight-rule; then
+    elif test "$name" = prior-tryboot.txt || test "$name" = prior-backlight-rule ||
+      test "$name" = prior-backlight-metadata; then
       assert_owned_regular "$entry" 600 || return
     else
       assert_owned_regular "$entry" 644 || return
@@ -1634,7 +1799,7 @@ assert_artifact_tree() {
   for name in manifest.txt "$module_file" "$overlay_file" "$applied_dtb_file" dkms-source dkms-prior-state; do
     test "${seen[$name]-}" = 1 || { printf 'missing artifact path: %s/%s\n' "$artifact_dir" "$name" >&2; return 1; }
   done
-  if test "$manifest_schema" = 2; then
+  if test "$manifest_schema" = 2 || test "$manifest_schema" = 3; then
     test "${seen[$backlight_rule_file]-}" = 1 || {
       echo 'missing artifact backlight rule' >&2
       return 1
@@ -1642,6 +1807,13 @@ assert_artifact_tree() {
     assert_exact_backlight_rule "$artifact_dir/$backlight_rule_file" || return
     test "$(sha "$artifact_dir/$backlight_rule_file")" = \
       "$(manifest_value "$manifest" backlight_rule_sha256)" || return
+    if test "$manifest_schema" = 3; then
+      test "${seen[prior-backlight-metadata]-}" = 1 || {
+        echo 'missing prior backlight metadata authority' >&2
+        return 1
+      }
+      assert_backlight_metadata_record "$artifact_dir/prior-backlight-metadata" || return
+    fi
   fi
   if test "$require_prior" = true; then
     test "${seen[prior-tryboot.txt]-}" = 1 || { echo 'missing prior tryboot backup' >&2; return 1; }
@@ -1672,8 +1844,20 @@ assert_state_schema() {
     1) expected_keys=("${state_keys_v1[@]}") ;;
     2) expected_keys=("${state_keys_v2[@]}") ;;
     3) expected_keys=("${state_keys[@]}") ;;
-    4) expected_keys=("${state_keys_v4[@]}") ;;
-    5) expected_keys=("${state_keys_v5[@]}") ;;
+    4)
+      if test -n "$(state_value backlight_metadata_capability)"; then
+        expected_keys=("${state_keys_v4[@]}")
+      else
+        expected_keys=("${state_keys_v4_legacy[@]}")
+      fi
+      ;;
+    5)
+      if test -n "$(state_value backlight_metadata_capability)"; then
+        expected_keys=("${state_keys_v5[@]}")
+      else
+        expected_keys=("${state_keys_v5_legacy[@]}")
+      fi
+      ;;
     *) echo 'unsupported tryboot state schema version' >&2; return 1 ;;
   esac
   test "$(sudo awk 'END { print NR }' "$state_file")" = "${#expected_keys[@]}" || {
@@ -1712,6 +1896,7 @@ canonical_prepared_transition_sha_from() {
       sudo sed \
         -e 's/^phase=.*/phase=prepared/' \
         -e 's/^candidate_dkms_inventory_sha256=.*/candidate_dkms_inventory_sha256=pending/' \
+        -e 's/^candidate_prior_backlight_metadata_sha256=.*/candidate_prior_backlight_metadata_sha256=pending/' \
         -e 's/^explicit_normal_config_sha256=.*/explicit_normal_config_sha256=pending/' \
         -e 's/^normalized_normal_config_sha256=.*/normalized_normal_config_sha256=pending/' \
         "$transition"
@@ -1721,6 +1906,7 @@ canonical_prepared_transition_sha_from() {
         -e 's/^phase=staged$/phase=prepared/' \
         -e 's/^phase=explicit_normal_published$/phase=prepared/' \
         -e 's/^candidate_dkms_inventory_sha256=.*/candidate_dkms_inventory_sha256=pending/' \
+        -e 's/^candidate_prior_backlight_metadata_sha256=.*/candidate_prior_backlight_metadata_sha256=pending/' \
         -e 's/^explicit_normal_config_sha256=.*/explicit_normal_config_sha256=pending/' \
         "$transition"
       ;;
@@ -1762,6 +1948,7 @@ assert_prepared_transition_anchor() {
 
 assert_schema5_explicit_resume_state() {
   local release revision version artifact kernel_file initramfs_file key count expected_config_sha
+  local -a transition_keys=()
 
   assert_owned_regular "$accepted_transition" 600 &&
     assert_owned_regular "$accepted_transition_prior_config" 600 || return
@@ -1770,9 +1957,17 @@ assert_schema5_explicit_resume_state() {
     staged|explicit_normal_published|explicit_normal_verified|canonical_initramfs_published|canonical_pair_published) ;;
     *) return 1 ;;
   esac
-  test "$(sudo awk 'END { print NR }' "$accepted_transition")" = "${#accepted_transition_keys_v6[@]}" || return
+  if test -n "$(accepted_transition_value backlight_metadata_capability)"; then
+    transition_keys=("${accepted_transition_keys_v6[@]}")
+    test "$(sudo awk 'END { print NR }' "$accepted_transition")" = \
+      "${#accepted_transition_keys_v6[@]}" || return
+  else
+    transition_keys=("${accepted_transition_keys_v6_legacy[@]}")
+    test "$(sudo awk 'END { print NR }' "$accepted_transition")" = \
+      "${#accepted_transition_keys_v6_legacy[@]}" || return
+  fi
   sudo awk -F= 'NF != 2 || $1 == "" || $2 == "" { exit 1 }' "$accepted_transition" || return
-  for key in "${accepted_transition_keys_v6[@]}"; do
+  for key in "${transition_keys[@]}"; do
     count="$(sudo awk -F= -v wanted="$key" '$1 == wanted { count++ } END { print count + 0 }' "$accepted_transition")"
     test "$count" = 1 || return
   done
@@ -1931,6 +2126,7 @@ assert_schema5_staged_authority() (
 assert_transaction_state() {
   local schema driver_version revision source_tree release module_file module_sha overlay_file overlay_sha applied_dtb_file applied_dtb_sha normal_sha candidate_sha prior_existed prior_sha replaced_overlay module_existed overlay_existed prior_dkms_inventory_sha artifact_dir manifest overlay_name
   local backlight_rule_file backlight_rule_sha prior_backlight_rule_existed prior_backlight_rule_sha
+  local backlight_metadata_capability prior_backlight_metadata_sha
 
   assert_state_schema || return
   schema="$(state_value schema_version)"
@@ -2004,10 +2200,7 @@ assert_transaction_state() {
   fi
   manifest="$artifact_dir/manifest.txt"
   if test "$schema" = 4 || test "$schema" = 5; then
-    test "$(manifest_value "$manifest" schema_version)" = 2 || {
-      echo 'artifact and transaction schema versions differ' >&2
-      return 1
-    }
+    backlight_metadata_capability="$(state_value backlight_metadata_capability)"
     backlight_rule_file="$(state_value backlight_rule_file)"
     backlight_rule_sha="$(state_value backlight_rule_sha256)"
     prior_backlight_rule_existed="$(state_value prior_backlight_rule_existed)"
@@ -2029,6 +2222,21 @@ assert_transaction_state() {
         ;;
       *) return 1 ;;
     esac
+    if test -n "$backlight_metadata_capability"; then
+      test "$backlight_metadata_capability" = exact-backlight-metadata-v1 &&
+        test "$(manifest_value "$manifest" schema_version)" = 3 || return
+      prior_backlight_metadata_sha="$(state_value prior_backlight_metadata_sha256)"
+      [[ "$prior_backlight_metadata_sha" =~ ^[0-9a-f]{64}$ ]] || return
+      test "$(sha "$artifact_dir/prior-backlight-metadata")" = \
+        "$prior_backlight_metadata_sha" || return
+    else
+      test "$(manifest_value "$manifest" schema_version)" = 2 || {
+        echo 'artifact and transaction schema versions differ' >&2
+        return 1
+      }
+      test ! -L "$artifact_dir/prior-backlight-metadata" &&
+        test ! -e "$artifact_dir/prior-backlight-metadata" || return
+    fi
     assert_owned_regular "$backlight_rule_path" 644 || return
     test "$(sha "$backlight_rule_path")" = "$backlight_rule_sha" || return
   else
@@ -2877,16 +3085,19 @@ remove_artifact_tree() {
   overlay_file="$(manifest_value "$manifest" overlay_file)"
   applied_dtb_file="$(manifest_value "$manifest" applied_dtb_file)"
   manifest_schema="$(manifest_value "$manifest" schema_version)"
-  if test "$manifest_schema" = 2; then
+  if test "$manifest_schema" = 2 || test "$manifest_schema" = 3; then
     backlight_rule_file="$(manifest_value "$manifest" backlight_rule_file)"
   fi
   prior_dkms_state_value="$(dkms_prior_state "$artifact_dir")" || return
   remove_exact_tree "$artifact_dir/dkms-source" || return
   if test "$prior_dkms_state_value" != absent; then remove_exact_tree "$artifact_dir/prior-dkms" || return; fi
   for name in manifest.txt "$module_file" "$overlay_file" "$applied_dtb_file"; do sudo rm -f -- "$artifact_dir/$name" || return; done
-  if test "$manifest_schema" = 2; then
+  if test "$manifest_schema" = 2 || test "$manifest_schema" = 3; then
     sudo rm -f -- "$artifact_dir/$backlight_rule_file" \
       "$artifact_dir/prior-backlight-rule" || return
+    if test "$manifest_schema" = 3; then
+      sudo rm -f -- "$artifact_dir/prior-backlight-metadata" || return
+    fi
   fi
   sudo rm -f -- "$artifact_dir/dkms-prior-state" "$artifact_dir/dkms-candidate-state" || return
   if test "$prior" = true; then sudo rm -f -- "$artifact_dir/prior-tryboot.txt" || return; fi
@@ -3033,12 +3244,15 @@ stage() {
   dkms_dir="$dkms_root/hyperpixel2r-kms-$driver_version"
   rollback_tmp=''
   incoming_manifest=''
+  manifest_schema=''
   manifest_sha=''
   module_sha=''
   overlay_sha=''
   applied_dtb_sha=''
   backlight_rule_sha=''
   prior_backlight_rule=''
+  prior_backlight_metadata=''
+  prior_backlight_metadata_sha=''
   prior_backlight_rule_sha=none
   prior_backlight_rule_existed=false
   normal_snapshot=''
@@ -3129,7 +3343,8 @@ stage() {
         else
           sudo rm -f -- "$backlight_rule_path" || true
         fi
-        reload_backlight_permissions false || true
+        restore_backlight_permissions "$prior_backlight_rule_existed" \
+          "$prior_backlight_metadata" || true
       fi
       if "$created_artifact"; then remove_artifact_tree "$artifact_dir" "$prior_existed" || true; fi
       if test -n "$artifact_stage_dir"; then
@@ -3180,6 +3395,7 @@ stage() {
   candidate="$(private_file "$rollback_tmp" candidate)" || die 'failed to create private candidate config'
   incoming_manifest="$(privileged_snapshot "$incoming/manifest.txt" "$rollback_tmp" incoming-manifest)" || die 'failed to capture incoming manifest'
   assert_exact_manifest "$incoming_manifest" false || die 'incoming artifact manifest is invalid'
+  manifest_schema="$(manifest_value "$incoming_manifest" schema_version)"
   manifest_sha="$(sha "$incoming_manifest")" || die 'failed to hash incoming manifest snapshot'
   test "$(manifest_value "$incoming_manifest" driver_version)" = "$driver_version" || die 'incoming manifest driver version differs'
   test "$(manifest_value "$incoming_manifest" source_revision)" = "$revision" || die 'incoming manifest source revision differs'
@@ -3207,6 +3423,14 @@ stage() {
     prior_backlight_rule="$(privileged_snapshot "$backlight_rule_path" "$rollback_tmp" prior-backlight-rule)" || die 'failed to capture prior backlight rule'
     prior_backlight_rule_sha="$(sha "$prior_backlight_rule")" || die 'failed to hash prior backlight rule'
     prior_backlight_rule_existed=true
+  fi
+  if test "$manifest_schema" = 3; then
+    prior_backlight_metadata="$(private_file "$rollback_tmp" prior-backlight-metadata)" ||
+      die 'failed to allocate prior backlight metadata record'
+    capture_backlight_metadata "$prior_backlight_metadata" "$rollback_tmp" ||
+      die 'failed to capture prior backlight metadata'
+    prior_backlight_metadata_sha="$(sha "$prior_backlight_metadata")" ||
+      die 'failed to hash prior backlight metadata'
   fi
   if test -n "$expected_accepted_transition_sha"; then
     test "$prior_backlight_rule_existed" = "$expected_stage_backlight_rule_existed" &&
@@ -3412,6 +3636,12 @@ stage() {
     atomic_copy "$prior_backlight_rule" "$artifact_stage_dir/prior-backlight-rule" 600 \
       "$prior_backlight_rule_sha" || die 'failed to copy prior backlight rule'
   fi
+  if test "$manifest_schema" = 3; then
+    atomic_copy "$prior_backlight_metadata" \
+      "$artifact_stage_dir/prior-backlight-metadata" 600 \
+      "$prior_backlight_metadata_sha" ||
+      die 'failed to copy prior backlight metadata'
+  fi
   assert_artifact_tree "$artifact_stage_dir" "$prior_existed" || die 'staged artifact tree is unsafe'
   sudo mv -f "$artifact_stage_dir" "$artifact_dir" || die 'failed to publish artifact tree'
   artifact_stage_dir=''
@@ -3567,6 +3797,11 @@ stage() {
     printf 'backlight_rule_sha256=%s\n' "$backlight_rule_sha"
     printf 'prior_backlight_rule_existed=%s\n' "$prior_backlight_rule_existed"
     printf 'prior_backlight_rule_sha256=%s\n' "$prior_backlight_rule_sha"
+    if test "$manifest_schema" = 3; then
+      printf 'backlight_metadata_capability=exact-backlight-metadata-v1\n'
+      printf 'prior_backlight_metadata_sha256=%s\n' \
+        "$prior_backlight_metadata_sha"
+    fi
     if "$inactive_stage"; then
       printf 'boot_transition=inactive-kernel\n'
       printf 'candidate_kernel_file=%s\n' "$candidate_kernel_file"
@@ -3727,14 +3962,20 @@ assert_commit_intent_state_shape_at() (
 
 assert_commit_intent_transition_shape() {
   local key count candidate_revision phase
+  local -a transition_keys=()
 
   assert_owned_regular "$accepted_transition" 600 || return
   test "$(accepted_transition_value schema_version)" = 6 || return
+  if test -n "$(accepted_transition_value backlight_metadata_capability)"; then
+    transition_keys=("${accepted_transition_keys_v6[@]}")
+  else
+    transition_keys=("${accepted_transition_keys_v6_legacy[@]}")
+  fi
   test "$(sudo awk 'END { print NR }' "$accepted_transition")" = \
-    "${#accepted_transition_keys_v6[@]}" || return
+    "${#transition_keys[@]}" || return
   sudo awk -F= 'NF != 2 || $1 == "" || $2 == "" { exit 1 }' \
     "$accepted_transition" || return
-  for key in "${accepted_transition_keys_v6[@]}"; do
+  for key in "${transition_keys[@]}"; do
     count="$(sudo awk -F= -v wanted="$key" \
       '$1 == wanted { count++ } END { print count + 0 }' "$accepted_transition")"
     test "$count" = 1 || return
@@ -4199,7 +4440,11 @@ authorize_inactive_stage() {
     die 'accepted candidate prior config is missing or unsafe'
   schema="$(accepted_transition_value schema_version)"
   test "$schema" = 6 || die 'inactive stage requires schema-6 accepted authority'
-  keys=("${accepted_transition_keys_v6[@]}")
+  if test -n "$(accepted_transition_value backlight_metadata_capability)"; then
+    keys=("${accepted_transition_keys_v6[@]}")
+  else
+    keys=("${accepted_transition_keys_v6_legacy[@]}")
+  fi
   test "$(sudo awk 'END { print NR }' "$accepted_transition")" = "${#keys[@]}" ||
     die 'schema-6 accepted authority has an invalid row count'
   sudo awk -F= 'NF != 2 || $1 == "" || $2 == "" { exit 1 }' "$accepted_transition" ||
@@ -4806,8 +5051,20 @@ assert_rollback_journal() {
   schema="$(rollback_value schema_version)"
   case "$schema" in
     1) expected_keys=("${rollback_keys[@]}") ;;
-    2) expected_keys=("${rollback_keys_v2[@]}") ;;
-    3) expected_keys=("${rollback_keys_v3[@]}") ;;
+    2)
+      if test -n "$(rollback_value backlight_metadata_capability)"; then
+        expected_keys=("${rollback_keys_v2[@]}")
+      else
+        expected_keys=("${rollback_keys_v2_legacy[@]}")
+      fi
+      ;;
+    3)
+      if test -n "$(rollback_value backlight_metadata_capability)"; then
+        expected_keys=("${rollback_keys_v3[@]}")
+      else
+        expected_keys=("${rollback_keys_v3_legacy[@]}")
+      fi
+      ;;
     *) return 1 ;;
   esac
   test "$(sudo awk 'END { print NR }' "$rollback_state")" = "${#expected_keys[@]}" ||
@@ -4884,6 +5141,18 @@ assert_rollback_journal() {
       false) test "$rb_prior_backlight_rule_sha" = none || return ;;
       *) return 1 ;;
     esac
+    rb_backlight_metadata_capability="$(rollback_value backlight_metadata_capability)"
+    if test -n "$rb_backlight_metadata_capability"; then
+      test "$rb_backlight_metadata_capability" = exact-backlight-metadata-v1 || return
+      test "$(manifest_value "$manifest" schema_version)" = 3 || return
+      rb_prior_backlight_metadata_sha="$(rollback_value prior_backlight_metadata_sha256)"
+      [[ "$rb_prior_backlight_metadata_sha" =~ ^[0-9a-f]{64}$ ]] || return
+      test "$(sha "$artifact/prior-backlight-metadata")" = \
+        "$rb_prior_backlight_metadata_sha" || return
+    else
+      test "$(manifest_value "$manifest" schema_version)" = 2 || return
+      rb_prior_backlight_metadata_sha=''
+    fi
   else
     rb_backlight_rule_file=''
     rb_backlight_rule_sha=''
@@ -5025,6 +5294,12 @@ write_rollback_journal() {
       printf 'backlight_rule_sha256=%s\n' "$rb_backlight_rule_sha"
       printf 'prior_backlight_rule_existed=%s\n' "$rb_prior_backlight_rule_existed"
       printf 'prior_backlight_rule_sha256=%s\n' "$rb_prior_backlight_rule_sha"
+      if test -n "${rb_backlight_metadata_capability:-}"; then
+        printf 'backlight_metadata_capability=%s\n' \
+          "$rb_backlight_metadata_capability"
+        printf 'prior_backlight_metadata_sha256=%s\n' \
+          "$rb_prior_backlight_metadata_sha"
+      fi
     fi
     if "$rb_inactive"; then
       printf 'candidate_kernel_file=%s\n' "$(basename "$rb_firmware_kernel_path")"
@@ -5065,11 +5340,15 @@ load_rollback_journal() {
     rb_backlight_rule_sha="$(rollback_value backlight_rule_sha256)"
     rb_prior_backlight_rule_existed="$(rollback_value prior_backlight_rule_existed)"
     rb_prior_backlight_rule_sha="$(rollback_value prior_backlight_rule_sha256)"
+    rb_backlight_metadata_capability="$(rollback_value backlight_metadata_capability)"
+    rb_prior_backlight_metadata_sha="$(rollback_value prior_backlight_metadata_sha256)"
   else
     rb_backlight_rule_file=''
     rb_backlight_rule_sha=''
     rb_prior_backlight_rule_existed=false
     rb_prior_backlight_rule_sha=none
+    rb_backlight_metadata_capability=''
+    rb_prior_backlight_metadata_sha=''
   fi
   rb_artifact="$artifact_root/$rb_version/$rb_revision/$rb_release"
   rb_module_path="${root}/lib/modules/$rb_release/extra/$rb_module_file"
@@ -5291,6 +5570,8 @@ rollback() {
   rb_backlight_rule_sha=''
   rb_prior_backlight_rule_existed=false
   rb_prior_backlight_rule_sha=none
+  rb_backlight_metadata_capability=''
+  rb_prior_backlight_metadata_sha=''
   rb_artifact=''
   rb_module_path=''
   rb_module_hold=''
@@ -5360,6 +5641,8 @@ rollback() {
       rb_backlight_rule_sha="$(state_value backlight_rule_sha256)"
       rb_prior_backlight_rule_existed="$(state_value prior_backlight_rule_existed)"
       rb_prior_backlight_rule_sha="$(state_value prior_backlight_rule_sha256)"
+      rb_backlight_metadata_capability="$(state_value backlight_metadata_capability)"
+      rb_prior_backlight_metadata_sha="$(state_value prior_backlight_metadata_sha256)"
     fi
     rb_prior_inventory_sha="$(sha "$rb_artifact/dkms-prior-state")" ||
       die 'failed to hash prior DKMS inventory'
@@ -5486,7 +5769,9 @@ rollback() {
       else
         sudo rm -f -- "$backlight_rule_path" || die 'failed to remove candidate backlight rule'
       fi
-      reload_backlight_permissions false || die 'failed to reload prior backlight permissions'
+      restore_backlight_permissions "$rb_prior_backlight_rule_existed" \
+        "$rb_artifact/prior-backlight-metadata" ||
+        die 'failed to restore prior backlight permissions'
     fi
     if sudo test -L "$rb_module_hold" || sudo test -L "$rb_module_path"; then
       die 'candidate module finalization state is unsafe'
@@ -5630,8 +5915,20 @@ assert_accepted_state() {
   case "$schema" in
     1) keys=("${accepted_keys_v1[@]}") ;;
     2) keys=("${accepted_keys[@]}") ;;
-    3) keys=("${accepted_keys_v3[@]}") ;;
-    4) keys=("${accepted_keys_v4[@]}") ;;
+    3)
+      if test -n "$(accepted_value backlight_metadata_capability)"; then
+        keys=("${accepted_keys_v3[@]}")
+      else
+        keys=("${accepted_keys_v3_legacy[@]}")
+      fi
+      ;;
+    4)
+      if test -n "$(accepted_value backlight_metadata_capability)"; then
+        keys=("${accepted_keys_v4[@]}")
+      else
+        keys=("${accepted_keys_v4_legacy[@]}")
+      fi
+      ;;
     *) return 1 ;;
   esac
   test "$(sudo awk 'END { print NR }' "$accepted_state")" = "${#keys[@]}" || {
@@ -5712,6 +6009,19 @@ assert_accepted_state() {
         ;;
       *) return 1 ;;
     esac
+    if test -n "$(accepted_value backlight_metadata_capability)"; then
+      test "$(accepted_value backlight_metadata_capability)" = \
+        exact-backlight-metadata-v1 &&
+        test "$(manifest_value "$manifest" schema_version)" = 3 || return
+      [[ "$(accepted_value prior_backlight_metadata_sha256)" =~ ^[0-9a-f]{64}$ ]] ||
+        return
+      test "$(sha "$artifact/prior-backlight-metadata")" = \
+        "$(accepted_value prior_backlight_metadata_sha256)" || return
+    else
+      test "$(manifest_value "$manifest" schema_version)" = 2 || return
+      test ! -L "$artifact/prior-backlight-metadata" &&
+        test ! -e "$artifact/prior-backlight-metadata" || return
+    fi
   fi
   if test "$schema" = 4; then
     test "$(accepted_value normal_kernel_file)" = kernel8.img || return
@@ -5771,6 +6081,7 @@ record_accepted() {
   local workspace normal_snapshot stock receipt manifest_sha normal_sha stock_sha receipt_sha
   local prior_dkms_inventory_sha prior=false manifest_schema backlight_rule_file backlight_rule_sha
   local prior_backlight_rule_existed=false prior_backlight_rule_sha=none
+  local prior_backlight_metadata_sha=''
 
   [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'unsafe accepted driver version'
   [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || die 'unsafe accepted source revision'
@@ -5809,7 +6120,7 @@ record_accepted() {
   assert_owned_regular "$overlay_path" boot || die 'accepted overlay is unsafe'
   test "$(sha "$module_path")" = "$module_sha" || die 'accepted module differs'
   test "$(sha "$overlay_path")" = "$overlay_sha" || die 'accepted overlay differs'
-  if test "$manifest_schema" = 2; then
+  if test "$manifest_schema" = 2 || test "$manifest_schema" = 3; then
     backlight_rule_file="$(manifest_value "$manifest" backlight_rule_file)"
     backlight_rule_sha="$(manifest_value "$manifest" backlight_rule_sha256)"
     assert_owned_regular "$backlight_rule_path" 644 || die 'accepted backlight rule is unsafe'
@@ -5819,6 +6130,11 @@ record_accepted() {
       assert_owned_regular "$artifact/prior-backlight-rule" 600 || die 'accepted prior backlight rule is unsafe'
       prior_backlight_rule_sha="$(sha "$artifact/prior-backlight-rule")"
       prior_backlight_rule_existed=true
+    fi
+    if test "$manifest_schema" = 3; then
+      assert_backlight_metadata_record "$artifact/prior-backlight-metadata" ||
+        die 'accepted prior backlight metadata is unsafe'
+      prior_backlight_metadata_sha="$(sha "$artifact/prior-backlight-metadata")"
     fi
   fi
   assert_owned_regular "$normal_config" boot || die 'accepted normal boot config is unsafe'
@@ -5835,7 +6151,7 @@ record_accepted() {
   normal_sha="$(sha "$normal_snapshot")"
   stock_sha="$(sha "$stock")"
   {
-    if test "$manifest_schema" = 2; then
+    if test "$manifest_schema" = 2 || test "$manifest_schema" = 3; then
       printf 'schema_version=3\n'
     else
       printf 'schema_version=2\n'
@@ -5851,18 +6167,24 @@ record_accepted() {
     printf 'normal_config_sha256=%s\n' "$normal_sha"
     printf 'stock_config_sha256=%s\n' "$stock_sha"
     printf 'prior_dkms_inventory_sha256=%s\n' "$prior_dkms_inventory_sha"
-    if test "$manifest_schema" = 2; then
+    if test "$manifest_schema" = 2 || test "$manifest_schema" = 3; then
       printf 'backlight_rule_file=%s\n' "$backlight_rule_file"
       printf 'backlight_rule_sha256=%s\n' "$backlight_rule_sha"
       printf 'prior_backlight_rule_existed=%s\n' "$prior_backlight_rule_existed"
       printf 'prior_backlight_rule_sha256=%s\n' "$prior_backlight_rule_sha"
+      if test "$manifest_schema" = 3; then
+        printf 'backlight_metadata_capability=exact-backlight-metadata-v1\n'
+        printf 'prior_backlight_metadata_sha256=%s\n' \
+          "$prior_backlight_metadata_sha"
+      fi
     fi
   } | sudo tee "$receipt" >/dev/null || die 'failed to write accepted state'
   assert_owned_regular "$receipt" 600 || die 'accepted state allocation drifted'
   receipt_sha="$(sha "$receipt")"
   atomic_copy "$stock" "$accepted_stock_config" 600 "$stock_sha" ||
     die 'failed to publish accepted stock config'
-  if test "$manifest_schema" = 2 && "$prior_backlight_rule_existed"; then
+  if { test "$manifest_schema" = 2 || test "$manifest_schema" = 3; } &&
+    "$prior_backlight_rule_existed"; then
     atomic_copy "$artifact/prior-backlight-rule" "$accepted_prior_backlight_rule" 600 \
       "$prior_backlight_rule_sha" || die 'failed to publish accepted prior backlight rule'
     accepted_prior_published=true
@@ -6375,15 +6697,22 @@ publish_accepted_transition() {
   local candidate_base_dtb_sha="${24:-}"
   local candidate_vc4_overlay_sha="${25:-}"
   local normalized_normal_sha="${26:-}"
+  local candidate_lifecycle_capability="${27:-}"
   local prior_sha candidate_sha state_tmp state_sha candidate_artifact candidate_inventory_sha
   local prepared_anchor_tmp prepared_anchor_sha
   local accepted_schema transition_schema prior_backlight_rule_existed prior_backlight_rule_sha prior_rule_snapshot=''
   local prior_kernel_sha prior_initramfs_sha candidate_kernel_sha candidate_initramfs_sha
   local candidate_kernel_file candidate_initramfs_file
+  local metadata_capability=false
 
   prior_sha="$(sha "$prior_snapshot")" || return
   candidate_sha="$(sha "$candidate_snapshot")" || return
   if test "$kind" = new; then
+    case "$candidate_lifecycle_capability" in
+      exact-backlight-metadata-v1) metadata_capability=true ;;
+      '') ;;
+      *) return 1 ;;
+    esac
     candidate_inventory_sha=pending
     if test -n "$target_identity_sha256"; then
       [[ "$target_identity_sha256" =~ ^[0-9a-f]{64}$ ]] || return
@@ -6424,6 +6753,9 @@ publish_accepted_transition() {
     candidate_artifact="$artifact_root/$candidate_version/$candidate_revision/$candidate_release"
     assert_dkms_inventory_file "$candidate_artifact/dkms-prior-state" || return
     candidate_inventory_sha="$(sha "$candidate_artifact/dkms-prior-state")" || return
+    if test "$(manifest_value "$candidate_artifact/manifest.txt" schema_version)" = 3; then
+      metadata_capability=true
+    fi
   fi
   accepted_schema="$(accepted_value schema_version)" || return
   case "$accepted_schema" in
@@ -6476,6 +6808,10 @@ publish_accepted_transition() {
     printf 'candidate_backlight_rule_sha256=%s\n' "$candidate_backlight_rule_sha"
     printf 'prior_backlight_rule_existed=%s\n' "$prior_backlight_rule_existed"
     printf 'prior_backlight_rule_sha256=%s\n' "$prior_backlight_rule_sha"
+    if "$metadata_capability"; then
+      printf 'backlight_metadata_capability=exact-backlight-metadata-v1\n'
+      printf 'candidate_prior_backlight_metadata_sha256=pending\n'
+    fi
     if test "$transition_schema" = 5 || test "$transition_schema" = 6; then
       printf 'prior_tryboot_existed=%s\n' "$prior_tryboot_existed"
       printf 'prior_tryboot_sha256=%s\n' "$prior_tryboot_sha"
@@ -6547,7 +6883,9 @@ set_accepted_transition_phase() {
   local current_selection_phase="${9:-}"
   local standalone_replay_snapshot="${10:-}"
   local schema workspace state_tmp state_sha transition_source="$accepted_transition" owns_workspace=true
+  local candidate_artifact
   local transition_schema transition_inventory replay_kind='' expected_replay_sha=''
+  local transition_metadata metadata_sha=''
   local reused_prepared_setter=false reused_standalone_setter=false
 
   if test -n "$prepared_snapshot" || test -n "$expected_prepared_sha"; then
@@ -6568,7 +6906,17 @@ set_accepted_transition_phase() {
   fi
   transition_schema="$(sudo awk -F= '$1 == "schema_version" { print $2 }' "$transition_source")"
   transition_inventory="$(sudo awk -F= '$1 == "candidate_dkms_inventory_sha256" { print $2 }' "$transition_source")"
+  transition_metadata="$(sudo awk -F= '$1 == "candidate_prior_backlight_metadata_sha256" { print $2 }' "$transition_source")"
   schema="$transition_schema"
+  if test -n "$transition_metadata" && test "$transition_metadata" = pending; then
+    test "$expected:$next" = prepared:staged || return
+    candidate_artifact="$artifact_root/$(sudo awk -F= '$1 == "candidate_driver_version" { print $2 }' "$transition_source")/$(sudo awk -F= '$1 == "candidate_source_revision" { print $2 }' "$transition_source")/$(sudo awk -F= '$1 == "candidate_kernel_release" { print $2 }' "$transition_source")"
+    assert_backlight_metadata_record \
+      "$candidate_artifact/prior-backlight-metadata" || return
+    metadata_sha="$(sha "$candidate_artifact/prior-backlight-metadata")" || return
+  elif test -n "$transition_metadata"; then
+    [[ "$transition_metadata" =~ ^[0-9a-f]{64}$ ]] || return
+  fi
   if test "$schema" = 6 && test "$transition_inventory" = pending; then
     test "$expected:$next" = prepared:staged || return
     [[ "$inventory_sha" =~ ^[0-9a-f]{64}$ ]] || return
@@ -6644,19 +6992,23 @@ set_accepted_transition_phase() {
       -e "s/^phase=$expected\$/phase=$next/" \
       -e "s/^candidate_normal_config_sha256=.*/candidate_normal_config_sha256=$normal_sha/" \
       -e "s/^candidate_dkms_inventory_sha256=pending\$/candidate_dkms_inventory_sha256=$inventory_sha/" \
+      -e "s/^candidate_prior_backlight_metadata_sha256=pending\$/candidate_prior_backlight_metadata_sha256=${metadata_sha:-pending}/" \
       "$transition_source" | sudo tee "$state_tmp" >/dev/null || return
   elif test -n "$normal_sha"; then
     sudo sed \
       -e "s/^phase=$expected\$/phase=$next/" \
       -e "s/^candidate_normal_config_sha256=.*/candidate_normal_config_sha256=$normal_sha/" \
+      -e "s/^candidate_prior_backlight_metadata_sha256=pending\$/candidate_prior_backlight_metadata_sha256=${metadata_sha:-pending}/" \
       "$transition_source" | sudo tee "$state_tmp" >/dev/null || return
   elif test -n "$inventory_sha"; then
     sudo sed \
       -e "s/^phase=$expected\$/phase=$next/" \
       -e "s/^candidate_dkms_inventory_sha256=pending\$/candidate_dkms_inventory_sha256=$inventory_sha/" \
+      -e "s/^candidate_prior_backlight_metadata_sha256=pending\$/candidate_prior_backlight_metadata_sha256=${metadata_sha:-pending}/" \
       "$transition_source" | sudo tee "$state_tmp" >/dev/null || return
   else
     sudo sed -e "s/^phase=$expected\$/phase=$next/" \
+      -e "s/^candidate_prior_backlight_metadata_sha256=pending\$/candidate_prior_backlight_metadata_sha256=${metadata_sha:-pending}/" \
       "$transition_source" | sudo tee "$state_tmp" >/dev/null || return
   fi
   state_sha="$(sha "$state_tmp")" || return
@@ -6696,11 +7048,12 @@ prepare_new_accepted() {
   local overlay_sha="$8"
   local backlight_rule_file="$9"
   local backlight_rule_sha="${10}"
-  local target_identity_sha256="${11-}"
-  local candidate_kernel_sha256="${12-}"
-  local candidate_initramfs_sha256="${13-}"
-  local candidate_base_dtb_sha256="${14-}"
-  local candidate_vc4_overlay_sha256="${15-}"
+  local target_identity_sha256=''
+  local candidate_kernel_sha256=''
+  local candidate_initramfs_sha256=''
+  local candidate_base_dtb_sha256=''
+  local candidate_vc4_overlay_sha256=''
+  local candidate_lifecycle_capability=''
   local prior_version prior_status workspace prior_snapshot stock candidate stock_sha
   local prior_artifact prior_tryboot_existed prior_tryboot_sha prior_tryboot_snapshot=''
   local inactive=false prior_release prior_module_path prior_overlay_path candidate_module_root
@@ -6714,12 +7067,38 @@ prepare_new_accepted() {
   assert_accepted_state || die 'accepted driver state is missing or unsafe'
   case "$#" in
     10) ;;
+    11)
+      candidate_lifecycle_capability="${11}"
+      test "$candidate_lifecycle_capability" = exact-backlight-metadata-v1 ||
+        die 'unsafe candidate lifecycle capability'
+      ;;
     15)
+      target_identity_sha256="${11}"
+      candidate_kernel_sha256="${12}"
+      candidate_initramfs_sha256="${13}"
+      candidate_base_dtb_sha256="${14}"
+      candidate_vc4_overlay_sha256="${15}"
       [[ "$target_identity_sha256" =~ ^[0-9a-f]{64}$ ]] &&
         [[ "$candidate_kernel_sha256" =~ ^[0-9a-f]{64}$ ]] &&
         [[ "$candidate_initramfs_sha256" =~ ^[0-9a-f]{64}$ ]] &&
         [[ "$candidate_base_dtb_sha256" =~ ^[0-9a-f]{64}$ ]] &&
         [[ "$candidate_vc4_overlay_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+        die 'unsafe inactive target provenance'
+      inactive=true
+      ;;
+    16)
+      target_identity_sha256="${11}"
+      candidate_kernel_sha256="${12}"
+      candidate_initramfs_sha256="${13}"
+      candidate_base_dtb_sha256="${14}"
+      candidate_vc4_overlay_sha256="${15}"
+      candidate_lifecycle_capability="${16}"
+      [[ "$target_identity_sha256" =~ ^[0-9a-f]{64}$ ]] &&
+        [[ "$candidate_kernel_sha256" =~ ^[0-9a-f]{64}$ ]] &&
+        [[ "$candidate_initramfs_sha256" =~ ^[0-9a-f]{64}$ ]] &&
+        [[ "$candidate_base_dtb_sha256" =~ ^[0-9a-f]{64}$ ]] &&
+        [[ "$candidate_vc4_overlay_sha256" =~ ^[0-9a-f]{64}$ ]] &&
+        test "$candidate_lifecycle_capability" = exact-backlight-metadata-v1 ||
         die 'unsafe inactive target provenance'
       inactive=true
       ;;
@@ -6900,7 +7279,7 @@ prepare_new_accepted() {
     "$target_identity_sha256" "$prior_kernel_snapshot" "$prior_initramfs_snapshot" \
     "$candidate_kernel_snapshot" "$candidate_initramfs_snapshot" \
     "$candidate_base_dtb_sha256" "$candidate_vc4_overlay_sha256" \
-    "$normalized_normal_sha" ||
+    "$normalized_normal_sha" "$candidate_lifecycle_capability" ||
     die 'failed to publish accepted candidate journal'
   remove_transaction_workspace "$workspace" || die 'failed to remove accepted transition workspace'
   accepted_workspace=''
@@ -7291,9 +7670,27 @@ assert_accepted_transition() {
   case "$schema" in
     2) keys=("${accepted_transition_keys_v2[@]}") ;;
     3) keys=("${accepted_transition_keys[@]}") ;;
-    4) keys=("${accepted_transition_keys_v4[@]}") ;;
-    5) keys=("${accepted_transition_keys_v5[@]}") ;;
-    6) keys=("${accepted_transition_keys_v6[@]}") ;;
+    4)
+      if test -n "$(accepted_transition_value backlight_metadata_capability)"; then
+        keys=("${accepted_transition_keys_v4[@]}")
+      else
+        keys=("${accepted_transition_keys_v4_legacy[@]}")
+      fi
+      ;;
+    5)
+      if test -n "$(accepted_transition_value backlight_metadata_capability)"; then
+        keys=("${accepted_transition_keys_v5[@]}")
+      else
+        keys=("${accepted_transition_keys_v5_legacy[@]}")
+      fi
+      ;;
+    6)
+      if test -n "$(accepted_transition_value backlight_metadata_capability)"; then
+        keys=("${accepted_transition_keys_v6[@]}")
+      else
+        keys=("${accepted_transition_keys_v6_legacy[@]}")
+      fi
+      ;;
     *) return 1 ;;
   esac
   test "$(sudo awk 'END { print NR }' "$accepted_transition")" = "${#keys[@]}" || return
@@ -7355,6 +7752,28 @@ assert_accepted_transition() {
     "hyperpixel2r-kms-${candidate_revision:0:12}.dtbo" || return
   case "$(accepted_transition_value prior_dkms_status)" in absent|unregistered|registered) ;; *) return 1;; esac
   candidate_artifact="$artifact_root/$candidate_version/$candidate_revision/$candidate_release"
+  if test -n "$(accepted_transition_value backlight_metadata_capability)"; then
+    test "$(accepted_transition_value backlight_metadata_capability)" = \
+      exact-backlight-metadata-v1 || return
+    case "$phase" in
+      prepared)
+        test "$(accepted_transition_value candidate_prior_backlight_metadata_sha256)" = \
+          pending || return
+        ;;
+      *)
+        [[ "$(accepted_transition_value candidate_prior_backlight_metadata_sha256)" =~ ^[0-9a-f]{64}$ ]] ||
+          return
+        assert_backlight_metadata_record \
+          "$candidate_artifact/prior-backlight-metadata" || return
+        test "$(sha "$candidate_artifact/prior-backlight-metadata")" = \
+          "$(accepted_transition_value candidate_prior_backlight_metadata_sha256)" ||
+          return
+        ;;
+    esac
+  elif test "$phase" != prepared; then
+    test "$(manifest_value "$candidate_artifact/manifest.txt" schema_version)" = 2 ||
+      return
+  fi
   marker="$candidate_artifact/dkms-prior-state"
   if test "$schema" = 6 && test "$(accepted_transition_value candidate_dkms_inventory_sha256)" != pending; then
     marker="$candidate_artifact/dkms-candidate-state"
@@ -7804,7 +8223,8 @@ restore_prior_from_accepted_transition() {
   prior_module_sha="$(manifest_value "$prior_manifest" module_sha256)"
   prior_overlay="$(manifest_value "$prior_manifest" overlay_file)"
   prior_overlay_sha="$(manifest_value "$prior_manifest" overlay_sha256)"
-  if test "$(manifest_value "$prior_manifest" schema_version)" = 2; then
+  if test "$(manifest_value "$prior_manifest" schema_version)" = 2 ||
+    test "$(manifest_value "$prior_manifest" schema_version)" = 3; then
     prior_backlight_rule_file="$(manifest_value "$prior_manifest" backlight_rule_file)"
     prior_backlight_rule_sha="$(manifest_value "$prior_manifest" backlight_rule_sha256)"
   fi
@@ -7898,7 +8318,9 @@ restore_prior_from_accepted_transition() {
     else
       sudo rm -f -- "$backlight_rule_path" || return
     fi
-    reload_backlight_permissions false || return
+    restore_backlight_permissions \
+      "$(accepted_transition_value prior_backlight_rule_existed)" \
+      "$candidate_artifact/prior-backlight-metadata" || return
   fi
   restore_accepted_prior_tryboot || return
   test "$(sha "$accepted_transition")" = "$transition_sha" || return
@@ -8219,7 +8641,8 @@ finalize_accepted() {
   module_sha="$(manifest_value "$manifest" module_sha256)"
   overlay_file="$(manifest_value "$manifest" overlay_file)"
   overlay_sha="$(manifest_value "$manifest" overlay_sha256)"
-  if test "$(manifest_value "$manifest" schema_version)" = 2; then
+  if test "$(manifest_value "$manifest" schema_version)" = 2 ||
+    test "$(manifest_value "$manifest" schema_version)" = 3; then
     backlight_rule_file="$(manifest_value "$manifest" backlight_rule_file)"
     backlight_rule_sha="$(manifest_value "$manifest" backlight_rule_sha256)"
   fi
@@ -8354,6 +8777,12 @@ finalize_accepted() {
             "$(accepted_transition_value prior_backlight_rule_existed)"
           printf 'prior_backlight_rule_sha256=%s\n' \
             "$(accepted_transition_value prior_backlight_rule_sha256)"
+          if test -n "$(accepted_transition_value backlight_metadata_capability)"; then
+            printf 'backlight_metadata_capability=%s\n' \
+              "$(accepted_transition_value backlight_metadata_capability)"
+            printf 'prior_backlight_metadata_sha256=%s\n' \
+              "$(accepted_transition_value candidate_prior_backlight_metadata_sha256)"
+          fi
         fi
         if test "$transition_schema" = 6; then
           printf 'normal_kernel_file=kernel8.img\n'
@@ -8452,7 +8881,13 @@ assert_accepted_uninstall() {
   case "$schema" in
     2) keys=("${accepted_uninstall_keys_v2[@]}") ;;
     3) keys=("${accepted_uninstall_keys[@]}") ;;
-    4) keys=("${accepted_uninstall_keys_v4[@]}") ;;
+    4)
+      if test -n "$(accepted_uninstall_value backlight_metadata_capability)"; then
+        keys=("${accepted_uninstall_keys_v4[@]}")
+      else
+        keys=("${accepted_uninstall_keys_v4_legacy[@]}")
+      fi
+      ;;
     *) return 1 ;;
   esac
   test "$(sudo awk 'END { print NR }' "$accepted_uninstall")" = \
@@ -8536,6 +8971,21 @@ assert_accepted_uninstall() {
         ;;
       *) return 1 ;;
     esac
+    if test -n "$(accepted_uninstall_value backlight_metadata_capability)"; then
+      test "$(accepted_uninstall_value backlight_metadata_capability)" = \
+        exact-backlight-metadata-v1 || return
+      [[ "$(accepted_uninstall_value prior_backlight_metadata_sha256)" =~ ^[0-9a-f]{64}$ ]] ||
+        return
+      if test -n "${marker:-}"; then
+        test "$(manifest_value "$(dirname "$marker")/manifest.txt" schema_version)" = 3 ||
+          return
+        test "$(sha "$(dirname "$marker")/prior-backlight-metadata")" = \
+          "$(accepted_uninstall_value prior_backlight_metadata_sha256)" || return
+      fi
+    elif test -n "${marker:-}"; then
+      test "$(manifest_value "$(dirname "$marker")/manifest.txt" schema_version)" = 2 ||
+        return
+    fi
   fi
 }
 
@@ -8567,8 +9017,20 @@ assert_accepted_receipt_matches_uninstall() {
   case "$schema:$journal_schema" in
     1:2) keys=("${accepted_keys_v1[@]}") ;;
     2:3) keys=("${accepted_keys[@]}") ;;
-    3:4) keys=("${accepted_keys_v3[@]}") ;;
-    4:4) keys=("${accepted_keys_v4[@]}") ;;
+    3:4)
+      if test -n "$(accepted_value backlight_metadata_capability)"; then
+        keys=("${accepted_keys_v3[@]}")
+      else
+        keys=("${accepted_keys_v3_legacy[@]}")
+      fi
+      ;;
+    4:4)
+      if test -n "$(accepted_value backlight_metadata_capability)"; then
+        keys=("${accepted_keys_v4[@]}")
+      else
+        keys=("${accepted_keys_v4_legacy[@]}")
+      fi
+      ;;
     *) return 1 ;;
   esac
   test "$(sudo awk 'END { print NR }' "$accepted_state")" = "${#keys[@]}" || return
@@ -8594,6 +9056,12 @@ assert_accepted_receipt_matches_uninstall() {
       test "$(accepted_value "$key")" = \
         "$(accepted_uninstall_value "$key")" || return
     done
+    if test -n "$(accepted_value backlight_metadata_capability)"; then
+      test "$(accepted_value backlight_metadata_capability)" = \
+        "$(accepted_uninstall_value backlight_metadata_capability)" &&
+        test "$(accepted_value prior_backlight_metadata_sha256)" = \
+          "$(accepted_uninstall_value prior_backlight_metadata_sha256)" || return
+    fi
   fi
   test "$(sha "$accepted_stock_config")" = "$(accepted_value stock_config_sha256)" || return
 }
@@ -8711,6 +9179,12 @@ uninstall_accepted() {
         printf 'backlight_rule_sha256=%s\n' "$backlight_rule_sha"
         printf 'prior_backlight_rule_existed=%s\n' "$prior_backlight_rule_existed"
         printf 'prior_backlight_rule_sha256=%s\n' "$prior_backlight_rule_sha"
+        if test -n "$(accepted_value backlight_metadata_capability)"; then
+          printf 'backlight_metadata_capability=%s\n' \
+            "$(accepted_value backlight_metadata_capability)"
+          printf 'prior_backlight_metadata_sha256=%s\n' \
+            "$(accepted_value prior_backlight_metadata_sha256)"
+        fi
       fi
     } | sudo tee "$state_tmp" >/dev/null || die 'failed to write accepted uninstall journal'
     state_sha="$(sha "$state_tmp")"
@@ -8805,7 +9279,10 @@ uninstall_accepted() {
         sudo rm -f -- "$backlight_rule_path" ||
           die 'failed to remove accepted backlight rule'
       fi
-      reload_backlight_permissions false || die 'failed to reload restored backlight permissions'
+      restore_backlight_permissions \
+        "$(accepted_uninstall_value prior_backlight_rule_existed)" \
+        "$artifact/prior-backlight-metadata" ||
+        die 'failed to restore accepted backlight permissions'
     fi
     fixture_interrupt_after uninstall-rule-restored
     set_accepted_uninstall_phase overlay_removed rule_restored ||
@@ -8971,6 +9448,7 @@ uninstall() {
   local -a artifacts=() releases=() overlays=() driver_versions=()
   local artifact record_tail prior record_version known_version source_match prior_dkms_state_value dkms_dir="" restore_prior_dkms=false remove_dkms=false
   local manifest_schema rule_candidate_sha='' prior_rule_existed='' prior_rule_sha='' prior_rule_source=''
+  local prior_metadata_sha='' prior_metadata_source='' candidate_prior_metadata_sha candidate_prior_metadata_source
   local candidate_sha candidate_prior_existed candidate_prior_sha candidate_prior_source live_rule_sha
   assert_no_orphan_inactive_transition_authority ||
     die 'refusing uninstall while inactive transition authority is present'
@@ -9008,7 +9486,7 @@ uninstall() {
         releases+=("$release")
         overlays+=("$release_dir/$(manifest_value "$manifest" overlay_file)")
         manifest_schema="$(manifest_value "$manifest" schema_version)"
-        if test "$manifest_schema" = 2; then
+        if test "$manifest_schema" = 2 || test "$manifest_schema" = 3; then
           candidate_sha="$(manifest_value "$manifest" backlight_rule_sha256)"
           if test -n "$rule_candidate_sha" && test "$rule_candidate_sha" != "$candidate_sha"; then
             die 'conflicting stored backlight rule identities'
@@ -9032,6 +9510,19 @@ uninstall() {
           prior_rule_existed="$candidate_prior_existed"
           prior_rule_sha="$candidate_prior_sha"
           prior_rule_source="$candidate_prior_source"
+          candidate_prior_metadata_source=''
+          if test "$manifest_schema" = 3; then
+            candidate_prior_metadata_source="$release_dir/prior-backlight-metadata"
+            assert_backlight_metadata_record "$candidate_prior_metadata_source" ||
+              die 'stored prior backlight metadata is unsafe'
+            candidate_prior_metadata_sha="$(sha "$candidate_prior_metadata_source")"
+            if test -n "$prior_metadata_sha" &&
+              test "$prior_metadata_sha" != "$candidate_prior_metadata_sha"; then
+              die 'conflicting stored prior backlight metadata proofs'
+            fi
+            prior_metadata_sha="$candidate_prior_metadata_sha"
+            prior_metadata_source="$candidate_prior_metadata_source"
+          fi
         fi
         known_version=false
         for known_version in "${driver_versions[@]}"; do
@@ -9139,7 +9630,9 @@ uninstall() {
         else
           sudo rm -f -- "$backlight_rule_path" || die 'failed to remove installed backlight rule'
         fi
-        reload_backlight_permissions false || die 'failed to reload restored backlight permissions'
+        restore_backlight_permissions "$prior_rule_existed" \
+          "$prior_metadata_source" ||
+          die 'failed to restore prior backlight permissions'
       elif test "$prior_rule_existed" = true && \
         test "$live_rule_sha" = "$prior_rule_sha"; then
         :

@@ -541,7 +541,7 @@ host_genksyms_sha256="$(sha256sum "$artifact_dir/host-genksyms" | awk '{print $1
 source_deb_sha256='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 base_dtb_sha256='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 {
-  printf 'schema_version\t2\n'
+  printf 'schema_version\t3\n'
   printf 'driver_version\t0.2.0\n'
   printf 'source_revision\t%s\n' "$source_revision"
   printf 'source_tree\t%s\n' "$source_tree"
@@ -549,6 +549,7 @@ base_dtb_sha256='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   printf 'architecture\taarch64\n'
   printf 'base_dtb_sha256\t%s\n' "$base_dtb_sha256"
   printf 'capability\tpwm-backlight-v1\n'
+  printf 'lifecycle_capability\texact-backlight-metadata-v1\n'
   printf 'module_file\thyperpixel2r_kms.ko\n'
   printf 'module_sha256\t%s\n' "$module_sha256"
   printf 'module_vermagic\t%s SMP preempt mod_unload modversions aarch64\n' "$release"
