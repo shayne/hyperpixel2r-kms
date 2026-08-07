@@ -3639,6 +3639,278 @@ identity() {
   printf '%s\t%s\t%s\n' "$driver_version" "$overlay_file" "$release"
 }
 
+current_boot_identity() {
+  local boot_id_path="${root}/proc/sys/kernel/random/boot_id" boot_id
+
+  require_regular "$boot_id_path" || return
+  boot_id="$(sudo cat "$boot_id_path")" || return
+  [[ "$boot_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] || return
+  printf '%s\n' "$boot_id"
+}
+
+emit_commit_probe_tuple() {
+  local boot_after
+
+  test "$#" = 9 || die 'internal commit probe tuple is unsafe'
+  boot_after="$(current_boot_identity)" || die 'current boot identity is unsafe'
+  test "$commit_probe_boot_identity" = "$boot_after" ||
+    die "boot changed during $commit_probe_label"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "$boot_after"
+}
+
+assert_commit_intent_state_shape_at() (
+  local candidate_revision schema
+
+  state_file="$1"
+  assert_state_schema || return
+  schema="$(state_value schema_version)"
+  [[ "$(state_value driver_version)" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return
+  candidate_revision="$(state_value source_revision)"
+  [[ "$candidate_revision" =~ ^[0-9a-f]{40}$ ]] || return
+  [[ "$(state_value kernel_release)" =~ ^[A-Za-z0-9._+-]+$ ]] || return
+  test "$(state_value module_file)" = hyperpixel2r_kms.ko || return
+  [[ "$(state_value module_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
+  test "$(state_value overlay_file)" = \
+    "hyperpixel2r-kms-${candidate_revision:0:12}.dtbo" || return
+  case "$schema" in
+    1|2|3|4) ;;
+    5)
+      test "$(state_value boot_transition)" = inactive-kernel || return
+      ;;
+    *) return 1 ;;
+  esac
+)
+
+assert_commit_intent_transition_shape() {
+  local key count candidate_revision phase
+
+  assert_owned_regular "$accepted_transition" 600 || return
+  test "$(accepted_transition_value schema_version)" = 6 || return
+  test "$(sudo awk 'END { print NR }' "$accepted_transition")" = \
+    "${#accepted_transition_keys_v6[@]}" || return
+  sudo awk -F= 'NF != 2 || $1 == "" || $2 == "" { exit 1 }' \
+    "$accepted_transition" || return
+  for key in "${accepted_transition_keys_v6[@]}"; do
+    count="$(sudo awk -F= -v wanted="$key" \
+      '$1 == wanted { count++ } END { print count + 0 }' "$accepted_transition")"
+    test "$count" = 1 || return
+  done
+  test "$(accepted_transition_value kind)" = new || return
+  test "$(accepted_transition_value boot_transition)" = inactive-kernel || return
+  phase="$(accepted_transition_value phase)"
+  case "$phase" in staged|explicit_normal_published) ;; *) return 1;; esac
+  [[ "$(accepted_transition_value candidate_driver_version)" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return
+  candidate_revision="$(accepted_transition_value candidate_source_revision)"
+  [[ "$candidate_revision" =~ ^[0-9a-f]{40}$ ]] || return
+  [[ "$(accepted_transition_value candidate_kernel_release)" =~ ^[A-Za-z0-9._+-]+$ ]] || return
+  test "$(accepted_transition_value candidate_module_file)" = hyperpixel2r_kms.ko || return
+  [[ "$(accepted_transition_value candidate_module_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
+  test "$(accepted_transition_value candidate_overlay_file)" = \
+    "hyperpixel2r-kms-${candidate_revision:0:12}.dtbo" || return
+  for key in prior_normal_config_sha256 candidate_normal_config_sha256 \
+    tryboot_config_sha256; do
+    [[ "$(accepted_transition_value "$key")" =~ ^[0-9a-f]{64}$ ]] || return
+  done
+  case "$(accepted_transition_value prior_tryboot_existed):$(accepted_transition_value prior_tryboot_sha256)" in
+    false:none) ;;
+    true:[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*)
+      [[ "$(accepted_transition_value prior_tryboot_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
+      ;;
+    *) return 1 ;;
+  esac
+  case "$phase:$(accepted_transition_value explicit_normal_config_sha256)" in
+    staged:pending) ;;
+    explicit_normal_published:[0-9a-f]*)
+      [[ "$(accepted_transition_value explicit_normal_config_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+assert_commit_intent_replay_workspace_shape() {
+  local entry relative suffix entries
+  local normal_count=0 candidate_count=0 transition_count=0 setter_count=0
+
+  find_inactive_replay_workspace || return
+  test -n "$inactive_replay_workspace" || return 0
+  entries="$(mktemp "${TMPDIR:-/tmp}/hp2r-intent-leaves.XXXXXX")" || return
+  if ! sudo find -P "$inactive_replay_workspace" -mindepth 1 -maxdepth 1 \
+    -print0 > "$entries"; then
+    rm -f -- "$entries"
+    return 1
+  fi
+  while IFS= read -r -d '' entry; do
+    relative="${entry#"$inactive_replay_workspace"/}"
+    assert_owned_regular "$entry" 600 || { rm -f -- "$entries"; return 1; }
+    case "$relative" in
+      .hp2r-normal-backup.*)
+        suffix="${relative#.hp2r-normal-backup.}"
+        [[ "$suffix" =~ ^[A-Za-z0-9]+$ ]] || { rm -f -- "$entries"; return 1; }
+        normal_count=$((normal_count + 1))
+        ;;
+      .hp2r-candidate-backup.*)
+        suffix="${relative#.hp2r-candidate-backup.}"
+        [[ "$suffix" =~ ^[A-Za-z0-9]+$ ]] || { rm -f -- "$entries"; return 1; }
+        candidate_count=$((candidate_count + 1))
+        ;;
+      .hp2r-commit-transition.*)
+        suffix="${relative#.hp2r-commit-transition.}"
+        [[ "$suffix" =~ ^[A-Za-z0-9]+$ ]] || { rm -f -- "$entries"; return 1; }
+        transition_count=$((transition_count + 1))
+        ;;
+      accepted-transition) setter_count=$((setter_count + 1)) ;;
+      *) rm -f -- "$entries"; return 1 ;;
+    esac
+  done < "$entries"
+  rm -f -- "$entries" || return
+  test "$normal_count:$candidate_count:$transition_count" = 1:1:1 &&
+    test "$setter_count" -le 1
+}
+
+commit_intent_state_identity_matches_transition() {
+  test "$(state_value driver_version)" = \
+    "$(accepted_transition_value candidate_driver_version)" &&
+    test "$(state_value source_revision)" = \
+      "$(accepted_transition_value candidate_source_revision)" &&
+    test "$(state_value kernel_release)" = \
+      "$(accepted_transition_value candidate_kernel_release)" &&
+    test "$(state_value module_file)" = \
+      "$(accepted_transition_value candidate_module_file)" &&
+    test "$(state_value module_sha256)" = \
+      "$(accepted_transition_value candidate_module_sha256)" &&
+    test "$(state_value overlay_file)" = \
+      "$(accepted_transition_value candidate_overlay_file)"
+}
+
+assert_commit_intent_retired_tryboot() {
+  local expected_existed expected_sha
+
+  expected_existed="$(accepted_transition_value prior_tryboot_existed)"
+  expected_sha="$(accepted_transition_value prior_tryboot_sha256)"
+  case "$expected_existed:$expected_sha" in
+    false:none)
+      test ! -L "$tryboot_config" && test ! -e "$tryboot_config"
+      ;;
+    true:[0-9a-f]*)
+      [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] &&
+        assert_owned_regular "$tryboot_config" boot &&
+        test "$(sha "$tryboot_config")" = "$expected_sha"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+commit_intent_probe_body() {
+  local boot phase state_hold transition_schema=''
+
+  boot="$(explicit_commit_boot_expectation)" ||
+    die 'commit intent boot flag is unsafe'
+  if sudo test -e "$accepted_transition" || sudo test -L "$accepted_transition"; then
+    assert_owned_regular "$accepted_transition" 600 ||
+      die 'commit intent transition is unsafe'
+    transition_schema="$(accepted_transition_value schema_version)"
+  fi
+  if test "$transition_schema" = 6; then
+    assert_commit_intent_transition_shape ||
+      die 'commit intent transition shape is unsafe'
+    phase="$(accepted_transition_value phase)"
+    if test "$phase" = explicit_normal_published; then
+      require_regular "$normal_config" &&
+        test "$(sha "$normal_config")" = \
+          "$(accepted_transition_value explicit_normal_config_sha256)" &&
+        assert_commit_intent_retired_tryboot ||
+        die 'commit intent explicit replay selection is unsafe'
+      state_hold="$state_dir/.inactive-explicit-state-hold"
+      if sudo test -e "$state_file" || sudo test -L "$state_file"; then
+        test ! -e "$state_hold" && test ! -L "$state_hold" &&
+          assert_commit_intent_state_shape_at "$state_file" ||
+          die 'commit intent explicit replay state is ambiguous'
+      elif sudo test -e "$state_hold" || sudo test -L "$state_hold"; then
+        assert_commit_intent_state_shape_at "$state_hold" ||
+          die 'commit intent explicit replay hold is unsafe'
+      fi
+      assert_commit_intent_replay_workspace_shape ||
+        die 'commit intent explicit replay workspace is unsafe'
+      emit_commit_probe_tuple explicit-replay "$boot" \
+        "$(accepted_transition_value candidate_driver_version)" \
+        "$(accepted_transition_value candidate_overlay_file)" \
+        "$(accepted_transition_value candidate_kernel_release)" \
+        "$(accepted_transition_value candidate_module_file)" \
+        "$(accepted_transition_value candidate_module_sha256)" \
+        "$(accepted_transition_value prior_tryboot_existed)" \
+        "$(accepted_transition_value prior_tryboot_sha256)"
+      return
+    fi
+    assert_commit_intent_state_shape_at "$state_file" &&
+      test "$(state_value schema_version)" = 5 &&
+      commit_intent_state_identity_matches_transition ||
+      die 'commit intent staged inactive state is unsafe'
+    assert_commit_intent_replay_workspace_shape ||
+      die 'commit intent staged replay workspace is unsafe'
+    if test -z "$inactive_replay_workspace"; then
+      test "$boot" = tryboot &&
+        require_regular "$normal_config" &&
+        test "$(sha "$normal_config")" = "$(state_value normal_config_sha256)" &&
+        require_regular "$tryboot_config" &&
+        test "$(sha "$tryboot_config")" = "$(state_value candidate_config_sha256)" ||
+        die 'commit intent staged tryboot selection is unsafe'
+      emit_commit_probe_tuple tryboot tryboot \
+        "$(state_value driver_version)" "$(state_value overlay_file)" \
+        "$(state_value kernel_release)" "$(state_value module_file)" \
+        "$(state_value module_sha256)" active none
+      return
+    fi
+    require_regular "$normal_config" &&
+      test "$(sha "$normal_config")" = \
+        "$(accepted_transition_value candidate_normal_config_sha256)" ||
+      die 'commit intent replay normal selection is unsafe'
+    if assert_owned_regular "$tryboot_config" boot &&
+      test "$(sha "$tryboot_config")" = \
+        "$(accepted_transition_value tryboot_config_sha256)"; then
+      emit_commit_probe_tuple explicit-config-reconcile "$boot" \
+        "$(accepted_transition_value candidate_driver_version)" \
+        "$(accepted_transition_value candidate_overlay_file)" \
+        "$(accepted_transition_value candidate_kernel_release)" \
+        "$(accepted_transition_value candidate_module_file)" \
+        "$(accepted_transition_value candidate_module_sha256)" active none
+      return
+    fi
+    assert_commit_intent_retired_tryboot ||
+      die 'commit intent replay retired tryboot selection is unsafe'
+    emit_commit_probe_tuple explicit-reconcile "$boot" \
+      "$(accepted_transition_value candidate_driver_version)" \
+      "$(accepted_transition_value candidate_overlay_file)" \
+      "$(accepted_transition_value candidate_kernel_release)" \
+      "$(accepted_transition_value candidate_module_file)" \
+      "$(accepted_transition_value candidate_module_sha256)" \
+      "$(accepted_transition_value prior_tryboot_existed)" \
+      "$(accepted_transition_value prior_tryboot_sha256)"
+    return
+  fi
+  assert_commit_intent_state_shape_at "$state_file" ||
+    die 'commit intent transaction state is unsafe'
+  test "$(state_value schema_version)" != 5 ||
+    die 'commit intent inactive state lacks schema-6 authority'
+  test "$boot" = tryboot &&
+    require_regular "$normal_config" &&
+    test "$(sha "$normal_config")" = "$(state_value normal_config_sha256)" &&
+    require_regular "$tryboot_config" &&
+    test "$(sha "$tryboot_config")" = "$(state_value candidate_config_sha256)" ||
+    die 'commit intent tryboot selection is unsafe'
+  emit_commit_probe_tuple tryboot tryboot \
+    "$(state_value driver_version)" "$(state_value overlay_file)" \
+    "$(state_value kernel_release)" "$(state_value module_file)" \
+    "$(state_value module_sha256)" active none
+}
+
+commit_intent_probe() {
+  commit_probe_label='commit intent probe'
+  commit_probe_boot_identity="$(current_boot_identity)" ||
+    die 'current boot identity is unsafe'
+  commit_intent_probe_body
+}
+
 explicit_commit_boot_expectation() {
   local tryboot_flag="${root}/proc/device-tree/chosen/bootloader/tryboot" tryboot_hex=''
 
@@ -3722,7 +3994,7 @@ assert_explicit_inactive_replay_leaves() {
   esac
 }
 
-commit_probe() {
+commit_probe_body() {
   local transaction driver_version revision release artifact_dir overlay_file boot state_hold
 
   if assert_accepted_transition explicit_normal_config_published &&
@@ -3737,12 +4009,12 @@ commit_probe() {
     assert_no_boot_writers || die 'a boot/package writer is active during inactive config-only probe'
     boot="$(explicit_commit_boot_expectation)" ||
       die 'inactive config-only replay boot flag is unsafe'
-    printf 'explicit-config-reconcile\t%s\t%s\t%s\t%s\t%s\t%s\tactive\tnone\n' "$boot" \
+    emit_commit_probe_tuple explicit-config-reconcile "$boot" \
       "$(accepted_transition_value candidate_driver_version)" \
       "$(accepted_transition_value candidate_overlay_file)" \
       "$(accepted_transition_value candidate_kernel_release)" \
       "$(accepted_transition_value candidate_module_file)" \
-      "$(accepted_transition_value candidate_module_sha256)"
+      "$(accepted_transition_value candidate_module_sha256)" active none
     return
   fi
   if assert_accepted_transition explicit_normal_published &&
@@ -3757,7 +4029,7 @@ commit_probe() {
     assert_no_boot_writers || die 'a boot/package writer is active during inactive pre-phase probe'
     boot="$(explicit_commit_boot_expectation)" ||
       die 'inactive pre-phase replay boot flag is unsafe'
-    printf 'explicit-reconcile\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$boot" \
+    emit_commit_probe_tuple explicit-reconcile "$boot" \
       "$(accepted_transition_value candidate_driver_version)" \
       "$(accepted_transition_value candidate_overlay_file)" \
       "$(accepted_transition_value candidate_kernel_release)" \
@@ -3793,7 +4065,7 @@ commit_probe() {
     assert_no_boot_writers || die 'a boot/package writer is active during inactive commit probe'
     boot="$(explicit_commit_boot_expectation)" ||
       die 'inactive explicit replay boot flag is unsafe'
-    printf 'explicit-replay\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$boot" \
+    emit_commit_probe_tuple explicit-replay "$boot" \
       "$(accepted_transition_value candidate_driver_version)" \
       "$(accepted_transition_value candidate_overlay_file)" \
       "$(accepted_transition_value candidate_kernel_release)" \
@@ -3806,9 +4078,16 @@ commit_probe() {
   transaction="$(assert_transaction_state)" || die 'candidate transaction is not safe to inspect'
   IFS=$'\t' read -r driver_version revision release artifact_dir <<<"$transaction"
   overlay_file="$(state_value overlay_file)"
-  printf 'tryboot\ttryboot\t%s\t%s\t%s\t%s\t%s\tactive\tnone\n' \
+  emit_commit_probe_tuple tryboot tryboot \
     "$driver_version" "$overlay_file" "$release" \
-    "$(state_value module_file)" "$(state_value module_sha256)"
+    "$(state_value module_file)" "$(state_value module_sha256)" active none
+}
+
+commit_probe() {
+  commit_probe_label='authoritative commit probe'
+  commit_probe_boot_identity="$(current_boot_identity)" ||
+    die 'current boot identity is unsafe'
+  commit_probe_body
 }
 
 accepted_normal_probe() {
@@ -8854,6 +9133,7 @@ unset schema5_staged_authority_asserting schema5_staged_authority_allow_prepared
 case "${1-}" in
   stage) shift; stage "$@" ;;
   identity) identity ;;
+  commit-intent-probe) commit_intent_probe ;;
   commit-probe) commit_probe ;;
   accepted-normal-probe) shift; accepted_normal_probe "$@" ;;
   authorize-inactive-stage) authorize_inactive_stage ;;
@@ -8876,5 +9156,5 @@ case "${1-}" in
   retire-inactive) shift; retire_inactive_accepted "$@" ;;
   uninstall) uninstall ;;
   cleanup-legacy-planeradar) shift; cleanup_legacy_planeradar "$@" ;;
-  *) die 'usage: lifecycle-remote.sh {stage|identity|commit-probe|authorize-inactive-stage|commit|rollback|record-accepted|recover-accepted-record|prepare-new-accepted|mark-committed-accepted|stage-retained|commit-retained|recover-accepted|mark-verified-accepted|finalize-accepted|uninstall-accepted|finalize-uninstall-accepted|retire-inactive|uninstall|cleanup-legacy-planeradar}' ;;
+  *) die 'usage: lifecycle-remote.sh {stage|identity|commit-intent-probe|commit-probe|authorize-inactive-stage|commit|rollback|record-accepted|recover-accepted-record|prepare-new-accepted|mark-committed-accepted|stage-retained|commit-retained|recover-accepted|mark-verified-accepted|finalize-accepted|uninstall-accepted|finalize-uninstall-accepted|retire-inactive|uninstall|cleanup-legacy-planeradar}' ;;
 esac

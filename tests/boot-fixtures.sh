@@ -130,6 +130,7 @@ new_target() {
     "$root/boot/firmware/overlays" \
     "$root/lib/modules/$release" \
     "$root/etc/udev/rules.d" \
+    "$root/proc/sys/kernel/random" \
     "$root/tmp" \
     "$root/var/lib" \
     "$bin" \
@@ -139,6 +140,8 @@ new_target() {
   chmod 0666 "$log"
   printf '[all]\ndtoverlay=vc4-kms-dpi-hyperpixel2r,rotate=90\n' \
     > "$root/boot/firmware/config.txt"
+  printf '11111111-2222-4333-8444-555555555555\n' \
+    > "$root/proc/sys/kernel/random/boot_id"
   cc "$repo_root/tests/fixture-sudo.c" -o "$bin/sudo"
   chown root:root "$bin/sudo"
   chmod 4755 "$bin/sudo"
@@ -551,6 +554,8 @@ fi
 if test "${1-}" = bash && { [[ "${2-}" == /tmp/hp2r-tryboot-stage.*/* ]] || [[ "${2-}" == /tmp/hp2r-accepted.*/* ]]; }; then
   script="$HP2R_FIXTURE_ROOT$2"
   shift 2
+  remote_action="${1-}"
+  printf 'remote-action %s\n' "$remote_action" >> "$HP2R_FIXTURE_LOG"
   if test "${HP2R_FIXTURE_FORGE_STAGE_BACKLIGHT_AUTHORITY:-}" = 1 &&
     test "${1-}" = stage &&
     test -e "$HP2R_FIXTURE_ROOT/tmp/legacy-backlight-mutated-after-authorization"; then
@@ -579,22 +584,43 @@ if test "${1-}" = bash && { [[ "${2-}" == /tmp/hp2r-tryboot-stage.*/* ]] || [[ "
       exit 92
     fi
   fi
-  setpriv --reuid=65534 --regid=65534 --clear-groups \
-    env HP2R_INSTALL_ROOT="$HP2R_FIXTURE_ROOT" PATH="$PATH" \
-    HP2R_FIXTURE_REMOTE_RUNNING_RELEASE="${HP2R_FIXTURE_REMOTE_RUNNING_RELEASE:-}" \
-    HP2R_FIXTURE_INTERRUPT_AFTER="${HP2R_FIXTURE_INTERRUPT_AFTER:-}" \
-    HP2R_FIXTURE_PRESERVE_MUTATIONS="${HP2R_FIXTURE_PRESERVE_MUTATIONS:-}" \
-    HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH:-}" \
-    HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH:-}" \
-    HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH:-}" \
-    HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH:-}" \
-    HP2R_FIXTURE_FAIL_AFTER_STAGED_PUBLICATION="${HP2R_FIXTURE_FAIL_AFTER_STAGED_PUBLICATION:-}" \
-    HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY="${HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY:-}" \
-    HP2R_FIXTURE_MUTATE_NORMALIZATION_BOUND_LEAF="${HP2R_FIXTURE_MUTATE_NORMALIZATION_BOUND_LEAF:-}" \
-    schema5_staged_authority_asserting="${schema5_staged_authority_asserting:-}" \
-    schema5_staged_authority_allow_prepared="${schema5_staged_authority_allow_prepared:-}" \
-    bash -c 'id -u > "$HP2R_FIXTURE_ROOT/tmp/remote-uid"; exec bash "$@"' bash "$script" "$@"
-  exit
+  run_remote_path_action() {
+    setpriv --reuid=65534 --regid=65534 --clear-groups \
+      env HP2R_INSTALL_ROOT="$HP2R_FIXTURE_ROOT" PATH="$PATH" \
+      HP2R_FIXTURE_REMOTE_RUNNING_RELEASE="${HP2R_FIXTURE_REMOTE_RUNNING_RELEASE:-}" \
+      HP2R_FIXTURE_INTERRUPT_AFTER="${HP2R_FIXTURE_INTERRUPT_AFTER:-}" \
+      HP2R_FIXTURE_PRESERVE_MUTATIONS="${HP2R_FIXTURE_PRESERVE_MUTATIONS:-}" \
+      HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ACCEPTED_ON_STATE_PUBLISH:-}" \
+      HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_MODULE_ON_STATE_PUBLISH:-}" \
+      HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_ARTIFACT_ON_STATE_PUBLISH:-}" \
+      HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH="${HP2R_FIXTURE_MUTATE_DKMS_ON_STATE_PUBLISH:-}" \
+      HP2R_FIXTURE_FAIL_AFTER_STAGED_PUBLICATION="${HP2R_FIXTURE_FAIL_AFTER_STAGED_PUBLICATION:-}" \
+      HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY="${HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY:-}" \
+      HP2R_FIXTURE_MUTATE_NORMALIZATION_BOUND_LEAF="${HP2R_FIXTURE_MUTATE_NORMALIZATION_BOUND_LEAF:-}" \
+      schema5_staged_authority_asserting="${schema5_staged_authority_asserting:-}" \
+      schema5_staged_authority_allow_prepared="${schema5_staged_authority_allow_prepared:-}" \
+      bash -c 'id -u > "$HP2R_FIXTURE_ROOT/tmp/remote-uid"; exec bash "$@"' \
+        bash "$script" "$@"
+  }
+  if test "${HP2R_FIXTURE_MUTATE_COMMIT_PROBE_TUPLE:-}" = 1 &&
+    test "$remote_action" = commit-probe; then
+    if remote_output="$(run_remote_path_action "$@")"; then
+      remote_status=0
+      remote_output="${remote_output/$'\t0.1.1\t'/$'\t9.9.9\t'}"
+      printf '%s\n' "$remote_output"
+    else
+      remote_status=$?
+    fi
+  elif run_remote_path_action "$@"; then
+    remote_status=0
+  else
+    remote_status=$?
+  fi
+  if test "${HP2R_FIXTURE_EXPIRE_READINESS_AFTER_COMMIT_PROBE:-}" = 1 &&
+    test "$remote_action" = commit-probe; then
+    : > "$HP2R_FIXTURE_ROOT/tmp/readiness-expired-after-commit-probe"
+  fi
+  exit "$remote_status"
 fi
 if test "${1-}" = 'sudo reboot '\''0 tryboot'\'''; then
   mkdir -p "$HP2R_FIXTURE_ROOT/proc/device-tree/chosen/bootloader"
@@ -798,7 +824,14 @@ SCRIPT
 
   install -m 0755 /dev/stdin "$bin/journalctl" <<'SCRIPT'
 #!/usr/bin/env bash
+if test -e "$HP2R_FIXTURE_ROOT/tmp/readiness-expired-after-commit-probe"; then
+  exit 0
+fi
 printf '%s\n' 'fixture: SDL display ready: video_driver=KMSDRM render_driver=opengles2'
+if test "${HP2R_FIXTURE_CHANGE_BOOT_ID_AFTER_READINESS:-}" = 1; then
+  printf 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\n' \
+    > "$HP2R_FIXTURE_ROOT/proc/sys/kernel/random/boot_id"
+fi
 SCRIPT
 
   install -m 0755 /dev/stdin "$bin/dkms" <<'SCRIPT'
@@ -4275,6 +4308,60 @@ exercise_inactive_kernel_prepare() {
     done
     exit 0
   fi
+  if test "${HP2R_FIXTURE_CASE:-}" = commit-readiness-expiry ||
+    test "${HP2R_FIXTURE_CASE:-}" = commit-intent-tuple-drift ||
+    test "${HP2R_FIXTURE_CASE:-}" = commit-boot-id-drift; then
+    mkdir -p "$root/proc/device-tree/chosen/bootloader"
+    printf '\0\0\0\1' > "$root/proc/device-tree/chosen/bootloader/tryboot"
+    install_live_hardware
+    cp "$root/boot/firmware/config.txt" "$fixture/readiness-normal-before"
+    cp "$root/boot/firmware/tryboot.txt" "$fixture/readiness-tryboot-before"
+    cp "$state_dir/tryboot-state" "$fixture/readiness-state-before"
+    cp "$state_dir/accepted-transition" "$fixture/readiness-transition-before"
+    export HP2R_FIXTURE_RELEASE_OVERRIDE="$candidate_release"
+    if test "${HP2R_FIXTURE_CASE:-}" = commit-readiness-expiry; then
+      if ! HP2R_FIXTURE_EXPIRE_READINESS_AFTER_COMMIT_PROBE=1 \
+        run_controller commit-boot.sh >"$fixture/readiness-commit.out" 2>&1; then
+        cat "$fixture/readiness-commit.out" >&2
+        fail 'readiness-ordered promotion failed'
+      fi
+      unset HP2R_FIXTURE_RELEASE_OVERRIDE
+      assert_file "$root/tmp/readiness-expired-after-commit-probe"
+      grep -Fxq 'phase=explicit_normal_published' "$state_dir/accepted-transition" ||
+        fail 'readiness-ordered commit did not publish explicit normal phase'
+      assert_absent "$state_dir/tryboot-state"
+      assert_absent "$root/boot/firmware/tryboot.txt"
+      exit 0
+    fi
+    if test "${HP2R_FIXTURE_CASE:-}" = commit-intent-tuple-drift; then
+      if HP2R_FIXTURE_MUTATE_COMMIT_PROBE_TUPLE=1 \
+        run_controller commit-boot.sh >"$fixture/readiness-commit.out" 2>&1; then
+        fail 'commit accepted authoritative tuple drift after live verification'
+      fi
+    else
+      if HP2R_FIXTURE_CHANGE_BOOT_ID_AFTER_READINESS=1 \
+        run_controller commit-boot.sh >"$fixture/readiness-commit.out" 2>&1; then
+        fail 'commit accepted a changed boot identity after live verification'
+      fi
+    fi
+    grep -Fq 'target commit intent changed after live verification' \
+      "$fixture/readiness-commit.out" || {
+      cat "$fixture/readiness-commit.out" >&2
+      fail 'commit identity drift failed for an unexpected reason'
+    }
+    ! grep -Fxq 'remote-action commit' "$log" ||
+      fail 'commit identity drift reached remote mutation'
+    cmp -s "$fixture/readiness-normal-before" "$root/boot/firmware/config.txt" ||
+      fail 'commit identity drift changed normal config'
+    cmp -s "$fixture/readiness-tryboot-before" "$root/boot/firmware/tryboot.txt" ||
+      fail 'commit identity drift changed tryboot config'
+    cmp -s "$fixture/readiness-state-before" "$state_dir/tryboot-state" ||
+      fail 'commit identity drift changed generic state'
+    cmp -s "$fixture/readiness-transition-before" "$state_dir/accepted-transition" ||
+      fail 'commit identity drift changed accepted transition'
+    unset HP2R_FIXTURE_RELEASE_OVERRIDE
+    exit 0
+  fi
   # A successful cross-kernel promotion must retain the conventional pair as
   # fallback while normal firmware selects the complete candidate-only pair.
   # This catches the old generic commit branch, which derives an overlay-only
@@ -5343,7 +5430,7 @@ exercise_inactive_kernel_prepare() {
       local commit_probe
       commit_probe="$(run_accepted_remote commit-probe)" ||
         fail 'public moved-state replay could not obtain a strict commit probe'
-      [[ "$commit_probe" =~ ^explicit-replay$'\t'tryboot$'\t'[0-9]+\.[0-9]+\.[0-9]+$'\t'hyperpixel2r-kms-[0-9a-f]{12}\.dtbo$'\t'[A-Za-z0-9._+-]+$'\t'hyperpixel2r_kms\.ko$'\t'[0-9a-f]{64}$'\t'false$'\t'none$ ]] ||
+      [[ "$commit_probe" =~ ^explicit-replay$'\t'tryboot$'\t'[0-9]+\.[0-9]+\.[0-9]+$'\t'hyperpixel2r-kms-[0-9a-f]{12}\.dtbo$'\t'[A-Za-z0-9._+-]+$'\t'hyperpixel2r_kms\.ko$'\t'[0-9a-f]{64}$'\t'false$'\t'none$'\t'[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] ||
         fail 'public moved-state replay returned an unsafe typed commit probe'
     fi
     if test -n "${HP2R_FIXTURE_REPLAY_HOSTILE:-}"; then
@@ -5542,6 +5629,29 @@ exercise_inactive_kernel_explicit_normal_replay() {
     HP2R_FIXTURE_REPLAY_NORMAL=1 \
     bash "${BASH_SOURCE[0]}" >/dev/null ||
     fail 'inactive explicit normal-boot replay rejected its retired tryboot identity'
+}
+
+exercise_commit_readiness_ordering() {
+  local case_name count=0
+
+  for case_name in commit-readiness-expiry commit-intent-tuple-drift \
+    commit-boot-id-drift commit-root-owned-config-mode; do
+    HP2R_FIXTURE_CASE="$case_name" bash "${BASH_SOURCE[0]}" >/dev/null ||
+      fail "commit readiness fixture failed: $case_name"
+    count=$((count + 1))
+  done
+  test "$count" = 4 || fail 'commit readiness fixture inventory drifted'
+}
+
+exercise_commit_root_owned_config_mode() {
+  new_target
+  chmod 0600 "$root/boot/firmware/config.txt"
+  run_stage >/dev/null
+  chmod 0600 "$root/boot/firmware/tryboot.txt"
+  install_live_hardware
+  run_controller commit-boot.sh >/dev/null
+  assert_absent "$root/boot/firmware/tryboot.txt"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
 }
 
 exercise_inactive_kernel_normalization_prephase_crashes() {
@@ -5988,6 +6098,14 @@ case "${HP2R_FIXTURE_CASE:-}" in
     exercise_accepted_action_argv_parser
     exit 0
     ;;
+  commit-readiness-ordering)
+    exercise_commit_readiness_ordering
+    exit 0
+    ;;
+  commit-root-owned-config-mode)
+    exercise_commit_root_owned_config_mode
+    exit 0
+    ;;
   inactive-kernel-explicit-prephase-crash)
     exercise_inactive_kernel_explicit_prephase_crash
     exit 0
@@ -6113,7 +6231,7 @@ case "${HP2R_FIXTURE_CASE:-}" in
     exercise_inactive_kernel_prepare
     exit 0
     ;;
-  inactive-kernel-phase-authority-drift|inactive-kernel-final-module-drift|inactive-kernel-final-artifact-drift|inactive-kernel-final-dkms-drift|inactive-kernel-setter-snapshot|inactive-kernel-stale-authority|inactive-kernel-hostile-env|inactive-kernel-commit-rejected|inactive-kernel-explicit-promotion|inactive-kernel-explicit-normal-verified|inactive-kernel-explicit-normal-unhealthy|inactive-kernel-explicit-normal-conventional-drift|inactive-kernel-explicit-normal-vermagic-prefix|inactive-kernel-explicit-normal-module-resolution-drift|inactive-kernel-normalized-module-resolution-drift|inactive-kernel-normalization|inactive-kernel-finalization|inactive-kernel-finalization-interruption-one|inactive-kernel-recovery-normalized|inactive-kernel-recovery-phase-one|inactive-kernel-uninstall-orphan|inactive-kernel-normalization-interruption-one|inactive-kernel-normalization-race-one|inactive-kernel-normalization-post-atomic|inactive-kernel-verification-phase-atomic|inactive-kernel-verification-phase-prepared|inactive-kernel-normalized-unhealthy|inactive-kernel-normalization-phase-hostile-one|inactive-kernel-explicit-interruption-one|inactive-kernel-transport-ancestor)
+  commit-readiness-expiry|commit-intent-tuple-drift|commit-boot-id-drift|inactive-kernel-phase-authority-drift|inactive-kernel-final-module-drift|inactive-kernel-final-artifact-drift|inactive-kernel-final-dkms-drift|inactive-kernel-setter-snapshot|inactive-kernel-stale-authority|inactive-kernel-hostile-env|inactive-kernel-commit-rejected|inactive-kernel-explicit-promotion|inactive-kernel-explicit-normal-verified|inactive-kernel-explicit-normal-unhealthy|inactive-kernel-explicit-normal-conventional-drift|inactive-kernel-explicit-normal-vermagic-prefix|inactive-kernel-explicit-normal-module-resolution-drift|inactive-kernel-normalized-module-resolution-drift|inactive-kernel-normalization|inactive-kernel-finalization|inactive-kernel-finalization-interruption-one|inactive-kernel-recovery-normalized|inactive-kernel-recovery-phase-one|inactive-kernel-uninstall-orphan|inactive-kernel-normalization-interruption-one|inactive-kernel-normalization-race-one|inactive-kernel-normalization-post-atomic|inactive-kernel-verification-phase-atomic|inactive-kernel-verification-phase-prepared|inactive-kernel-normalized-unhealthy|inactive-kernel-normalization-phase-hostile-one|inactive-kernel-explicit-interruption-one|inactive-kernel-transport-ancestor)
     exercise_inactive_kernel_prepare
     exit 0
     ;;
