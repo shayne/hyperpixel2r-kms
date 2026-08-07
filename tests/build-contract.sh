@@ -79,7 +79,7 @@ printf '%s\n' 'SUBSYSTEM=="backlight", KERNEL=="planeradar-backlight", RUN+="/us
 backlight_rule_sha256="$(sha256sum "$backlight_rule" | awk '{ print $1 }')"
 cat > "$valid_manifest" <<'MANIFEST'
 schema_version	2
-driver_version	0.1.1
+driver_version	0.2.0
 source_revision	0000000000000000000000000000000000000000
 source_tree	1111111111111111111111111111111111111111
 kernel_release	6.18.34+rpt-rpi-v8
@@ -253,7 +253,7 @@ PATH="$no_probe_bin:$PATH" \
   "$repo_root/scripts/accepted-lifecycle.sh" \
     --target fixture-target \
     --action prepare-new \
-    --driver-version 0.1.1 \
+    --driver-version 0.2.0 \
     --source-revision 0000000000000000000000000000000000000000 \
     --kernel-release 6.18.39+rpt-rpi-v8 \
     --manifest-sha256 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \

@@ -26,10 +26,10 @@ assert "stdout=subprocess.PIPE" not in download_source
 assert "RLIMIT_FSIZE" in download_source
 assert "O_EXCL" in download_source
 
-TAG = "v0.1.1"
+TAG = "v0.2.0"
 COMMIT = "a" * 40
 TAGGER_TIMESTAMP = 1700000000
-TAG_OBJECT = "f90bc4f622da67b68175d82fbd7adc9f22d62bdf"
+TAG_OBJECT = "4c8292c0a47b026b4af8df374ee679d124271f5a"
 assert (
     stable_release.canonical_tag_object(TAG, COMMIT, TAGGER_TIMESTAMP) == TAG_OBJECT
 )

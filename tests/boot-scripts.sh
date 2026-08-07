@@ -99,7 +99,7 @@ vc4_overlay_sha256="$(sha256sum "$target_root$vc4_overlay_path" | awk '{print $1
 
 {
   printf 'schema_version\t2\n'
-  printf 'driver_version\t0.1.1\n'
+  printf 'driver_version\t0.2.0\n'
   printf 'source_revision\t%s\n' "$source_revision"
   printf 'source_tree\t%s\n' "$source_tree"
   printf 'kernel_release\t%s\n' "$release"

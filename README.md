@@ -4,11 +4,11 @@ This repository provides a standalone DRM/KMS driver for the Pimoroni
 HyperPixel 2.1 Round on a Raspberry Pi Zero 2 W. It is tested with 64-bit
 Raspberry Pi OS Lite Trixie and the exact kernel checks described below.
 
-<!-- HP2R_CURRENT_RELEASE=v0.1.1-rc.1 -->
+<!-- HP2R_CURRENT_RELEASE=v0.2.0-rc.1 -->
 
 Stable release: [`v0.1.1`](https://github.com/shayne/hyperpixel2r-kms/releases/tag/v0.1.1).
-This source revision retains `v0.1.1-rc.1` as its canonical candidate marker
-for the release contract.
+The next candidate is `v0.2.0-rc.1`, which adds controlled PWM backlight
+support and a hardened inactive-kernel lifecycle for Plane Radar.
 
 ## Supported shape
 
@@ -90,8 +90,8 @@ match the Pi in front of you. GitHub Actions creates provenance and SBOM
 attestations for the published payloads.
 
 ```sh
-gh release download v0.1.1-rc.1 -R shayne/hyperpixel2r-kms -D dist/v0.1.1-rc.1
-cd dist/v0.1.1-rc.1
+gh release download v0.2.0-rc.1 -R shayne/hyperpixel2r-kms -D dist/v0.2.0-rc.1
+cd dist/v0.2.0-rc.1
 sha256sum -c SHA256SUMS
 gh attestation verify hyperpixel2r-kms-source.tar.zst \
   -R shayne/hyperpixel2r-kms \
@@ -110,7 +110,7 @@ source identity, and attestations. Only then does it create the annotated tag
 and publish the same draft. Promotion does not build or upload anything.
 
 `v0.1.1` is the current stable release. The candidate named above is the next
-patch and stays a prerelease until its exact source and boot path pass the same
+minor and stays a prerelease until its exact source and boot path pass the same
 hardware acceptance process.
 
 ## Provenance and license

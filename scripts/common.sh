@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-HP2R_DRIVER_VERSION="0.1.1"
+HP2R_DRIVER_VERSION="0.2.0"
 HP2R_DEFAULT_BUILD_IMAGE="hyperpixel2r-kms-kernel-builder:debian-trixie-gcc14"
 HP2R_BACKLIGHT_CAPABILITY="pwm-backlight-v1"
 HP2R_BACKLIGHT_RULE_FILE="70-planeradar-backlight.rules"
