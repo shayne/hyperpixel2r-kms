@@ -657,10 +657,17 @@ assert_exact_backlight_rule() {
   }
 }
 
+valid_nonroot_linux_id() {
+  local value="$1"
+
+  [[ "$value" =~ ^[1-9][0-9]{0,9}$ ]] || return 1
+  (( 10#$value <= 4294967294 ))
+}
+
 reload_backlight_permissions() {
   local verify_candidate="${1:-false}"
   local brightness="$backlight_sysfs/brightness"
-  local maximum current
+  local maximum current nobody_uid video_gid
 
   sudo udevadm control --reload-rules || return
   if sudo test -e "$backlight_sysfs" || sudo test -L "$backlight_sysfs"; then
@@ -687,17 +694,36 @@ reload_backlight_permissions() {
     echo 'backlight brightness permissions do not match the video-group contract' >&2
     return 1
   }
+  nobody_uid="$(id -u nobody 2>/dev/null)" || {
+    echo 'backlight probe user identity is unavailable' >&2
+    return 1
+  }
+  valid_nonroot_linux_id "$nobody_uid" || {
+    echo 'backlight probe user identity is unsafe' >&2
+    return 1
+  }
+  video_gid="$(sudo stat -c '%g' "$brightness")" || {
+    echo 'backlight probe group identity is unavailable' >&2
+    return 1
+  }
+  valid_nonroot_linux_id "$video_gid" || {
+    echo 'backlight probe group identity is unsafe' >&2
+    return 1
+  }
   current="$(sudo cat "$brightness")" || return
   [[ "$current" =~ ^[0-9]+$ ]] && test "$current" -le "$maximum" || return
-  if test -n "$root"; then
-    sudo setpriv --reuid=65534 --regid=44 --clear-groups \
-      sh -eu -c 'value="$(cat "$1")"; printf "%s\n" "$value" > "$1"' \
-      sh "$brightness" || return
-  else
-    sudo -u nobody -g video sh -eu -c \
-      'value="$(cat "$1")"; printf "%s\n" "$value" > "$1"' \
-      sh "$brightness" || return
-  fi
+  sudo setpriv --reuid="$nobody_uid" --regid="$video_gid" --clear-groups \
+    sh -eu -c '
+      test "$(id -u)" = "$2"
+      test "$(id -g)" = "$3"
+      test "$(id -G)" = "$3"
+      capabilities="$(sed -n "s/^CapEff:[[:space:]]*//p" /proc/self/status)"
+      case "$capabilities" in ""|*[!0]*) exit 1;; esac
+      value="$(cat "$1")"
+      test "$value" = "$4"
+      printf "%s\n" "$value" > "$1"
+      test "$(cat "$1")" = "$4"
+    ' sh "$brightness" "$nobody_uid" "$video_gid" "$current" || return
   test "$(sudo cat "$brightness")" = "$current"
 }
 
