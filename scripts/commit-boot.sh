@@ -18,8 +18,6 @@ done
 hp2r_validate_target "$target"
 
 ssh_options=(-o BatchMode=yes -o ConnectTimeout=8 -o ConnectionAttempts=1)
-remote_stage=''
-payload=''
 commit_intent=''
 commit_probe=''
 commit_phase=''
@@ -89,33 +87,18 @@ build_verify_args() {
   fi
 }
 
-cleanup() {
-  local status=$?
-  trap - EXIT
-  if test -n "$remote_stage"; then ssh "${ssh_options[@]}" "$target" rm -rf -- "$remote_stage" >/dev/null 2>&1 || true; fi
-  test -z "$payload" || rm -rf -- "$payload"
-  exit "$status"
+run_lifecycle() {
+  hp2r_run_remote_lifecycle "$target" "$repo_root/scripts/lifecycle-remote.sh" "$@"
 }
-trap cleanup EXIT
-remote_stage="$(ssh "${ssh_options[@]}" "$target" mktemp -d /tmp/hp2r-tryboot-stage.XXXXXX)"
-[[ "$remote_stage" =~ ^/tmp/hp2r-tryboot-stage\.[A-Za-z0-9]+$ ]] || { echo 'target returned an unsafe staging path' >&2; exit 1; }
-payload="$(mktemp -d "${TMPDIR:-/tmp}/hp2r-commit.XXXXXX")"
-install -m 0644 "$repo_root/scripts/lifecycle-remote.sh" "$payload/lifecycle-remote.sh"
-scp "${ssh_options[@]}" -rp "$payload/." "$target:$remote_stage/"
-commit_intent="$(ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" commit-intent-probe)"
+commit_intent="$(run_lifecycle commit-intent-probe)"
 parse_commit_probe "$commit_intent" 'commit intent probe'
 build_verify_args
 "$repo_root/scripts/verify-boot.sh" "${verify_args[@]}" >/dev/null
-commit_probe="$(ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" commit-probe)"
+commit_probe="$(run_lifecycle commit-probe)"
 parse_commit_probe "$commit_probe" 'commit probe'
 test "$commit_probe" = "$commit_intent" || {
   echo 'target commit intent changed after live verification' >&2
   exit 1
 }
-ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" commit
-ssh "${ssh_options[@]}" "$target" rm -rf -- "$remote_stage"
-remote_stage=''
-rm -rf -- "$payload"
-payload=''
-trap - EXIT
+run_lifecycle commit
 printf 'Committed owned HyperPixel candidate to normal boot config; reboot when ready.\n'

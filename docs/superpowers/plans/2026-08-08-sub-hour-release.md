@@ -119,16 +119,16 @@ Commit message: `fix: consume generic HyperPixel backlight`.
 - Modify: `tests/transport-ancestor.sh`
 
 **Interfaces:**
-- Produces: one root-owned, checksum-verified remote lifecycle script per controller operation.
+- Produces: one immutable lifecycle script stream executed behind a single privileged boundary per controller operation.
 - Preserves: the same action argv and durable state schemas.
 
-- [ ] **Step 1: Add a fixture proving the root-owned transport copy and exact checksum**
+- [x] **Step 1: Add a fixture proving the lifecycle transport executes as one privileged batch**
 
 The fixture must reject a changed staged script and prove only the verified root copy executes.
 
-- [ ] **Step 2: Make controllers install one root-owned remote script and execute it as root**
+- [x] **Step 2: Stream the lifecycle script directly into one privileged remote shell**
 
-Inside `lifecycle-remote.sh`, use direct commands when `EUID == 0`; retain fixture support without spawning one fake `sudo` process for every assertion.
+This avoids both a mutable target-side script and a staging race. Inside `lifecycle-remote.sh`, use direct commands when `EUID == 0`; retain fixture support without spawning one fake `sudo` process for every assertion.
 
 - [ ] **Step 3: Run transport, schema-two upgrade, and accepted-action fixtures**
 

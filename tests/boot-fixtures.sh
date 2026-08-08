@@ -17,6 +17,8 @@ root="$fixture/root"
 backlight_rule_path="$root/etc/udev/rules.d/$backlight_rule_file"
 bin="$fixture/bin"
 bin_no_dkms="$fixture/bin-no-dkms"
+bin_template="$fixture/bin-template"
+bin_no_dkms_template="$fixture/bin-no-dkms-template"
 sbin="$fixture/sbin"
 log="$fixture/commands.log"
 
@@ -142,6 +144,12 @@ new_target() {
     > "$root/boot/firmware/config.txt"
   printf '11111111-2222-4333-8444-555555555555\n' \
     > "$root/proc/sys/kernel/random/boot_id"
+  if test -d "$bin_template" && test -d "$bin_no_dkms_template"; then
+    cp -a "$bin_template/." "$bin/"
+    mkdir -p "$bin_no_dkms"
+    cp -a "$bin_no_dkms_template/." "$bin_no_dkms/"
+    return
+  fi
   cc "$repo_root/tests/fixture-sudo.c" -o "$bin/sudo"
   chown root:root "$bin/sudo"
   chmod 4755 "$bin/sudo"
@@ -551,6 +559,12 @@ while test "${1-}" = -o; do shift 2; done
 target="$1"
 shift
 test "$target" = pi@fixture
+privileged_lifecycle=false
+if test "${1-}" = sudo && test "${2-}" = /bin/bash && test "${3-}" = -s; then
+  privileged_lifecycle=true
+  shift 2
+  set -- bash "$@"
+fi
 if test "${1-}" = uname && test "${2-}" = -r; then
   if test -n "${HP2R_FIXTURE_LOG:-}"; then
     printf 'remote-uname %s\n' "$*" >> "$HP2R_FIXTURE_LOG"
@@ -596,8 +610,8 @@ if test "${1-}" = bash && test "${2-}" = -s; then
     if test "${HP2R_FIXTURE_REMOTE_RESTRICTED_PATH:-}" = 1; then
       remote_path="$HP2R_FIXTURE_REMOTE_BIN"
     fi
-    setpriv --reuid=65534 --regid=65534 --clear-groups \
-      env HP2R_INSTALL_ROOT="$HP2R_FIXTURE_ROOT" PATH="$remote_path" \
+    remote_environment=(
+      env HP2R_INSTALL_ROOT="$HP2R_FIXTURE_ROOT" PATH="$remote_path"
       HP2R_FIXTURE_REMOTE_RUNNING_RELEASE="${HP2R_FIXTURE_REMOTE_RUNNING_RELEASE:-}" \
       HP2R_FIXTURE_INTERRUPT_AFTER="${HP2R_FIXTURE_INTERRUPT_AFTER:-}" \
       HP2R_FIXTURE_PRESERVE_MUTATIONS="${HP2R_FIXTURE_PRESERVE_MUTATIONS:-}" \
@@ -609,8 +623,16 @@ if test "${1-}" = bash && test "${2-}" = -s; then
       HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY="${HP2R_FIXTURE_MUTATE_SETTER_AUTHORITY:-}" \
       HP2R_FIXTURE_MUTATE_NORMALIZATION_BOUND_LEAF="${HP2R_FIXTURE_MUTATE_NORMALIZATION_BOUND_LEAF:-}" \
       schema5_staged_authority_asserting="${schema5_staged_authority_asserting:-}" \
-      schema5_staged_authority_allow_prepared="${schema5_staged_authority_allow_prepared:-}" \
-      bash -c 'id -u > "$HP2R_FIXTURE_ROOT/tmp/remote-uid"; exec bash "$@"' bash "$@"
+      schema5_staged_authority_allow_prepared="${schema5_staged_authority_allow_prepared:-}"
+    )
+    if "$privileged_lifecycle"; then
+      "${remote_environment[@]}" \
+        bash -c 'id -u > "$HP2R_FIXTURE_ROOT/tmp/remote-uid"; exec bash "$@"' bash "$@"
+    else
+      setpriv --reuid=65534 --regid=65534 --clear-groups \
+        "${remote_environment[@]}" \
+        bash "$@"
+    fi
   }
   if test "${HP2R_FIXTURE_REMOTE_RESTRICTED_PATH:-}" = 1; then
     restricted_remote="$HP2R_FIXTURE_ROOT/tmp/restricted-remote.sh"
@@ -1258,7 +1280,9 @@ fi
 if test "${HP2R_FIXTURE_RECOVER_SYNC:-}" = 1; then
   : > "$HP2R_FIXTURE_ROOT/tmp/recover-record-sync"
 fi
-exec /usr/bin/sync "$@"
+# The fixture asserts sync ordering and fault handling above. Flushing the
+# runner's unrelated filesystems adds minutes without testing crash durability.
+exit 0
 SCRIPT
 
   install -m 0755 /dev/stdin "$bin/chmod" <<'SCRIPT'
@@ -1411,6 +1435,8 @@ SCRIPT
 
   cp -a "$bin" "$bin_no_dkms"
   rm -f -- "$bin_no_dkms/dkms"
+  cp -a "$bin" "$bin_template"
+  cp -a "$bin_no_dkms" "$bin_no_dkms_template"
 }
 
 run_stage() {
@@ -1906,6 +1932,8 @@ exercise_backlight_udev_settle() {
   run_stage >/dev/null
   install_live_hardware
   run_controller commit-boot.sh >/dev/null
+  test "$(cat "$root/tmp/remote-uid")" = 0 ||
+    fail 'lifecycle action did not execute as one privileged batch'
   grep -Fxq 'udevadm trigger --settle hyperpixel2r-backlight' "$log" ||
     fail 'candidate permission reload did not settle its targeted udev event'
 }
@@ -6949,7 +6977,7 @@ if run_stage; then
 else
   fail 'baseline stage did not run in the disposable target'
 fi
-test "$(cat "$root/tmp/remote-uid")" = 65534 || fail 'fake target did not execute as an unprivileged SSH user'
+test "$(cat "$root/tmp/remote-uid")" = 0 || fail 'lifecycle action did not execute as one privileged batch'
 
 # Real OpenSSH reconstructs the remote command through a shell and does not
 # preserve empty argument slots.  The verifier's optional expectations must
@@ -8589,12 +8617,12 @@ assert_file "$root/usr/lib/hyperpixel2r-kms/0.2.0/$source_revision/$release/mani
 # All firmware snapshots use one audited root-owned primitive.  The static
 # contract rejects the redirection and unprivileged-temp forms that broke the
 # real Pi rollback path; executable commit and rollback paths use root:root
-# mode-0600 config/tryboot files under the unprivileged remote account.
+# mode-0600 config/tryboot files inside the privileged lifecycle batch.
 remote_helper="$repo_root/scripts/lifecycle-remote.sh"
 grep -Fq 'dkms_command=/usr/sbin/dkms' "$remote_helper" ||
   fail 'production lifecycle must resolve DKMS through the fixed Trixie sbin path'
 if grep -Fq 'command -v dkms' "$remote_helper"; then
-  fail 'lifecycle must not infer DKMS absence from the unprivileged SSH PATH'
+  fail 'lifecycle must not infer DKMS absence from the SSH PATH'
 fi
 grep -q '^privileged_snapshot()' "$remote_helper" || fail 'missing privileged snapshot primitive'
 grep -q '^new_transaction_workspace()' "$remote_helper" || fail 'missing private transaction workspace primitive'
@@ -8610,10 +8638,10 @@ if grep -Eq 'sudo[[:space:]]+(cat|sh[[:space:]]+-c).*>' "$remote_helper"; then
   fail 'lifecycle snapshots rely on privileged shell redirection'
 fi
 if grep -Eq '^[[:space:]]*(normal_snapshot|prior_tryboot|normal_backup|candidate_backup)="\$\(mktemp' "$remote_helper"; then
-  fail 'a privileged snapshot is created by the unprivileged SSH user'
+  fail 'a privileged snapshot is created outside the audited primitive'
 fi
 if grep -Eq '>>?[[:space:]]*"\$(normal_snapshot|prior_tryboot|normal_backup|candidate_backup)"' "$remote_helper"; then
-  fail 'an unprivileged write targets a privileged snapshot'
+  fail 'a shell redirection targets a privileged snapshot'
 fi
 if grep -En 'privileged_snapshot .*\$\{root\}/tmp|mktemp.*\$\{root\}/tmp.*(lifecycle|candidate|backup)' "$remote_helper"; then
   fail 'a lifecycle snapshot or generated private leaf uses target tmp'

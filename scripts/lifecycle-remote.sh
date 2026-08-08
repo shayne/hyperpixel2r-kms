@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Target-side half of the boot lifecycle.  This file is copied to a private
-# /tmp directory for each controller invocation; it is never installed as a
-# mutable target dependency.  Every destructive route starts by proving the
+# Target-side half of the boot lifecycle. This file is streamed over SSH for
+# each controller invocation; it is never installed as a mutable target
+# dependency. Every destructive route starts by proving the
 # state file, stored bundle, and candidate leaves it is about to touch.
 umask 022
+
+# Controllers enter through one sudo boundary. Avoid spawning another sudo
+# process for every file assertion and mutation once this shell already owns
+# the complete action.
+if test "$EUID" -eq 0; then
+  sudo() { "$@"; }
+fi
 
 root="${HP2R_INSTALL_ROOT:-}"
 state_dir="${root}/var/lib/hyperpixel2r-kms"

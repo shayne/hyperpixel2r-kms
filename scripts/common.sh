@@ -17,6 +17,20 @@ hp2r_validate_target() {
   esac
 }
 
+# Run one complete lifecycle action behind a single sudo boundary. Sending the
+# committed helper over stdin avoids a mutable target-side script while keeping
+# the thousands of individual checks in one privileged process tree.
+hp2r_run_remote_lifecycle() {
+  local target="$1"
+  local lifecycle_script="$2"
+  local -a options=(-o BatchMode=yes -o ConnectTimeout=8 -o ConnectionAttempts=1)
+  shift 2
+
+  hp2r_validate_target "$target" || return
+  hp2r_require_regular "$lifecycle_script" || return
+  ssh "${options[@]}" "$target" sudo /bin/bash -s -- "$@" < "$lifecycle_script"
+}
+
 hp2r_validate_release() {
   local release="${1-}"
 

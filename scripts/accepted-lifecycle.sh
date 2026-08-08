@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Typed controller for the accepted-driver receipt and retained transition
-# protocol.  The target half is copied for each invocation and is never a
-# mutable installed dependency.
+# protocol. The target half is streamed into one privileged shell for each
+# invocation and is never a mutable installed dependency.
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 source "$repo_root/scripts/common.sh"
 
@@ -112,32 +112,17 @@ if test "$action" = prepare-new; then
     candidate_vc4_overlay_sha256="$(hp2r_manifest_value "$target_manifest" vc4_overlay_sha256)"
   fi
 fi
-remote_stage=''
-payload=''
 normal_probe=''
-cleanup() {
-  local status=$?
-  trap - EXIT
-  if test -n "$remote_stage"; then
-    ssh "${ssh_options[@]}" "$target" rm -rf -- "$remote_stage" >/dev/null 2>&1 || true
-  fi
-  test -z "$payload" || rm -rf -- "$payload"
-  exit "$status"
+run_lifecycle() {
+  hp2r_run_remote_lifecycle "$target" "$repo_root/scripts/lifecycle-remote.sh" "$@"
 }
-trap cleanup EXIT
-remote_stage="$(ssh "${ssh_options[@]}" "$target" mktemp -d /tmp/hp2r-accepted.XXXXXX)"
-[[ "$remote_stage" =~ ^/tmp/hp2r-accepted\.[A-Za-z0-9]+$ ]] ||
-  { echo 'target returned an unsafe accepted lifecycle path' >&2; exit 1; }
-payload="$(mktemp -d "${TMPDIR:-/tmp}/hp2r-accepted.XXXXXX")"
-install -m 0644 "$repo_root/scripts/lifecycle-remote.sh" "$payload/lifecycle-remote.sh"
-scp "${ssh_options[@]}" -rp "$payload/." "$target:$remote_stage/"
 case "$action" in
   mark-explicit-normal-verified) expected_phase=explicit_normal_published ;;
   mark-normalized-verified) expected_phase=normalized_config_published ;;
   *) expected_phase='' ;;
 esac
 if test -n "$expected_phase"; then
-  normal_probe="$(ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" \
+  normal_probe="$(run_lifecycle \
     accepted-normal-probe "$expected_phase")"
   [[ "$normal_probe" =~ ^("$expected_phase")$'\t'([0-9]+\.[0-9]+\.[0-9]+)$'\t'(hyperpixel2r-kms-[0-9a-f]{12}\.dtbo)$'\t'([A-Za-z0-9._+-]+)$'\t'(hyperpixel2r_kms\.ko)$'\t'([0-9a-f]{64})$ ]] || {
     echo 'target returned an unsafe accepted normal probe' >&2
@@ -152,11 +137,11 @@ if test -n "$expected_phase"; then
 fi
 case "$action" in
   record)
-    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" \
+    run_lifecycle \
       record-accepted "$driver_version" "$source_revision" "$kernel_release"
     ;;
   recover-record)
-    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" \
+    run_lifecycle \
       recover-accepted-record "$driver_version" "$source_revision" "$kernel_release"
     ;;
   prepare-new)
@@ -175,51 +160,46 @@ case "$action" in
     if test -n "$lifecycle_capability"; then
       prepare_args+=("$lifecycle_capability")
     fi
-    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" \
+    run_lifecycle \
       "${prepare_args[@]}"
     ;;
   stage-retained)
-    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" \
+    run_lifecycle \
       stage-retained "$driver_version" "$source_revision" "$kernel_release"
     ;;
   mark-committed)
-    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" mark-committed-accepted
+    run_lifecycle mark-committed-accepted
     ;;
   commit-retained)
-    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" commit-retained
+    run_lifecycle commit-retained
     ;;
   recover)
-    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" recover-accepted
+    run_lifecycle recover-accepted
     ;;
   mark-verified)
-    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" mark-verified-accepted
+    run_lifecycle mark-verified-accepted
     ;;
   mark-explicit-normal-verified)
-    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" mark-explicit-normal-verified-accepted
+    run_lifecycle mark-explicit-normal-verified-accepted
     ;;
   normalize-inactive-kernel)
-    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" normalize-inactive-kernel-accepted
+    run_lifecycle normalize-inactive-kernel-accepted
     ;;
   mark-normalized-verified)
-    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" mark-normalized-verified-accepted
+    run_lifecycle mark-normalized-verified-accepted
     ;;
   finalize)
-    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" finalize-accepted
+    run_lifecycle finalize-accepted
     ;;
   uninstall)
-    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" \
+    run_lifecycle \
       uninstall-accepted "$driver_version" "$source_revision" "$kernel_release"
     ;;
   retire-inactive)
-    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" \
+    run_lifecycle \
       retire-inactive "$driver_version" "$source_revision" "$kernel_release"
     ;;
   finalize-uninstall)
-    ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" finalize-uninstall-accepted
+    run_lifecycle finalize-uninstall-accepted
     ;;
 esac
-ssh "${ssh_options[@]}" "$target" rm -rf -- "$remote_stage"
-remote_stage=''
-rm -rf -- "$payload"
-payload=''
-trap - EXIT

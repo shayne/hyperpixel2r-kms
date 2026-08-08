@@ -40,7 +40,6 @@ trap cleanup EXIT
 remote_stage="$(ssh "${ssh_options[@]}" "$target" mktemp -d /tmp/hp2r-tryboot-stage.XXXXXX)"
 [[ "$remote_stage" =~ ^/tmp/hp2r-tryboot-stage\.[A-Za-z0-9]+$ ]] || { echo 'target returned an unsafe staging path' >&2; exit 1; }
 payload="$(mktemp -d "${TMPDIR:-/tmp}/hp2r-uninstall.XXXXXX")"
-install -m 0644 "$repo_root/scripts/lifecycle-remote.sh" "$payload/lifecycle-remote.sh"
 if "$cleanup_legacy"; then
   contract="${HP2R_LEGACY_MIGRATION_CONTRACT:-$repo_root/release/legacy-planeradar-migration-v1.tsv}"
   test -f "$contract" && test ! -L "$contract" ||
@@ -48,12 +47,15 @@ if "$cleanup_legacy"; then
   install -m 0644 "$contract" "$payload/legacy-planeradar-migration-v1.tsv"
 fi
 scp "${ssh_options[@]}" -rp "$payload/." "$target:$remote_stage/"
+run_lifecycle() {
+  hp2r_run_remote_lifecycle "$target" "$repo_root/scripts/lifecycle-remote.sh" "$@"
+}
 if "$cleanup_legacy"; then
-  ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" \
+  run_lifecycle \
     cleanup-legacy-planeradar "$remote_stage/legacy-planeradar-migration-v1.tsv" \
     "$expected_overlay_file"
 else
-  ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" uninstall
+  run_lifecycle uninstall
 fi
 ssh "${ssh_options[@]}" "$target" rm -rf -- "$remote_stage"
 remote_stage=''

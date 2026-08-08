@@ -117,7 +117,7 @@ if test -n "$requested_release"; then
   release_tag="$(printf %s "$release" | sha256sum | awk '{ print substr($1, 1, 12) }')"
   candidate_kernel_file="hp2r-${source_revision:0:12}-${release_tag}-kernel.img"
   candidate_initramfs_file="hp2r-${source_revision:0:12}-${release_tag}-initramfs.img"
-  authorization="$(ssh "${ssh_options[@]}" "$target" bash -s -- authorize-inactive-stage < "$repo_root/scripts/lifecycle-remote.sh")"
+  authorization="$(hp2r_run_remote_lifecycle "$target" "$repo_root/scripts/lifecycle-remote.sh" authorize-inactive-stage)"
   test "${authorization#*$'\n'}" = "$authorization" || {
     echo 'inactive stage authorization has an unsafe tuple shape' >&2
     exit 1
@@ -171,7 +171,6 @@ cleanup() {
 trap cleanup EXIT
 mkdir -p "$payload/dkms-source"
 for artifact in "$manifest" "$artifact_dir/$module_file" "$artifact_dir/$overlay_file" "$artifact_dir/$applied_dtb_file" "$artifact_dir/$backlight_rule_file"; do install -m 0644 "$artifact" "$payload/$(basename "$artifact")"; done
-install -m 0644 "$repo_root/scripts/lifecycle-remote.sh" "$payload/lifecycle-remote.sh"
 
 # Source is materialized from the artifact's committed revision, never from a
 # possibly changed controller checkout.  The remote validates this complete
@@ -191,7 +190,10 @@ done
 remote_stage="$(ssh "${ssh_options[@]}" "$target" mktemp -d /tmp/hp2r-tryboot-stage.XXXXXX)"
 [[ "$remote_stage" =~ ^/tmp/hp2r-tryboot-stage\.[A-Za-z0-9]+$ ]] || { echo "target returned an unsafe staging path: $remote_stage" >&2; exit 1; }
 scp "${ssh_options[@]}" -rp "$payload/." "$target:$remote_stage/"
-ssh "${ssh_options[@]}" "$target" bash "$remote_stage/lifecycle-remote.sh" stage \
+run_lifecycle() {
+  hp2r_run_remote_lifecycle "$target" "$repo_root/scripts/lifecycle-remote.sh" "$@"
+}
+run_lifecycle stage \
   "$remote_stage" "$driver_version" "$source_revision" "$source_tree" "$release" \
   "$module_file" "$overlay_file" "$applied_dtb_file" "$backlight_rule_file" "$replace_overlay" \
   "${authorized_transition_sha:-}" "${authorized_stage_backlight_rule_existed:-}" \

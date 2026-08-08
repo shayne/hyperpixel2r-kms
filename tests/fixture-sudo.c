@@ -3,9 +3,9 @@
 #include <string.h>
 #include <unistd.h>
 
-/* A deliberately tiny setuid test double.  The fixture runs target scripts as
- * an unprivileged SSH user while allowing only their explicit `sudo command`
- * boundaries to regain root, which makes shell-redirection bugs observable. */
+/* A deliberately tiny setuid test double. The fixture uses it for explicit
+ * privilege boundaries and for direct lifecycle unit scenarios, which keeps
+ * shell-redirection and run-as bugs observable. */
 int main(int argc, char **argv)
 {
 	if (argc < 2)
