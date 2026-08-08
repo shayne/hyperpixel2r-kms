@@ -685,9 +685,13 @@ case "$1" in
     printf '%s\n' "$program" >> "$HP2R_FAKE_SSH_LOG"
     transformed_program="$(printf '%s\n' "$program" | sed \
       "s|/lib/modules|$HP2R_FAKE_REMOTE_ROOT/lib/modules|g; s|/boot|$HP2R_FAKE_REMOTE_ROOT/boot|g; s|/usr/sbin|$HP2R_FAKE_USR_SBIN|g; s|/sbin|$HP2R_FAKE_SYSTEM_SBIN|g")"
+    remote_args=()
+    for argument in "${@:4}"; do
+      test -z "$argument" || remote_args+=("$argument")
+    done
     output="$(
       printf '%s\n' "$transformed_program" |
-        PATH="$HP2R_FAKE_BIN:/usr/bin:/bin" bash -s -- "${@:4}"
+        PATH="$HP2R_FAKE_BIN:/usr/bin:/bin" bash -s -- "${remote_args[@]}"
     )"
     printf '%s\n' "$output" | sed "s|$HP2R_FAKE_REMOTE_ROOT||g"
     ;;
@@ -817,8 +821,8 @@ test -f "$fake_export_dir/root/boot/vmlinuz-$requested_release"
 test -f "$fake_export_dir/root/boot/initrd.img-$requested_release"
 test ! -e "$temporary_dir/artifacts/vmlinuz-$requested_release"
 test ! -e "$temporary_dir/artifacts/initrd.img-$requested_release"
-grep -Fq "fixture-target bash -s -- $requested_release" "$fake_ssh_log"
-grep -Fq 'release="${1-}"' "$fake_ssh_log"
+grep -Fq "fixture-target bash -s -- true $requested_release" "$fake_ssh_log"
+grep -Fq 'release="${2-}"' "$fake_ssh_log"
 grep -Fq '"/lib/modules/$release/build"' "$fake_ssh_log"
 grep -Fq 'modinfo -k "$release" -F vermagic vc4' "$fake_ssh_log"
 grep -Fq '"/boot/vmlinuz-$release"' "$fake_ssh_log"

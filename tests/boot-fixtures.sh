@@ -7848,7 +7848,11 @@ sed -i \
   -e '/^backlight_rule_sha256=/d' \
   -e '/^prior_backlight_rule_existed=/d' \
   -e '/^prior_backlight_rule_sha256=/d' \
+  -e '/^backlight_metadata_capability=/d' \
+  -e '/^prior_backlight_metadata_sha256=/d' \
   "$accepted_receipt"
+test "$(awk 'END { print NR }' "$accepted_receipt")" = 11 ||
+  fail 'hashless full receipt fixture is not an exact schema-1 receipt'
 if run_accepted_remote uninstall-accepted \
   0.2.0 "$source_revision" "$release" >/dev/null 2>&1; then
   fail 'accepted uninstall accepted a hashless full DKMS inventory'
@@ -8778,6 +8782,8 @@ sed -i \
   -e '/^backlight_rule_sha256=/d' \
   -e '/^prior_backlight_rule_existed=/d' \
   -e '/^prior_backlight_rule_sha256=/d' \
+  -e '/^backlight_metadata_capability=/d' \
+  -e '/^prior_backlight_metadata_sha256=/d' \
   "$state"
 run_controller rollback-boot.sh >/dev/null
 assert_prior_dkms "$prior_dkms_sums" added
@@ -8801,6 +8807,8 @@ sed -i \
   -e '/^backlight_rule_sha256=/d' \
   -e '/^prior_backlight_rule_existed=/d' \
   -e '/^prior_backlight_rule_sha256=/d' \
+  -e '/^backlight_metadata_capability=/d' \
+  -e '/^prior_backlight_metadata_sha256=/d' \
   "$state"
 run_controller rollback-boot.sh >/dev/null
 assert_prior_dkms "$prior_dkms_sums" added
