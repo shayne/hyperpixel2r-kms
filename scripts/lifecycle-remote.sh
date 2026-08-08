@@ -3302,6 +3302,11 @@ stage() {
   created_firmware_kernel=false
   created_firmware_initramfs=false
   phase_published=false
+  accepted_module_replacement=false
+  accepted_module_replacement_attempted=false
+  accepted_prior_artifact=''
+  accepted_prior_module=''
+  accepted_prior_module_sha=''
   # Set by set_accepted_transition_phase immediately after its atomic write.
   # It is deliberately distinct from the caller's post-write bookkeeping: a
   # failed workspace cleanup or assertion after that write must never make the
@@ -3333,7 +3338,13 @@ stage() {
         esac
       fi
       if "$created_overlay"; then sudo rm -f -- "$overlay_path" || true; fi
-      if "$created_module"; then sudo rm -f -- "$module_path" || true; fi
+      if "$accepted_module_replacement_attempted"; then
+        atomic_copy "$accepted_prior_module" "$module_path" 644 \
+          "$accepted_prior_module_sha" || true
+        sudo depmod -a "$release" || true
+      elif "$created_module"; then
+        sudo rm -f -- "$module_path" || true
+      fi
       if "$created_firmware_initramfs"; then sudo rm -f -- "$firmware_initramfs_path" || true; fi
       if "$created_firmware_kernel"; then sudo rm -f -- "$firmware_kernel_path" || true; fi
       if "$installed_backlight_rule"; then
@@ -3579,6 +3590,23 @@ stage() {
       die 'accepted candidate journal exists without an accepted receipt'
   fi
 
+  if "$accepted_bound" && ! "$inactive_stage" &&
+    test "$module_sha" != "$(accepted_value module_sha256)"; then
+    test "$release" = "$(accepted_value kernel_release)" &&
+      test "$module_file" = "$(accepted_value module_file)" ||
+      die 'accepted same-kernel module replacement is not bound to the prior receipt'
+    accepted_prior_artifact="$(accepted_prior_artifact_path)" ||
+      die 'accepted prior artifact is unsafe during same-kernel stage'
+    accepted_prior_module="$accepted_prior_artifact/$module_file"
+    accepted_prior_module_sha="$(accepted_value module_sha256)"
+    assert_owned_regular "$accepted_prior_module" 644 &&
+      test "$(sha "$accepted_prior_module")" = "$accepted_prior_module_sha" &&
+      assert_owned_regular "$module_path" 644 &&
+      test "$(sha "$module_path")" = "$accepted_prior_module_sha" ||
+      die 'accepted prior module differs before same-kernel stage'
+    accepted_module_replacement=true
+  fi
+
   if "$inactive_stage"; then
     # The prepared schema-6 journal and its private companions are the only
     # authority for firmware leaves.  A pre-existing exact leaf is reusable
@@ -3651,7 +3679,17 @@ stage() {
     "$backlight_rule_sha" || die 'failed to install candidate backlight rule'
   installed_backlight_rule=true
   fixture_interrupt_after candidate-rule-installed
-  if copy_if_absent_or_exact "$artifact_dir/$module_file" "$module_path" 644 "$module_sha"; then
+  if "$accepted_module_replacement"; then
+    assert_no_boot_writers ||
+      die 'a boot/package writer is active during accepted module replacement'
+    assert_owned_regular "$module_path" 644 &&
+      test "$(sha "$module_path")" = "$accepted_prior_module_sha" ||
+      die 'accepted prior module changed before same-kernel replacement'
+    accepted_module_replacement_attempted=true
+    atomic_copy "$artifact_dir/$module_file" "$module_path" 644 "$module_sha" ||
+      die 'failed to replace accepted module from incoming artifact'
+    module_existed=true
+  elif copy_if_absent_or_exact "$artifact_dir/$module_file" "$module_path" 644 "$module_sha"; then
     if "$copy_was_created"; then created_module=true
     else module_existed=true
     fi
@@ -8412,7 +8450,7 @@ recover_accepted() {
   local bound_candidate_version bound_candidate_revision bound_candidate_release
   local bound_candidate_manifest_sha bound_candidate_module_file bound_candidate_module_sha
   local bound_candidate_overlay_file bound_candidate_overlay_sha
-  local phase accepted_tuple candidate_tuple reboot_required=false
+  local phase accepted_tuple candidate_tuple transaction reboot_required=false
 
   if ! sudo test -e "$accepted_transition" && ! sudo test -L "$accepted_transition"; then
     assert_accepted_state || die 'accepted driver receipt is missing or unsafe'
@@ -8499,6 +8537,36 @@ recover_accepted() {
       prepared|staged|committed|verified) ;;
       *) die 'accepted transition is already finalizing' ;;
     esac
+  fi
+  if test "$transition_schema" != 6 && sudo test -e "$state_file" &&
+    test "$(accepted_transition_value prior_kernel_release)" = \
+      "$(accepted_transition_value candidate_kernel_release)" &&
+    test "$(accepted_value module_file)" = "$bound_candidate_module_file" &&
+    test "$(accepted_value module_sha256)" != "$bound_candidate_module_sha"; then
+    transaction="$(assert_transaction_state)" ||
+      die 'accepted same-kernel transaction is unsafe to recover'
+    test "$transaction" = \
+      "$bound_candidate_version"$'\t'"$bound_candidate_revision"$'\t'"$bound_candidate_release"$'\t'"$artifact_root/$bound_candidate_version/$bound_candidate_revision/$bound_candidate_release" ||
+      die 'accepted same-kernel transaction identity differs during recovery'
+    case "$phase" in
+      staged)
+        set_accepted_transition_phase staged prepared ||
+          die 'failed to return accepted same-kernel authority to prepared recovery'
+        ;;
+      prepared) ;;
+      *) die 'accepted same-kernel transaction phase is unsafe to recover' ;;
+    esac
+    fixture_interrupt_after accepted-same-kernel-recovery-prepared
+    sudo rm -- "$state_file" ||
+      die 'failed to retire accepted same-kernel generic state'
+    sudo sync
+    fixture_interrupt_after accepted-same-kernel-recovery-state-retired
+    restore_prior_from_accepted_transition ||
+      die 'failed to restore prior accepted same-kernel driver'
+    assert_accepted_state || die 'restored accepted driver receipt is unsafe'
+    printf 'recovered accepted %s\n' "$(accepted_value source_revision)"
+    printf 'reboot_required=%s\n' "$reboot_required"
+    return
   fi
   if sudo test -e "$state_file"; then
     rollback

@@ -2099,7 +2099,7 @@ exercise_backlight_metadata_authority() {
 exercise_schema_two_candidate_upgrade() {
   local candidate_source candidate_artifact candidate_manifest
   local candidate_manifest_sha candidate_module_sha candidate_overlay_sha candidate_rule_sha
-  local candidate_revision candidate_overlay transition
+  local candidate_revision candidate_overlay prior_module_sha transition
 
   new_target
   run_stage >/dev/null
@@ -2107,6 +2107,8 @@ exercise_schema_two_candidate_upgrade() {
   run_controller commit-boot.sh >/dev/null
   run_accepted_remote record-accepted \
     0.2.0 "$source_revision" "$release" >/dev/null
+  prior_module_sha="$(sha256sum \
+    "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko" | awk '{ print $1 }')"
 
   candidate_source="$fixture/schema-two-candidate-source"
   candidate_artifact="$candidate_source/dist/artifacts/$release"
@@ -2116,14 +2118,16 @@ exercise_schema_two_candidate_upgrade() {
   candidate_revision='cccccccccccccccccccccccccccccccccccccccc'
   candidate_overlay='hyperpixel2r-kms-cccccccccccc.dtbo'
   mv "$candidate_artifact/$overlay_file" "$candidate_artifact/$candidate_overlay"
+  printf 'schema-two successor module\n' >> "$candidate_artifact/hyperpixel2r_kms.ko"
+  candidate_module_sha="$(sha256sum "$candidate_artifact/hyperpixel2r_kms.ko" | awk '{ print $1 }')"
   sed -i \
     -e 's/^schema_version\t3$/schema_version\t2/' \
     -e '/^lifecycle_capability\t/d' \
     -e "s/^source_revision\t.*/source_revision\t$candidate_revision/" \
+    -e "s/^module_sha256\t.*/module_sha256\t$candidate_module_sha/" \
     -e "s/^overlay_file\t.*/overlay_file\t$candidate_overlay/" \
     "$candidate_manifest"
   candidate_manifest_sha="$(sha256sum "$candidate_manifest" | awk '{ print $1 }')"
-  candidate_module_sha="$(awk -F '\t' '$1 == "module_sha256" { print $2 }' "$candidate_manifest")"
   candidate_overlay_sha="$(awk -F '\t' '$1 == "overlay_sha256" { print $2 }' "$candidate_manifest")"
   candidate_rule_sha="$(awk -F '\t' '$1 == "backlight_rule_sha256" { print $2 }' "$candidate_manifest")"
 
@@ -2136,6 +2140,23 @@ exercise_schema_two_candidate_upgrade() {
   if grep -q '^backlight_metadata_capability=' "$transition"; then
     fail 'schema-2 candidate transition falsely advertised metadata authority'
   fi
+  if HP2R_FIXTURE_INTERRUPT_AFTER=candidate-module-installed \
+    HP2R_FIXTURE_REPLACE_OVERLAY="$overlay_file" \
+    HP2R_FIXTURE_ARTIFACT_DIR_OVERRIDE="$candidate_artifact" \
+    HP2R_FIXTURE_SOURCE_ROOT_OVERRIDE="$candidate_source" \
+    run_stage >"$fixture/schema-two-stage-cleanup.out" 2>&1; then
+    fail 'schema-2 candidate ignored module-install interruption'
+  fi
+  grep -Fq 'fixture interruption after candidate-module-installed' \
+    "$fixture/schema-two-stage-cleanup.out" ||
+    fail 'schema-2 candidate did not reach module-install interruption'
+  grep -Fxq 'phase=prepared' "$transition" ||
+    fail 'schema-2 cleanup changed the prepared accepted authority'
+  assert_absent "$root/usr/lib/hyperpixel2r-kms/0.2.0/$candidate_revision/$release"
+  assert_absent "$root/var/lib/hyperpixel2r-kms/tryboot-state"
+  test "$(sha256sum \
+    "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko" | awk '{ print $1 }')" = \
+    "$prior_module_sha" || fail 'schema-2 cleanup did not restore the accepted module'
   if ! HP2R_FIXTURE_REPLACE_OVERLAY="$overlay_file" \
     HP2R_FIXTURE_ARTIFACT_DIR_OVERRIDE="$candidate_artifact" \
     HP2R_FIXTURE_SOURCE_ROOT_OVERRIDE="$candidate_source" \
@@ -2145,12 +2166,28 @@ exercise_schema_two_candidate_upgrade() {
   fi
   assert_absent \
     "$root/usr/lib/hyperpixel2r-kms/0.2.0/$candidate_revision/$release/prior-backlight-metadata"
+  if HP2R_FIXTURE_INTERRUPT_AFTER=accepted-same-kernel-recovery-prepared \
+    HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
+    run_accepted_remote recover-accepted \
+      >"$fixture/schema-two-recover-prepared.out" 2>&1; then
+    fail 'schema-2 recovery ignored prepared-phase interruption'
+  fi
+  grep -Fq 'fixture interruption after accepted-same-kernel-recovery-prepared' \
+    "$fixture/schema-two-recover-prepared.out" ||
+    fail 'schema-2 recovery did not reach prepared-phase interruption'
+  grep -Fxq 'phase=prepared' "$transition" ||
+    fail 'schema-2 recovery did not durably return to prepared authority'
+  assert_file "$root/var/lib/hyperpixel2r-kms/tryboot-state"
   if ! run_accepted_remote recover-accepted \
     >"$fixture/schema-two-recover.out" 2>&1; then
     cat "$fixture/schema-two-recover.out" >&2
     fail 'schema-2 candidate could not recover through the legacy boundary'
   fi
   assert_absent "$transition"
+  assert_absent "$root/usr/lib/hyperpixel2r-kms/0.2.0/$candidate_revision/$release"
+  test "$(sha256sum \
+    "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko" | awk '{ print $1 }')" = \
+    "$prior_module_sha" || fail 'schema-2 recovery did not restore the accepted module'
 }
 
 run_verify() {
@@ -7522,7 +7559,7 @@ new_stage_overlay='hyperpixel2r-kms-dddddddddddd.dtbo'
 new_stage_source="$fixture/new-stage-source"
 new_stage_artifact="$new_stage_source/dist/artifacts/$release"
 mkdir -p "$(dirname "$new_stage_artifact")"
-cp -a "$accepted_artifact" "$new_stage_artifact"
+cp -a "$repo_root/dist/artifacts/$release" "$new_stage_artifact"
 mv "$new_stage_artifact/$overlay_file" "$new_stage_artifact/$new_stage_overlay"
 printf 'new accepted candidate module\n' >> "$new_stage_artifact/hyperpixel2r_kms.ko"
 printf 'new accepted candidate overlay\n' >> "$new_stage_artifact/$new_stage_overlay"
@@ -7545,6 +7582,7 @@ for boundary in \
   candidate-dkms-activated candidate-tryboot-published \
   candidate-tryboot-state-published candidate-staged-published
 do
+  boundary_output="$fixture/new-accepted-stage-$boundary.out"
   run_accepted_remote prepare-new-accepted \
     0.2.0 "$new_stage_revision" "$release" "$new_stage_manifest_sha" \
     hyperpixel2r_kms.ko "$new_stage_module_sha" \
@@ -7555,8 +7593,13 @@ do
     HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
     HP2R_FIXTURE_ARTIFACT_DIR_OVERRIDE="$new_stage_artifact" \
     HP2R_FIXTURE_SOURCE_ROOT_OVERRIDE="$new_stage_source" \
-    run_stage >/dev/null 2>&1; then
+    HP2R_FIXTURE_REPLACE_OVERLAY="$overlay_file" \
+    run_stage >"$boundary_output" 2>&1; then
     fail "new accepted stage ignored interruption at $boundary"
+  fi
+  if ! grep -Fq "fixture interruption after $boundary" "$boundary_output"; then
+    cat "$boundary_output" >&2
+    fail "new accepted stage did not reach interruption at $boundary"
   fi
   assert_file "$new_transition"
   run_accepted_remote recover-accepted >/dev/null
@@ -7567,6 +7610,9 @@ do
     fail "new accepted recovery after $boundary did not restore prior boot"
   grep -Fxq "source_revision=$source_revision" "$accepted_receipt" ||
     fail "new accepted recovery after $boundary changed the accepted receipt"
+  test "$(sha256sum "$root/lib/modules/$release/extra/hyperpixel2r_kms.ko" | awk '{ print $1 }')" = \
+    "$(awk -F '\t' '$1 == "module_sha256" { print $2 }' "$accepted_artifact/manifest.txt")" ||
+    fail "new accepted recovery after $boundary did not restore the prior module"
   find "$root/var/lib/hyperpixel2r-kms" -mindepth 1 -maxdepth 1 \
     -type d -name '.hp2r-transaction.*' -exec rm -rf -- {} +
   assert_no_private_workspaces
