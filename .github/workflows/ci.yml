@@ -85,3 +85,11 @@ jobs:
           mise run validate-release-metadata -- \
             "$RUNNER_TEMP/release-one/driver-manifest.json" \
             "$RUNNER_TEMP/release-one/SBOM.spdx.json"
+
+      - name: Upload the commit-bound verified release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-assets-${{ github.sha }}
+          path: ${{ runner.temp }}/release-one
+          if-no-files-found: error
+          retention-days: 30

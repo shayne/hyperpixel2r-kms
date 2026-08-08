@@ -14,6 +14,7 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: write
   id-token: write
   attestations: write
@@ -39,9 +40,6 @@ jobs:
       - name: Set up mise
         uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4.2.3
 
-      - name: Install stable release packaging tools
-        run: sudo apt-get update && sudo apt-get install --yes zstd
-
       - name: Confirm absent stable tag and bind selected source
         id: preflight
         env:
@@ -63,18 +61,22 @@ jobs:
           ./scripts/validate-stable-release-tag.sh "$TAG" "$source_commit"
           printf 'commit=%s\n' "$source_commit" >> "$GITHUB_OUTPUT"
 
-      - name: Verify the selected source before stable packaging
-        run: |
-          docker build --tag hyperpixel2r-kms-kernel-builder:debian-trixie-gcc14 --file packaging/Dockerfile.kernel .
-          mise run verify
-
-      - name: Build reproducible stable draft assets
+      - name: Download commit-bound verified stable assets
         env:
+          GH_TOKEN: ${{ github.token }}
           RELEASE_COMMIT: ${{ steps.preflight.outputs.commit }}
         run: |
-          mise run package-release -- --source-revision "$RELEASE_COMMIT" --artifact-dir "$RUNNER_TEMP/no-artifacts" --output dist/stable
-          mise run package-release -- --source-revision "$RELEASE_COMMIT" --artifact-dir "$RUNNER_TEMP/no-artifacts" --output dist/stable-repro
-          diff -r dist/stable dist/stable-repro
+          runs="$RUNNER_TEMP/verified-runs.json"
+          gh run list --workflow ci.yml --commit "$RELEASE_COMMIT" --status success \
+            --limit 20 --json databaseId,headSha,conclusion > "$runs"
+          run_id="$(jq -r --arg commit "$RELEASE_COMMIT" \
+            '[.[] | select(.headSha == $commit and .conclusion == "success")] | last | .databaseId // empty' \
+            "$runs")"
+          test -n "$run_id" || { echo "no successful verification run for $RELEASE_COMMIT" >&2; exit 1; }
+          mkdir -p dist/stable
+          gh run download "$run_id" \
+            --name "release-assets-$RELEASE_COMMIT" \
+            --dir dist/stable
           jq -e --arg commit "$RELEASE_COMMIT" \
             '.source.commit == $commit' \
             dist/stable/driver-manifest.json >/dev/null

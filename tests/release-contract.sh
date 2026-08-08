@@ -112,6 +112,13 @@ if ci_workflow.is_file():
     for required in validator_ci_contract:
         if required not in ci:
             failures.append(f"CI must prove the real release validator on hosted Python: {required}")
+    for required in (
+        "Upload the commit-bound verified release assets",
+        "actions/upload-artifact@",
+        "name: release-assets-${{ github.sha }}",
+    ):
+        if required not in ci:
+            failures.append(f"CI must publish one commit-bound verified artifact: {required}")
 
 tag_validator = root / "scripts" / "validate-release-tag.sh"
 if not tag_validator.is_file() or not tag_validator.stat().st_mode & 0o111:
@@ -125,8 +132,7 @@ if release_workflow.is_file():
     workflow = release_workflow.read_text()
     ordered_steps = [
         "Confirm unused tag and bind selected source",
-        "Verify the selected source before release packaging",
-        "Build reproducible release assets",
+        "Download commit-bound verified release assets",
         "Validate release metadata and checksums",
         "Create the immutable tag after verification",
         "Attest every published release subject",
@@ -156,14 +162,18 @@ if release_workflow.is_file():
        'git push origin "refs/tags/$TAG:refs/tags/$TAG"' not in workflow or \
        'test "$tag_commit" = "$RELEASE_COMMIT"' not in workflow:
         failures.append("release workflow tag race check and push must target the selected source exactly")
+    for forbidden in ("mise run verify", "mise run package-release", "docker build"):
+        if forbidden in workflow:
+            failures.append(f"release workflow must reuse CI assets instead of rebuilding: {forbidden}")
+    if 'release-assets-$RELEASE_COMMIT' not in workflow:
+        failures.append("release workflow must download the exact commit-bound CI artifact")
 
 stable_draft = root / ".github" / "workflows" / "stable-draft.yml"
 if stable_draft.is_file():
     workflow = stable_draft.read_text()
     ordered_steps = [
         "Confirm absent stable tag and bind selected source",
-        "Verify the selected source before stable packaging",
-        "Build reproducible stable draft assets",
+        "Download commit-bound verified stable assets",
         "Validate stable metadata and checksums",
         "Attest every stable draft subject",
         "Attest the stable SPDX bill of materials",
@@ -173,7 +183,7 @@ if stable_draft.is_file():
     if -1 in offsets or offsets != sorted(offsets):
         failures.append("stable draft workflow must validate and attest before draft creation")
     for required in (
-        "permissions:\n  contents: write\n  id-token: write\n  attestations: write",
+        "permissions:\n  actions: read\n  contents: write\n  id-token: write\n  attestations: write",
         "scripts/validate-stable-release-tag.sh",
         "scripts/stable_release.py draft",
         "HP2R_STABLE_DRAFT_RELEASE_ID",
@@ -182,6 +192,11 @@ if stable_draft.is_file():
     ):
         if required not in workflow:
             failures.append(f"stable draft workflow contract is missing: {required}")
+    for forbidden in ("mise run verify", "mise run package-release", "docker build"):
+        if forbidden in workflow:
+            failures.append(f"stable draft must reuse CI assets instead of rebuilding: {forbidden}")
+    if 'release-assets-$RELEASE_COMMIT' not in workflow:
+        failures.append("stable draft must download the exact commit-bound CI artifact")
     if "git tag" in workflow or "refs/tags/$TAG:refs/tags/$TAG" in workflow:
         failures.append("stable draft workflow must not create or push the stable tag")
 
