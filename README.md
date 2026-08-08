@@ -4,10 +4,10 @@ This repository provides a standalone DRM/KMS driver for the Pimoroni
 HyperPixel 2.1 Round on a Raspberry Pi Zero 2 W. It is tested with 64-bit
 Raspberry Pi OS Lite Trixie and the exact kernel checks described below.
 
-<!-- HP2R_CURRENT_RELEASE=v0.2.0-rc.1 -->
+<!-- HP2R_CURRENT_RELEASE=v0.2.0-rc.2 -->
 
 Stable release: [`v0.1.1`](https://github.com/shayne/hyperpixel2r-kms/releases/tag/v0.1.1).
-The next candidate is `v0.2.0-rc.1`, which adds controlled PWM backlight
+The next candidate is `v0.2.0-rc.2`, which adds controlled PWM backlight
 support and a hardened inactive-kernel lifecycle for Plane Radar.
 
 ## Supported shape
@@ -90,8 +90,8 @@ match the Pi in front of you. GitHub Actions creates provenance and SBOM
 attestations for the published payloads.
 
 ```sh
-gh release download v0.2.0-rc.1 -R shayne/hyperpixel2r-kms -D dist/v0.2.0-rc.1
-cd dist/v0.2.0-rc.1
+gh release download v0.2.0-rc.2 -R shayne/hyperpixel2r-kms -D dist/v0.2.0-rc.2
+cd dist/v0.2.0-rc.2
 sha256sum -c SHA256SUMS
 gh attestation verify hyperpixel2r-kms-source.tar.zst \
   -R shayne/hyperpixel2r-kms \
