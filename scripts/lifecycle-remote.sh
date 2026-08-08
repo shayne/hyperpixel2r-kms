@@ -7024,6 +7024,12 @@ set_accepted_transition_phase() {
   fi
   if "$reused_prepared_setter" || "$reused_standalone_setter"; then
     :
+  elif test "$expected:$next" = staged:prepared; then
+    sudo sed \
+      -e "s/^phase=$expected\$/phase=$next/" \
+      -e 's/^candidate_dkms_inventory_sha256=.*/candidate_dkms_inventory_sha256=pending/' \
+      -e 's/^candidate_prior_backlight_metadata_sha256=.*/candidate_prior_backlight_metadata_sha256=pending/' \
+      "$transition_source" | sudo tee "$state_tmp" >/dev/null || return
   elif test -n "$explicit_normal_sha" || test -n "$normalized_normal_sha"; then
     sudo awk -F= -v expected="$expected" -v next_phase="$next" \
       -v explicit="$explicit_normal_sha" -v normalized="$normalized_normal_sha" '

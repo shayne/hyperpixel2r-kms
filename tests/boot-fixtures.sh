@@ -2132,10 +2132,14 @@ exercise_backlight_metadata_authority() {
   assert_file "$uninstall"
 }
 
-exercise_schema_two_candidate_upgrade() {
+exercise_same_kernel_candidate_upgrade() {
   local candidate_source candidate_artifact candidate_manifest
   local candidate_manifest_sha candidate_module_sha candidate_overlay_sha candidate_rule_sha
-  local candidate_revision candidate_overlay prior_module_sha transition
+  local candidate_revision candidate_overlay metadata_capability="${1:-false}"
+  local prior_module_sha transition
+  local -a candidate_prepare_args
+
+  case "$metadata_capability" in true|false) ;; *) fail 'invalid metadata capability fixture' ;; esac
 
   new_target
   run_stage >/dev/null
@@ -2156,24 +2160,39 @@ exercise_schema_two_candidate_upgrade() {
   mv "$candidate_artifact/$overlay_file" "$candidate_artifact/$candidate_overlay"
   printf 'schema-two successor module\n' >> "$candidate_artifact/hyperpixel2r_kms.ko"
   candidate_module_sha="$(sha256sum "$candidate_artifact/hyperpixel2r_kms.ko" | awk '{ print $1 }')"
-  sed -i \
-    -e 's/^schema_version\t3$/schema_version\t2/' \
-    -e '/^lifecycle_capability\t/d' \
-    -e "s/^source_revision\t.*/source_revision\t$candidate_revision/" \
-    -e "s/^module_sha256\t.*/module_sha256\t$candidate_module_sha/" \
-    -e "s/^overlay_file\t.*/overlay_file\t$candidate_overlay/" \
-    "$candidate_manifest"
+  if "$metadata_capability"; then
+    sed -i \
+      -e "s/^source_revision\t.*/source_revision\t$candidate_revision/" \
+      -e "s/^module_sha256\t.*/module_sha256\t$candidate_module_sha/" \
+      -e "s/^overlay_file\t.*/overlay_file\t$candidate_overlay/" \
+      "$candidate_manifest"
+  else
+    sed -i \
+      -e 's/^schema_version\t3$/schema_version\t2/' \
+      -e '/^lifecycle_capability\t/d' \
+      -e "s/^source_revision\t.*/source_revision\t$candidate_revision/" \
+      -e "s/^module_sha256\t.*/module_sha256\t$candidate_module_sha/" \
+      -e "s/^overlay_file\t.*/overlay_file\t$candidate_overlay/" \
+      "$candidate_manifest"
+  fi
   candidate_manifest_sha="$(sha256sum "$candidate_manifest" | awk '{ print $1 }')"
   candidate_overlay_sha="$(awk -F '\t' '$1 == "overlay_sha256" { print $2 }' "$candidate_manifest")"
   candidate_rule_sha="$(awk -F '\t' '$1 == "backlight_rule_sha256" { print $2 }' "$candidate_manifest")"
 
-  run_accepted_remote prepare-new-accepted \
+  candidate_prepare_args=(prepare-new-accepted \
     0.2.0 "$candidate_revision" "$release" "$candidate_manifest_sha" \
     hyperpixel2r_kms.ko "$candidate_module_sha" \
     "$candidate_overlay" "$candidate_overlay_sha" \
-    "$backlight_rule_file" "$candidate_rule_sha" >/dev/null
+    "$backlight_rule_file" "$candidate_rule_sha")
+  if "$metadata_capability"; then
+    candidate_prepare_args+=(exact-backlight-metadata-v1)
+  fi
+  run_accepted_remote "${candidate_prepare_args[@]}" >/dev/null
   transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
-  if grep -q '^backlight_metadata_capability=' "$transition"; then
+  if "$metadata_capability"; then
+    grep -Fxq 'backlight_metadata_capability=exact-backlight-metadata-v1' "$transition" ||
+      fail 'schema-3 candidate transition lost metadata authority'
+  elif grep -q '^backlight_metadata_capability=' "$transition"; then
     fail 'schema-2 candidate transition falsely advertised metadata authority'
   fi
   if HP2R_FIXTURE_INTERRUPT_AFTER=candidate-module-installed \
@@ -2200,8 +2219,13 @@ exercise_schema_two_candidate_upgrade() {
     cat "$fixture/schema-two-stage.out" >&2
     fail 'schema-2 candidate could not stage through the legacy boundary'
   fi
-  assert_absent \
-    "$root/usr/lib/hyperpixel2r-kms/0.2.0/$candidate_revision/$release/prior-backlight-metadata"
+  if "$metadata_capability"; then
+    assert_file \
+      "$root/usr/lib/hyperpixel2r-kms/0.2.0/$candidate_revision/$release/prior-backlight-metadata"
+  else
+    assert_absent \
+      "$root/usr/lib/hyperpixel2r-kms/0.2.0/$candidate_revision/$release/prior-backlight-metadata"
+  fi
   if HP2R_FIXTURE_INTERRUPT_AFTER=accepted-same-kernel-recovery-prepared \
     HP2R_FIXTURE_PRESERVE_MUTATIONS=1 \
     run_accepted_remote recover-accepted \
@@ -2213,6 +2237,10 @@ exercise_schema_two_candidate_upgrade() {
     fail 'schema-2 recovery did not reach prepared-phase interruption'
   grep -Fxq 'phase=prepared' "$transition" ||
     fail 'schema-2 recovery did not durably return to prepared authority'
+  if "$metadata_capability"; then
+    grep -Fxq 'candidate_prior_backlight_metadata_sha256=pending' "$transition" ||
+      fail 'prepared schema-3 recovery retained staged metadata authority'
+  fi
   assert_file "$root/var/lib/hyperpixel2r-kms/tryboot-state"
   if ! run_accepted_remote recover-accepted \
     >"$fixture/schema-two-recover.out" 2>&1; then
@@ -6707,7 +6735,11 @@ case "${HP2R_FIXTURE_CASE:-}" in
     exit 0
     ;;
   schema-two-candidate-upgrade)
-    exercise_schema_two_candidate_upgrade
+    exercise_same_kernel_candidate_upgrade false
+    exit 0
+    ;;
+  schema-three-metadata-candidate-upgrade)
+    exercise_same_kernel_candidate_upgrade true
     exit 0
     ;;
   verify-restricted-path)
