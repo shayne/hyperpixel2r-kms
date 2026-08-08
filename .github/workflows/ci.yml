@@ -65,6 +65,9 @@ jobs:
       - name: Install release packaging tools
         run: sudo apt-get update && sudo apt-get install --yes zstd
 
+      - name: Build pinned kernel tool image
+        run: docker build --tag hyperpixel2r-kms-kernel-builder:debian-trixie-gcc14 --file packaging/Dockerfile.kernel .
+
       - name: Run non-lifecycle verification once
         run: mise run verify-fast
 
