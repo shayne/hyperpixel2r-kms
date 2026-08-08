@@ -605,6 +605,14 @@ if test "${1-}" = bash && test "${2-}" = -s; then
     done
     set -- "${filtered[@]}"
   fi
+  if test "${HP2R_FIXTURE_ACCEPTED_CONTROLLER:-}" = 1; then
+    printf '%s\n' "${@:3}" > "$HP2R_FIXTURE_ROOT/tmp/accepted-controller-remote-command"
+    if test "${HP2R_FIXTURE_CAPTURE_ACCEPTED_PREPARE:-}" = 1 && \
+      test "${3-}" = prepare-new-accepted; then
+      : > "$HP2R_FIXTURE_ROOT/tmp/accepted-prepare-command-captured"
+      exit 92
+    fi
+  fi
   run_remote_stdin_action() {
     remote_path="$PATH"
     if test "${HP2R_FIXTURE_REMOTE_RESTRICTED_PATH:-}" = 1; then
