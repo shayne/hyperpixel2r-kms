@@ -23,7 +23,7 @@
 
 **Files:**
 - Modify: `overlays/hyperpixel2r-kms-overlay.dts`
-- Rename: `packaging/70-planeradar-backlight.rules` to `packaging/70-hyperpixel2r-backlight.rules`
+- Rename: the legacy product-prefixed backlight rule to `packaging/70-hyperpixel2r-backlight.rules`
 - Modify: `scripts/common.sh`
 - Modify: `scripts/build-driver.sh`
 - Modify: `scripts/check-artifacts.sh`
@@ -37,11 +37,11 @@
 
 **Interfaces:**
 - Produces: sysfs device `hyperpixel2r-backlight`, udev rule `70-hyperpixel2r-backlight.rules`, symbols `hyperpixel2r_backlight` and `hyperpixel2r_backlight_pins`.
-- Preserves: `release/legacy-planeradar-migration-v1.tsv` and `cleanup-legacy-planeradar` inputs unchanged.
+- Preserves: the exact legacy migration manifest and cleanup action inputs unchanged.
 
 - [ ] **Step 1: Change focused contracts to expect the generic names**
 
-Replace current-artifact expectations only. Keep every legacy migration fixture using its original `planeradar-*` identity.
+Replace current-artifact expectations only. Keep every legacy migration fixture using its original product-prefixed identity.
 
 - [ ] **Step 2: Run focused contracts and confirm they fail**
 
@@ -81,10 +81,10 @@ Commit message: `refactor: make backlight identity generic`.
 ### Task 2: Plane Radar consumes the generic driver
 
 **Files:**
-- Modify: `/Users/shayne/code/RPi-Plane-Radar/src/backlight.rs`
-- Modify: `/Users/shayne/code/RPi-Plane-Radar/crates/planeradarctl/src/driver.rs`
-- Modify: `/Users/shayne/code/RPi-Plane-Radar/crates/planeradarctl/src/system_install.rs`
-- Modify: matching tests under `/Users/shayne/code/RPi-Plane-Radar/tests/` and `/Users/shayne/code/RPi-Plane-Radar/crates/planeradarctl/tests/`
+- Modify: `<consumer-repo>/src/backlight.rs`
+- Modify: `<consumer-repo>/crates/controller/src/driver.rs`
+- Modify: `<consumer-repo>/crates/controller/src/system_install.rs`
+- Modify: matching consumer tests
 
 **Interfaces:**
 - Consumes: `/sys/class/backlight/hyperpixel2r-backlight` and `70-hyperpixel2r-backlight.rules`.

@@ -72,7 +72,7 @@ if test "$action" = prepare-new; then
   [[ "$module_sha256" =~ ^[0-9a-f]{64}$ ]] || exit 64
   test "$overlay_file" = "hyperpixel2r-kms-${source_revision:0:12}.dtbo" || exit 64
   [[ "$overlay_sha256" =~ ^[0-9a-f]{64}$ ]] || exit 64
-  test "$backlight_rule_file" = 70-planeradar-backlight.rules || exit 64
+  test "$backlight_rule_file" = 70-hyperpixel2r-backlight.rules || exit 64
   [[ "$backlight_rule_sha256" =~ ^[0-9a-f]{64}$ ]] || exit 64
   case "$lifecycle_capability" in
     ''|exact-backlight-metadata-v1) ;;

@@ -386,7 +386,7 @@ test "$(grep -Fc 'compatible = "shayne,hyperpixel2r-kms";' "$applied_dts")" \
 test "$(grep -Fc 'compatible = "edt,edt-ft5406";' "$applied_dts")" -eq 1
 
 panel_path=/hyperpixel2r-kms
-backlight_path=/planeradar-backlight
+backlight_path=/hyperpixel2r-backlight
 touch_path="$panel_path/touchscreen@15"
 panel_endpoint_path="$panel_path/port/endpoint"
 gpio_path="$(base_symbol_path gpio)"
@@ -394,7 +394,7 @@ pwm_path="$(base_symbol_path pwm)"
 dpi_path="$(base_symbol_path dpi)"
 dpi_endpoint_path="$dpi_path/port/endpoint"
 dpi_pinctrl_path="$(base_symbol_path dpi_18bit_cpadhi_gpio0)"
-pwm_pinctrl_path="$gpio_path/planeradar-backlight-pins"
+pwm_pinctrl_path="$gpio_path/hyperpixel2r-backlight-pins"
 
 gpio_phandle="$(fdt_hex "$gpio_path" phandle)"
 pwm_phandle="$(fdt_hex "$pwm_path" phandle)"

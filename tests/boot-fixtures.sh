@@ -10,7 +10,7 @@ release='6.18.34+rpt-rpi-v8'
 source_revision="$(awk -F '\t' '$1 == "source_revision" { print $2 }' "$repo_root/dist/artifacts/$release/manifest.txt")"
 source_tree="$(awk -F '\t' '$1 == "source_tree" { print $2 }' "$repo_root/dist/artifacts/$release/manifest.txt")"
 overlay_file="hyperpixel2r-kms-${source_revision:0:12}.dtbo"
-backlight_rule_file='70-planeradar-backlight.rules'
+backlight_rule_file='70-hyperpixel2r-backlight.rules'
 fixture="$(mktemp -d)"
 chmod 0755 "$fixture"
 root="$fixture/root"
@@ -425,7 +425,7 @@ SCRIPT
   install -m 0755 /dev/stdin "$bin/stat" <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
-brightness="$HP2R_FIXTURE_ROOT/sys/class/backlight/planeradar-backlight/brightness"
+brightness="$HP2R_FIXTURE_ROOT/sys/class/backlight/hyperpixel2r-backlight/brightness"
 if test "${3-}" = "$brightness"; then
   case "${2-}:${HP2R_FIXTURE_BACKLIGHT_IDENTITY_SHAPE:-}" in
     %U:%G:%a:%u:%g:metadata-gid-race)
@@ -655,11 +655,11 @@ if test "${1-}" = bash && test "${2-}" = -s; then
   fi
   if test "$remote_action" = authorize-inactive-stage && \
     test -n "${HP2R_FIXTURE_LEGACY_POST_AUTH_BACKLIGHT_DRIFT:-}"; then
-    backlight_rule="$HP2R_FIXTURE_ROOT/etc/udev/rules.d/70-planeradar-backlight.rules"
+    backlight_rule="$HP2R_FIXTURE_ROOT/etc/udev/rules.d/70-hyperpixel2r-backlight.rules"
     case "$HP2R_FIXTURE_LEGACY_POST_AUTH_BACKLIGHT_DRIFT" in
       appearance)
         install -o root -g root -m 0644 \
-          "$HP2R_FIXTURE_REPO_ROOT/dist/artifacts/$HP2R_FIXTURE_RELEASE/70-planeradar-backlight.rules" \
+          "$HP2R_FIXTURE_REPO_ROOT/dist/artifacts/$HP2R_FIXTURE_RELEASE/70-hyperpixel2r-backlight.rules" \
           "$backlight_rule"
         ;;
       removal) rm -- "$backlight_rule" ;;
@@ -695,7 +695,7 @@ if test "${1-}" = bash && { [[ "${2-}" == /tmp/hp2r-tryboot-stage.*/* ]] || [[ "
       printf 'unexpected stage argument count while forging backlight authority: %s\n' "$#" >&2
       exit 64
     }
-    forged_backlight_rule="$HP2R_FIXTURE_ROOT/etc/udev/rules.d/70-planeradar-backlight.rules"
+    forged_backlight_rule="$HP2R_FIXTURE_ROOT/etc/udev/rules.d/70-hyperpixel2r-backlight.rules"
     test ! -L "$forged_backlight_rule" && test -f "$forged_backlight_rule" || exit 64
     forged_backlight_rule_sha="$(sha256sum "$forged_backlight_rule" | awk '{ print $1 }')"
     set -- "${@:1:12}" true "$forged_backlight_rule_sha"
@@ -875,11 +875,11 @@ case "${1-}" in
     printf 'udevadm reload\n' >> "$HP2R_FIXTURE_LOG"
     ;;
   trigger)
-    test "$*" = 'trigger --action=add --subsystem-match=backlight --sysname-match=planeradar-backlight --settle'
-    rule="$HP2R_FIXTURE_ROOT/etc/udev/rules.d/70-planeradar-backlight.rules"
-    brightness="$HP2R_FIXTURE_ROOT/sys/class/backlight/planeradar-backlight/brightness"
+    test "$*" = 'trigger --action=add --subsystem-match=backlight --sysname-match=hyperpixel2r-backlight --settle'
+    rule="$HP2R_FIXTURE_ROOT/etc/udev/rules.d/70-hyperpixel2r-backlight.rules"
+    brightness="$HP2R_FIXTURE_ROOT/sys/class/backlight/hyperpixel2r-backlight/brightness"
     if test -f "$brightness" && test -f "$rule"; then
-      expected='SUBSYSTEM=="backlight", KERNEL=="planeradar-backlight", RUN+="/usr/bin/chgrp video /sys%p/brightness", RUN+="/usr/bin/chmod 0660 /sys%p/brightness"'
+      expected='SUBSYSTEM=="backlight", KERNEL=="hyperpixel2r-backlight", RUN+="/usr/bin/chgrp video /sys%p/brightness", RUN+="/usr/bin/chmod 0660 /sys%p/brightness"'
       if test "$(cat "$rule")" = "$expected"; then
         if test "${HP2R_FIXTURE_BACKLIGHT_DYNAMIC_IDS:-}" = 1; then
           chown root:4242 "$brightness"
@@ -889,7 +889,7 @@ case "${1-}" in
         chmod 0660 "$brightness"
       fi
     fi
-    printf 'udevadm trigger --settle planeradar-backlight\n' >> "$HP2R_FIXTURE_LOG"
+    printf 'udevadm trigger --settle hyperpixel2r-backlight\n' >> "$HP2R_FIXTURE_LOG"
     ;;
   *) exit 64 ;;
 esac
@@ -1588,7 +1588,7 @@ prepare_inactive_authorization_target() {
     printf 'tryboot_config_sha256=%s\n' "$(printf e%.0s {1..64})"
     printf 'prior_dkms_status=registered\n'
     printf 'candidate_dkms_inventory_sha256=pending\n'
-    printf 'candidate_backlight_rule_file=70-planeradar-backlight.rules\n'
+    printf 'candidate_backlight_rule_file=70-hyperpixel2r-backlight.rules\n'
     printf 'candidate_backlight_rule_sha256=%s\n' "$(printf f%.0s {1..64})"
     printf 'prior_backlight_rule_existed=%s\n' "$prior_backlight_existed"
     printf 'prior_backlight_rule_sha256=%s\n' "$prior_backlight_sha"
@@ -1888,7 +1888,7 @@ install_live_hardware() {
     "$root/sys/bus/platform/drivers/hyperpixel2r-kms" \
     "$root/sys/devices/platform/fixture-panel/of_node" \
     "$root/sys/class/drm/card0-DPI-1" \
-    "$root/sys/class/backlight/planeradar-backlight" \
+    "$root/sys/class/backlight/hyperpixel2r-backlight" \
     "$root/sys/class/input/event0/device"
   ln -s ../../../../devices/platform/fixture-panel \
     "$root/sys/bus/platform/drivers/hyperpixel2r-kms/fixture-panel"
@@ -1896,8 +1896,8 @@ install_live_hardware() {
   printf 'shayne,hyperpixel2r-kms\0' > "$root/sys/devices/platform/fixture-panel/of_node/compatible"
   printf 'connected\n' > "$root/sys/class/drm/card0-DPI-1/status"
   printf '480x480\n' > "$root/sys/class/drm/card0-DPI-1/modes"
-  printf '255\n' > "$root/sys/class/backlight/planeradar-backlight/max_brightness"
-  printf '128\n' > "$root/sys/class/backlight/planeradar-backlight/brightness"
+  printf '255\n' > "$root/sys/class/backlight/hyperpixel2r-backlight/max_brightness"
+  printf '128\n' > "$root/sys/class/backlight/hyperpixel2r-backlight/brightness"
   printf 'EDT FT5406\n' > "$root/sys/class/input/event0/device/name"
 }
 
@@ -1906,13 +1906,13 @@ exercise_backlight_udev_settle() {
   run_stage >/dev/null
   install_live_hardware
   run_controller commit-boot.sh >/dev/null
-  grep -Fxq 'udevadm trigger --settle planeradar-backlight' "$log" ||
+  grep -Fxq 'udevadm trigger --settle hyperpixel2r-backlight' "$log" ||
     fail 'candidate permission reload did not settle its targeted udev event'
 }
 
 assert_backlight_brightness_metadata() {
   local expected="$1"
-  local brightness="$root/sys/class/backlight/planeradar-backlight/brightness"
+  local brightness="$root/sys/class/backlight/hyperpixel2r-backlight/brightness"
 
   test "$(stat -c '%u:%g:%a' "$brightness")" = "$expected" ||
     fail "backlight brightness metadata differs from $expected"
@@ -1921,7 +1921,7 @@ assert_backlight_brightness_metadata() {
 apply_fixture_candidate_backlight_permissions() {
   HP2R_FIXTURE_ROOT="$root" HP2R_FIXTURE_LOG="$log" \
     "$bin/udevadm" trigger --action=add --subsystem-match=backlight \
-      --sysname-match=planeradar-backlight --settle
+      --sysname-match=hyperpixel2r-backlight --settle
 }
 
 exercise_backlight_permission_restore() {
@@ -1929,16 +1929,16 @@ exercise_backlight_permission_restore() {
 
   new_target
   install_live_hardware
-  chown 0:4242 "$root/sys/class/backlight/planeradar-backlight/brightness"
-  chmod 0640 "$root/sys/class/backlight/planeradar-backlight/brightness"
+  chown 0:4242 "$root/sys/class/backlight/hyperpixel2r-backlight/brightness"
+  chmod 0640 "$root/sys/class/backlight/hyperpixel2r-backlight/brightness"
   original_metadata="$(stat -c '%u:%g:%a' \
-    "$root/sys/class/backlight/planeradar-backlight/brightness")"
+    "$root/sys/class/backlight/hyperpixel2r-backlight/brightness")"
   test "$original_metadata" = 0:4242:640 ||
     fail 'fixture backlight did not begin with non-default metadata'
   run_stage >/dev/null
   apply_fixture_candidate_backlight_permissions
   test "$(stat -c '%U:%G:%a' \
-    "$root/sys/class/backlight/planeradar-backlight/brightness")" = root:video:660 ||
+    "$root/sys/class/backlight/hyperpixel2r-backlight/brightness")" = root:video:660 ||
     fail 'candidate udev policy did not change backlight metadata'
   run_controller rollback-boot.sh >/dev/null
   assert_backlight_brightness_metadata "$original_metadata"
@@ -1952,10 +1952,10 @@ exercise_backlight_permission_restore() {
 
   new_target
   install_live_hardware
-  chown 0:4242 "$root/sys/class/backlight/planeradar-backlight/brightness"
-  chmod 0640 "$root/sys/class/backlight/planeradar-backlight/brightness"
+  chown 0:4242 "$root/sys/class/backlight/hyperpixel2r-backlight/brightness"
+  chmod 0640 "$root/sys/class/backlight/hyperpixel2r-backlight/brightness"
   original_metadata="$(stat -c '%u:%g:%a' \
-    "$root/sys/class/backlight/planeradar-backlight/brightness")"
+    "$root/sys/class/backlight/hyperpixel2r-backlight/brightness")"
   run_stage >/dev/null
   apply_fixture_candidate_backlight_permissions
   if HP2R_FIXTURE_INTERRUPT_AFTER=rollback-boot-restored-unpublished \
@@ -1973,16 +1973,16 @@ exercise_backlight_permission_restore() {
 
   new_target
   install_live_hardware
-  chown 0:4242 "$root/sys/class/backlight/planeradar-backlight/brightness"
-  chmod 0640 "$root/sys/class/backlight/planeradar-backlight/brightness"
+  chown 0:4242 "$root/sys/class/backlight/hyperpixel2r-backlight/brightness"
+  chmod 0640 "$root/sys/class/backlight/hyperpixel2r-backlight/brightness"
   original_metadata="$(stat -c '%u:%g:%a' \
-    "$root/sys/class/backlight/planeradar-backlight/brightness")"
+    "$root/sys/class/backlight/hyperpixel2r-backlight/brightness")"
   run_stage >/dev/null
   run_controller commit-boot.sh >/dev/null
   run_accepted_remote record-accepted \
     0.2.0 "$source_revision" "$release" >/dev/null
   test "$(stat -c '%U:%G:%a' \
-    "$root/sys/class/backlight/planeradar-backlight/brightness")" = root:video:660 ||
+    "$root/sys/class/backlight/hyperpixel2r-backlight/brightness")" = root:video:660 ||
     fail 'accepted candidate did not retain its backlight permissions'
   if HP2R_FIXTURE_INTERRUPT_AFTER=uninstall-rule-restored \
     run_accepted_remote uninstall-accepted \
@@ -2006,13 +2006,13 @@ exercise_backlight_permission_restore() {
 
   new_target
   install_live_hardware
-  chown 0:4242 "$root/sys/class/backlight/planeradar-backlight/brightness"
-  chmod 0640 "$root/sys/class/backlight/planeradar-backlight/brightness"
+  chown 0:4242 "$root/sys/class/backlight/hyperpixel2r-backlight/brightness"
+  chmod 0640 "$root/sys/class/backlight/hyperpixel2r-backlight/brightness"
   run_stage >/dev/null
   artifact="$root/usr/lib/hyperpixel2r-kms/0.2.0/$source_revision/$release"
   metadata="$artifact/prior-backlight-metadata"
   assert_file "$metadata"
-  rm -rf -- "$root/sys/class/backlight/planeradar-backlight"
+  rm -rf -- "$root/sys/class/backlight/hyperpixel2r-backlight"
   if run_controller rollback-boot.sh >/dev/null 2>&1; then
     fail 'rollback retired present backlight metadata while the device was missing'
   fi
@@ -2024,8 +2024,8 @@ exercise_backlight_metadata_authority() {
 
   new_target
   install_live_hardware
-  chown 0:4242 "$root/sys/class/backlight/planeradar-backlight/brightness"
-  chmod 0640 "$root/sys/class/backlight/planeradar-backlight/brightness"
+  chown 0:4242 "$root/sys/class/backlight/hyperpixel2r-backlight/brightness"
+  chmod 0640 "$root/sys/class/backlight/hyperpixel2r-backlight/brightness"
   run_stage >/dev/null
   apply_fixture_candidate_backlight_permissions
   artifact="$root/usr/lib/hyperpixel2r-kms/0.2.0/$source_revision/$release"
@@ -2037,8 +2037,8 @@ exercise_backlight_metadata_authority() {
 
   new_target
   install_live_hardware
-  chown 0:4242 "$root/sys/class/backlight/planeradar-backlight/brightness"
-  chmod 0640 "$root/sys/class/backlight/planeradar-backlight/brightness"
+  chown 0:4242 "$root/sys/class/backlight/hyperpixel2r-backlight/brightness"
+  chmod 0640 "$root/sys/class/backlight/hyperpixel2r-backlight/brightness"
   run_stage >/dev/null
   apply_fixture_candidate_backlight_permissions
   artifact="$root/usr/lib/hyperpixel2r-kms/0.2.0/$source_revision/$release"
@@ -2069,8 +2069,8 @@ exercise_backlight_metadata_authority() {
 
   new_target
   install_live_hardware
-  chown 0:4242 "$root/sys/class/backlight/planeradar-backlight/brightness"
-  chmod 0640 "$root/sys/class/backlight/planeradar-backlight/brightness"
+  chown 0:4242 "$root/sys/class/backlight/hyperpixel2r-backlight/brightness"
+  chmod 0640 "$root/sys/class/backlight/hyperpixel2r-backlight/brightness"
   run_stage >/dev/null
   run_controller commit-boot.sh >/dev/null
   run_accepted_remote record-accepted \
@@ -5004,7 +5004,7 @@ exercise_inactive_kernel_prepare() {
     exit 0
   fi
   if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-backlight-policy; then
-    local brightness="$root/sys/class/backlight/planeradar-backlight/brightness"
+    local brightness="$root/sys/class/backlight/hyperpixel2r-backlight/brightness"
     local brightness_before policy_error="$fixture/backlight-policy.err"
 
     prepare_inactive_normalized_verified_for_backlight_probe \
@@ -5033,7 +5033,7 @@ exercise_inactive_kernel_prepare() {
     exit 0
   fi
   if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-backlight-hostiles; then
-    local brightness="$root/sys/class/backlight/planeradar-backlight/brightness"
+    local brightness="$root/sys/class/backlight/hyperpixel2r-backlight/brightness"
     local brightness_before receipt_before shape
 
     prepare_inactive_normalized_verified_for_backlight_probe \
@@ -5076,7 +5076,7 @@ exercise_inactive_kernel_prepare() {
     exit 0
   fi
   if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-backlight-capability; then
-    local brightness="$root/sys/class/backlight/planeradar-backlight/brightness"
+    local brightness="$root/sys/class/backlight/hyperpixel2r-backlight/brightness"
     local brightness_before receipt_before
 
     prepare_inactive_normalized_verified_for_backlight_probe \
@@ -5122,7 +5122,7 @@ exercise_inactive_kernel_prepare() {
   fi
   if test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-backlight-metadata-race ||
     test "${HP2R_FIXTURE_CASE:-}" = inactive-kernel-backlight-metadata-postwrite; then
-    local brightness="$root/sys/class/backlight/planeradar-backlight/brightness"
+    local brightness="$root/sys/class/backlight/hyperpixel2r-backlight/brightness"
     local brightness_before receipt_before shape marker
     local -a metadata_shapes
 
@@ -7001,7 +7001,7 @@ fi
 new_target
 run_stage >/dev/null
 install_live_hardware
-rm -rf -- "$root/sys/class/backlight/planeradar-backlight"
+rm -rf -- "$root/sys/class/backlight/hyperpixel2r-backlight"
 if run_controller commit-boot.sh >/dev/null 2>&1; then
   fail 'commit accepted a missing named backlight device'
 fi
@@ -7498,7 +7498,7 @@ assert_file "$accepted_receipt"
 assert_file "$stock_config"
 grep -Fxq 'schema_version=3' "$accepted_receipt" ||
   fail 'accepted driver receipt schema is missing'
-grep -Fxq 'backlight_rule_file=70-planeradar-backlight.rules' "$accepted_receipt" ||
+grep -Fxq 'backlight_rule_file=70-hyperpixel2r-backlight.rules' "$accepted_receipt" ||
   fail 'accepted receipt lost the rule identity'
 grep -Fxq 'prior_backlight_rule_existed=true' "$accepted_receipt" ||
   fail 'accepted receipt did not preserve existing prior-rule proof'
@@ -7532,7 +7532,7 @@ new_transition="$root/var/lib/hyperpixel2r-kms/accepted-transition"
 assert_file "$new_transition"
 grep -Fxq 'schema_version=5' "$new_transition" ||
   fail 'new transition did not publish the complete v5 journal'
-grep -Fxq 'candidate_backlight_rule_file=70-planeradar-backlight.rules' "$new_transition" ||
+grep -Fxq 'candidate_backlight_rule_file=70-hyperpixel2r-backlight.rules' "$new_transition" ||
   fail 'new transition lost the candidate rule identity'
 grep -Fxq 'candidate_dkms_inventory_sha256=pending' "$new_transition" ||
   fail 'prepared new transition did not record its pending DKMS inventory binding'
@@ -7970,7 +7970,7 @@ grep -Eq '^prior_dkms_inventory_sha256=[0-9a-f]{64}$' "$state"
 grep -Fxq 'prior_tryboot_sha256=none' "$state"
 grep -Fxq 'module_existed=false' "$state"
 grep -Fxq 'overlay_existed=false' "$state"
-grep -Fxq 'backlight_rule_file=70-planeradar-backlight.rules' "$state"
+grep -Fxq 'backlight_rule_file=70-hyperpixel2r-backlight.rules' "$state"
 grep -Eq '^backlight_rule_sha256=[0-9a-f]{64}$' "$state"
 grep -Fxq 'prior_backlight_rule_existed=false' "$state"
 grep -Fxq 'prior_backlight_rule_sha256=none' "$state"

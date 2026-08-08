@@ -91,8 +91,8 @@ fail() {
 }
 
 panel_path=/fragment@0/__overlay__/hyperpixel2r-kms
-backlight_path=/fragment@0/__overlay__/planeradar-backlight
-pinctrl_path=/fragment@2/__overlay__/planeradar-backlight-pins
+backlight_path=/fragment@0/__overlay__/hyperpixel2r-backlight
+pinctrl_path=/fragment@2/__overlay__/hyperpixel2r-backlight-pins
 pwm_path=/fragment@3/__overlay__
 
 test "$(fdtget -t s "$backlight_path" compatible)" = pwm-backlight ||
@@ -127,7 +127,7 @@ test "$(fdtget -t x "$pwm_path" pinctrl-0)" = "$pinctrl_phandle" ||
 test "$(fdtget -t s "$pwm_path" pinctrl-names)" = default ||
   fail "PWM pinctrl state is invalid"
 
-test "$(fdtget -t s /__symbols__ planeradar_backlight)" = "$backlight_path" ||
+test "$(fdtget -t s /__symbols__ hyperpixel2r_backlight)" = "$backlight_path" ||
   fail "named PWM backlight symbol is missing"
 test "$(fdtget -t s /__fixups__ pwm)" = \
   "$backlight_path:pwms:0 /fragment@3:target:0" ||

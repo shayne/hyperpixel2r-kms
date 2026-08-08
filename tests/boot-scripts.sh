@@ -66,11 +66,11 @@ mkdir -p \
 module_file='hyperpixel2r_kms.ko'
 overlay_file="hyperpixel2r-kms-${source_revision:0:12}.dtbo"
 applied_dtb_file='hyperpixel2r-kms-applied.dtb'
-backlight_rule_file='70-planeradar-backlight.rules'
+backlight_rule_file='70-hyperpixel2r-backlight.rules'
 printf 'synthetic module fixture\n' > "$artifact_dir/$module_file"
 printf 'synthetic overlay fixture\n' > "$artifact_dir/$overlay_file"
 printf 'synthetic applied dtb fixture\n' > "$artifact_dir/$applied_dtb_file"
-printf '%s\n' 'SUBSYSTEM=="backlight", KERNEL=="planeradar-backlight", RUN+="/usr/bin/chgrp video /sys%p/brightness", RUN+="/usr/bin/chmod 0660 /sys%p/brightness"' > "$artifact_dir/$backlight_rule_file"
+printf '%s\n' 'SUBSYSTEM=="backlight", KERNEL=="hyperpixel2r-backlight", RUN+="/usr/bin/chgrp video /sys%p/brightness", RUN+="/usr/bin/chmod 0660 /sys%p/brightness"' > "$artifact_dir/$backlight_rule_file"
 for helper in host-fixdep host-modpost host-genksyms; do
   printf 'synthetic %s fixture\n' "$helper" > "$artifact_dir/$helper"
 done

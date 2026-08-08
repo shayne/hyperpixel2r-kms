@@ -74,8 +74,8 @@ done
 temporary_dir="$(mktemp -d "${TMPDIR:-/tmp}/hp2r-build-contract.XXXXXX")"
 trap 'rm -rf "$temporary_dir"' EXIT
 valid_manifest="$temporary_dir/manifest.txt"
-backlight_rule="$temporary_dir/70-planeradar-backlight.rules"
-printf '%s\n' 'SUBSYSTEM=="backlight", KERNEL=="planeradar-backlight", RUN+="/usr/bin/chgrp video /sys%p/brightness", RUN+="/usr/bin/chmod 0660 /sys%p/brightness"' > "$backlight_rule"
+backlight_rule="$temporary_dir/70-hyperpixel2r-backlight.rules"
+printf '%s\n' 'SUBSYSTEM=="backlight", KERNEL=="hyperpixel2r-backlight", RUN+="/usr/bin/chgrp video /sys%p/brightness", RUN+="/usr/bin/chmod 0660 /sys%p/brightness"' > "$backlight_rule"
 backlight_rule_sha256="$(sha256sum "$backlight_rule" | awk '{ print $1 }')"
 cat > "$valid_manifest" <<'MANIFEST'
 schema_version	2
@@ -93,7 +93,7 @@ overlay_file	hyperpixel2r-kms-000000000000.dtbo
 overlay_sha256	4444444444444444444444444444444444444444444444444444444444444444
 applied_dtb_file	hyperpixel2r-kms-applied.dtb
 applied_dtb_sha256	5555555555555555555555555555555555555555555555555555555555555555
-backlight_rule_file	70-planeradar-backlight.rules
+backlight_rule_file	70-hyperpixel2r-backlight.rules
 backlight_rule_sha256	BACKLIGHT_RULE_SHA256
 MANIFEST
 sed -i.bak "s/BACKLIGHT_RULE_SHA256/$backlight_rule_sha256/" "$valid_manifest"
@@ -167,7 +167,7 @@ for mutation in broad tampered extra; do
       printf '%s\n' 'SUBSYSTEM=="backlight", RUN+="/usr/bin/chgrp video /sys%p/brightness", RUN+="/usr/bin/chmod 0660 /sys%p/brightness"' > "$invalid_rule"
       ;;
     tampered)
-      printf '%s\n' 'SUBSYSTEM=="backlight", KERNEL=="planeradar-backlight", RUN+="/usr/bin/chgrp video /sys%p/actual_brightness", RUN+="/usr/bin/chmod 0660 /sys%p/actual_brightness"' > "$invalid_rule"
+      printf '%s\n' 'SUBSYSTEM=="backlight", KERNEL=="hyperpixel2r-backlight", RUN+="/usr/bin/chgrp video /sys%p/actual_brightness", RUN+="/usr/bin/chmod 0660 /sys%p/actual_brightness"' > "$invalid_rule"
       ;;
     extra)
       {
@@ -261,7 +261,7 @@ PATH="$no_probe_bin:$PATH" \
     --module-sha256 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
     --overlay-file hyperpixel2r-kms-000000000000.dtbo \
     --overlay-sha256 cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
-    --backlight-rule-file 70-planeradar-backlight.rules \
+    --backlight-rule-file 70-hyperpixel2r-backlight.rules \
     --backlight-rule-sha256 dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
     --lifecycle-capability exact-backlight-metadata-v1 \
     --kernel-target "$temporary_dir/candidate-target" \

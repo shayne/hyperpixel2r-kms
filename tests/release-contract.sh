@@ -279,9 +279,10 @@ legacy_user="shayne"
 legacy_host_marker="${legacy_user}@"
 legacy_password_marker="${legacy_user}s!"
 legacy_migration_path="release/legacy-${legacy_identity}-migration-v1.tsv"
-allowed_hyphen_interface="${legacy_identity}-backlight"
+current_identity="hyperpixel2r"
+allowed_hyphen_interface="${current_identity}-backlight"
 allowed_hyphen_pins="${allowed_hyphen_interface}-pins"
-allowed_underscore_interface="${legacy_identity}_backlight"
+allowed_underscore_interface="${current_identity}_backlight"
 allowed_underscore_pins="${allowed_underscore_interface}_pins"
 allowed_backlight_name="$allowed_hyphen_interface"
 allowed_backlight_rule="70-${allowed_hyphen_interface}.rules"
@@ -399,7 +400,7 @@ release_identity_token_allowed() {
         "$allowed_underscore_interface") return 0 ;;
       esac
       ;;
-    packaging/70-planeradar-backlight.rules|scripts/accepted-lifecycle.sh|scripts/build-driver.sh|scripts/stage-tryboot.sh|tests/transport-ancestor.sh|tests/boot-scripts.sh|tests/build-contract.sh|tests/release-contract.sh)
+    packaging/70-hyperpixel2r-backlight.rules|scripts/accepted-lifecycle.sh|scripts/build-driver.sh|scripts/stage-tryboot.sh|tests/transport-ancestor.sh|tests/boot-scripts.sh|tests/build-contract.sh|tests/release-contract.sh)
       case "$identity_token" in
         "$allowed_backlight_name"|"$allowed_backlight_rule") return 0 ;;
       esac
@@ -433,7 +434,7 @@ check_release_identity "$legitimate_identity_root" || {
 }
 
 legitimate_rule_root="$(
-  identity_fixture legitimate-rule packaging/70-planeradar-backlight.rules \
+  identity_fixture legitimate-rule packaging/70-hyperpixel2r-backlight.rules \
     "KERNEL==\"$allowed_backlight_name\""
 )"
 check_release_identity "$legitimate_rule_root" || {
@@ -443,7 +444,7 @@ check_release_identity "$legitimate_rule_root" || {
 
 transport_ancestor_compound_root="$(
   identity_fixture transport-ancestor-compound tests/transport-ancestor.sh \
-    "${allowed_backlight_rule}-private"
+    "70-${legacy_identity}-backlight.rules-private"
 )"
 if check_release_identity "$transport_ancestor_compound_root" >/dev/null 2>&1; then
   printf 'release identity guard accepted hostile transport-ancestor compound\n' >&2
@@ -476,15 +477,15 @@ for hostile_fixture in \
   'underscore-suffix|scripts/common.sh' \
   'hyphen-prefix|scripts/check-artifacts.sh' \
   'underscore-prefix|tests/backlight-contract.sh' \
-  'rule-suffix|packaging/70-planeradar-backlight.rules'
+  'rule-suffix|packaging/70-hyperpixel2r-backlight.rules'
 do
   IFS='|' read -r fixture_name fixture_path <<< "$hostile_fixture"
   case "$fixture_name" in
-    hyphen-suffix) fixture_text="$allowed_hyphen_interface-secret" ;;
-    underscore-suffix) fixture_text="${allowed_underscore_pins}_private" ;;
-    hyphen-prefix) fixture_text="secret-$allowed_hyphen_interface" ;;
-    underscore-prefix) fixture_text="private_$allowed_underscore_pins" ;;
-    rule-suffix) fixture_text="${allowed_backlight_name}-private" ;;
+    hyphen-suffix) fixture_text="${legacy_identity}-backlight-secret" ;;
+    underscore-suffix) fixture_text="${legacy_identity}_backlight_pins_private" ;;
+    hyphen-prefix) fixture_text="secret-${legacy_identity}-backlight" ;;
+    underscore-prefix) fixture_text="private_${legacy_identity}_backlight_pins" ;;
+    rule-suffix) fixture_text="${legacy_identity}-backlight-private" ;;
   esac
   hostile_identity_root="$(
     identity_fixture "$fixture_name" "$fixture_path" "$fixture_text"
@@ -527,14 +528,14 @@ overlay_file="hyperpixel2r-kms-${source_revision:0:12}.dtbo"
 printf 'synthetic module fixture\n' > "$artifact_dir/hyperpixel2r_kms.ko"
 printf 'synthetic overlay fixture\n' > "$artifact_dir/$overlay_file"
 printf 'synthetic applied dtb fixture\n' > "$artifact_dir/hyperpixel2r-kms-applied.dtb"
-printf '%s\n' 'SUBSYSTEM=="backlight", KERNEL=="planeradar-backlight", RUN+="/usr/bin/chgrp video /sys%p/brightness", RUN+="/usr/bin/chmod 0660 /sys%p/brightness"' > "$artifact_dir/70-planeradar-backlight.rules"
+printf '%s\n' 'SUBSYSTEM=="backlight", KERNEL=="hyperpixel2r-backlight", RUN+="/usr/bin/chgrp video /sys%p/brightness", RUN+="/usr/bin/chmod 0660 /sys%p/brightness"' > "$artifact_dir/70-hyperpixel2r-backlight.rules"
 for helper in host-fixdep host-modpost host-genksyms; do
   printf 'synthetic %s fixture\n' "$helper" > "$artifact_dir/$helper"
 done
 module_sha256="$(sha256sum "$artifact_dir/hyperpixel2r_kms.ko" | awk '{print $1}')"
 overlay_sha256="$(sha256sum "$artifact_dir/$overlay_file" | awk '{print $1}')"
 applied_dtb_sha256="$(sha256sum "$artifact_dir/hyperpixel2r-kms-applied.dtb" | awk '{print $1}')"
-backlight_rule_sha256="$(sha256sum "$artifact_dir/70-planeradar-backlight.rules" | awk '{print $1}')"
+backlight_rule_sha256="$(sha256sum "$artifact_dir/70-hyperpixel2r-backlight.rules" | awk '{print $1}')"
 host_fixdep_sha256="$(sha256sum "$artifact_dir/host-fixdep" | awk '{print $1}')"
 host_modpost_sha256="$(sha256sum "$artifact_dir/host-modpost" | awk '{print $1}')"
 host_genksyms_sha256="$(sha256sum "$artifact_dir/host-genksyms" | awk '{print $1}')"

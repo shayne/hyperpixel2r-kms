@@ -8,7 +8,7 @@ Raspberry Pi OS Lite Trixie and the exact kernel checks described below.
 
 Stable release: [`v0.1.1`](https://github.com/shayne/hyperpixel2r-kms/releases/tag/v0.1.1).
 The next candidate is `v0.2.0-rc.2`, which adds controlled PWM backlight
-support and a hardened inactive-kernel lifecycle for Plane Radar.
+support and a hardened inactive-kernel lifecycle for appliance deployments.
 
 ## Supported shape
 

@@ -4,7 +4,7 @@ HP2R_DRIVER_VERSION="0.2.0"
 HP2R_DEFAULT_BUILD_IMAGE="hyperpixel2r-kms-kernel-builder:debian-trixie-gcc14"
 HP2R_BACKLIGHT_CAPABILITY="pwm-backlight-v1"
 HP2R_LIFECYCLE_CAPABILITY="exact-backlight-metadata-v1"
-HP2R_BACKLIGHT_RULE_FILE="70-planeradar-backlight.rules"
+HP2R_BACKLIGHT_RULE_FILE="70-hyperpixel2r-backlight.rules"
 
 hp2r_validate_target() {
   local target="${1-}"
@@ -137,7 +137,7 @@ hp2r_validate_backlight_rule() {
 
   hp2r_require_regular "$rule" || return
   cmp -s "$rule" <(
-    printf '%s\n' 'SUBSYSTEM=="backlight", KERNEL=="planeradar-backlight", RUN+="/usr/bin/chgrp video /sys%p/brightness", RUN+="/usr/bin/chmod 0660 /sys%p/brightness"'
+    printf '%s\n' 'SUBSYSTEM=="backlight", KERNEL=="hyperpixel2r-backlight", RUN+="/usr/bin/chgrp video /sys%p/brightness", RUN+="/usr/bin/chmod 0660 /sys%p/brightness"'
   ) || {
     echo "backlight rule is not the exact narrow permission contract" >&2
     return 1
@@ -946,14 +946,14 @@ fragment@3" \
       require_node_shape \
         /fragment@0/__overlay__ \
         "" \
-        "hyperpixel2r-kms
-planeradar-backlight" \
+        "hyperpixel2r-backlight
+hyperpixel2r-kms" \
         "root fragment overlay shape is invalid"
 
       panel_path=/fragment@0/__overlay__/hyperpixel2r-kms
-      backlight_path=/fragment@0/__overlay__/planeradar-backlight
+      backlight_path=/fragment@0/__overlay__/hyperpixel2r-backlight
       touch_path="$panel_path/touchscreen@15"
-      pinctrl_path=/fragment@2/__overlay__/planeradar-backlight-pins
+      pinctrl_path=/fragment@2/__overlay__/hyperpixel2r-backlight-pins
       require_node_shape \
         "$panel_path" \
         "#address-cells
@@ -1018,7 +1018,7 @@ remote-endpoint" \
       require_node_shape /fragment@2 target __overlay__ \
         "GPIO pinctrl fragment shape is invalid"
       require_node_shape /fragment@2/__overlay__ "" \
-        planeradar-backlight-pins \
+        hyperpixel2r-backlight-pins \
         "GPIO pinctrl overlay shape is invalid"
       require_node_shape \
         "$pinctrl_path" \
@@ -1049,10 +1049,10 @@ touchscreen-swapped-x-y" \
       require_node_shape \
         /__symbols__ \
         "dpi_out
+hyperpixel2r_backlight
+hyperpixel2r_backlight_pins
 hyperpixel2r_panel
 panel_in
-planeradar_backlight
-planeradar_backlight_pins
 polytouch" \
         "" \
         "overlay symbol shape is invalid"
@@ -1171,7 +1171,7 @@ touchscreen-swapped-x-y" \
         "/fragment@0/__overlay__/hyperpixel2r-kms:sda-gpios:0 /fragment@0/__overlay__/hyperpixel2r-kms:scl-gpios:0 /fragment@0/__overlay__/hyperpixel2r-kms:cs-gpios:0 /fragment@0/__overlay__/hyperpixel2r-kms/touchscreen@15:interrupt-parent:0 /fragment@2:target:0" ||
         fail "GPIO fixups are invalid"
       test "$(fdtget -t s "$overlay" /__fixups__ pwm)" = \
-        "/fragment@0/__overlay__/planeradar-backlight:pwms:0 /fragment@3:target:0" ||
+        "/fragment@0/__overlay__/hyperpixel2r-backlight:pwms:0 /fragment@3:target:0" ||
         fail "PWM fixups are invalid"
 
       fragments="$(fdtget -l "$overlay" / | grep "^fragment@" | sort)"
@@ -1280,9 +1280,9 @@ fragment@3" || fail "compiled overlay fragment set is invalid"
       )" = "$panel_path" || fail "panel symbol is invalid"
       test "$(fdtget -t s "$overlay" /__symbols__ polytouch)" = \
         "$touch_path" || fail "touchscreen symbol is invalid"
-      test "$(fdtget -t s "$overlay" /__symbols__ planeradar_backlight)" = \
+      test "$(fdtget -t s "$overlay" /__symbols__ hyperpixel2r_backlight)" = \
         "$backlight_path" || fail "PWM backlight symbol is invalid"
-      test "$(fdtget -t s "$overlay" /__symbols__ planeradar_backlight_pins)" = \
+      test "$(fdtget -t s "$overlay" /__symbols__ hyperpixel2r_backlight_pins)" = \
         "$pinctrl_path" || fail "PWM pinctrl symbol is invalid"
       test "$(fdtget -t s "$overlay" /__symbols__ panel_in)" = \
         "$panel_path/port/endpoint" || fail "panel endpoint symbol is invalid"

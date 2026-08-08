@@ -29,8 +29,8 @@ rollback_candidate_tryboot="$state_dir/rollback-candidate-tryboot.txt"
 normal_config="${root}/boot/firmware/config.txt"
 tryboot_config="${root}/boot/firmware/tryboot.txt"
 artifact_root="${root}/usr/lib/hyperpixel2r-kms"
-backlight_rule_path="${root}/etc/udev/rules.d/70-planeradar-backlight.rules"
-backlight_sysfs="${root}/sys/class/backlight/planeradar-backlight"
+backlight_rule_path="${root}/etc/udev/rules.d/70-hyperpixel2r-backlight.rules"
+backlight_sysfs="${root}/sys/class/backlight/hyperpixel2r-backlight"
 dkms_root="${root}/usr/src"
 module_uncompressed_limit=8388608
 if test -n "$root"; then
@@ -697,7 +697,7 @@ assert_exact_backlight_rule() {
 
   require_regular "$rule" || return
   cmp -s <(sudo cat "$rule") <(
-    printf '%s\n' 'SUBSYSTEM=="backlight", KERNEL=="planeradar-backlight", RUN+="/usr/bin/chgrp video /sys%p/brightness", RUN+="/usr/bin/chmod 0660 /sys%p/brightness"'
+    printf '%s\n' 'SUBSYSTEM=="backlight", KERNEL=="hyperpixel2r-backlight", RUN+="/usr/bin/chgrp video /sys%p/brightness", RUN+="/usr/bin/chmod 0660 /sys%p/brightness"'
   ) || {
     echo 'backlight rule is not the exact narrow permission contract' >&2
     return 1
@@ -805,7 +805,7 @@ restore_backlight_permissions() {
       sudo chmod 0644 "$brightness" || return
     fi
     sudo udevadm trigger --action=add --subsystem-match=backlight \
-      --sysname-match=planeradar-backlight --settle || return
+      --sysname-match=hyperpixel2r-backlight --settle || return
   else
     test "$present" != true || return 1
     return 0
@@ -833,7 +833,7 @@ reload_backlight_permissions() {
   sudo udevadm control --reload-rules || return
   if sudo test -e "$backlight_sysfs" || sudo test -L "$backlight_sysfs"; then
     sudo udevadm trigger --action=add --subsystem-match=backlight \
-      --sysname-match=planeradar-backlight --settle || return
+      --sysname-match=hyperpixel2r-backlight --settle || return
   else
     test "$verify_candidate" = false || {
       echo 'named backlight device is missing' >&2
@@ -1532,7 +1532,7 @@ assert_exact_manifest() {
   if test "$schema" = 2 || test "$schema" = 3; then
     test "$(manifest_value "$manifest" capability)" = pwm-backlight-v1 || return
     test "$(manifest_value "$manifest" backlight_rule_file)" = \
-      70-planeradar-backlight.rules || return
+      70-hyperpixel2r-backlight.rules || return
     [[ "$(manifest_value "$manifest" backlight_rule_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
   fi
   if test "$schema" = 3; then
@@ -2205,7 +2205,7 @@ assert_transaction_state() {
     backlight_rule_sha="$(state_value backlight_rule_sha256)"
     prior_backlight_rule_existed="$(state_value prior_backlight_rule_existed)"
     prior_backlight_rule_sha="$(state_value prior_backlight_rule_sha256)"
-    test "$backlight_rule_file" = 70-planeradar-backlight.rules || return
+    test "$backlight_rule_file" = 70-hyperpixel2r-backlight.rules || return
     [[ "$backlight_rule_sha" =~ ^[0-9a-f]{64}$ ]] || return
     test "$(manifest_value "$manifest" backlight_rule_file)" = "$backlight_rule_file" || return
     test "$(manifest_value "$manifest" backlight_rule_sha256)" = "$backlight_rule_sha" || return
@@ -3381,7 +3381,7 @@ stage() {
   test "$module_file" = hyperpixel2r_kms.ko || die 'unsafe incoming module file'
   [[ "$overlay_file" = "hyperpixel2r-kms-${revision:0:12}.dtbo" ]] || die 'unsafe incoming overlay file'
   test "$applied_dtb_file" = hyperpixel2r-kms-applied.dtb || die 'unsafe incoming applied dtb file'
-  test "$backlight_rule_file" = 70-planeradar-backlight.rules || die 'unsafe incoming backlight rule file'
+  test "$backlight_rule_file" = 70-hyperpixel2r-backlight.rules || die 'unsafe incoming backlight rule file'
   test -z "$expected_accepted_transition_sha" ||
     [[ "$expected_accepted_transition_sha" =~ ^[0-9a-f]{64}$ ]] ||
     die 'unsafe accepted transition digest'
@@ -4580,7 +4580,7 @@ authorize_inactive_stage() {
     [[ "$(accepted_transition_value candidate_normal_config_sha256)" =~ ^[0-9a-f]{64}$ ]] &&
     [[ "$(accepted_transition_value tryboot_config_sha256)" =~ ^[0-9a-f]{64}$ ]] &&
     test "$(accepted_transition_value candidate_dkms_inventory_sha256)" = pending &&
-    test "$(accepted_transition_value candidate_backlight_rule_file)" = 70-planeradar-backlight.rules &&
+    test "$(accepted_transition_value candidate_backlight_rule_file)" = 70-hyperpixel2r-backlight.rules &&
     [[ "$(accepted_transition_value candidate_backlight_rule_sha256)" =~ ^[0-9a-f]{64}$ ]] ||
     die 'schema-6 accepted authority has an unsafe candidate binding'
   for key in prior_normal_kernel_sha256 prior_normal_initramfs_sha256 candidate_kernel_sha256 \
@@ -5167,7 +5167,7 @@ assert_rollback_journal() {
     rb_backlight_rule_sha="$(rollback_value backlight_rule_sha256)"
     rb_prior_backlight_rule_existed="$(rollback_value prior_backlight_rule_existed)"
     rb_prior_backlight_rule_sha="$(rollback_value prior_backlight_rule_sha256)"
-    test "$rb_backlight_rule_file" = 70-planeradar-backlight.rules || return
+    test "$rb_backlight_rule_file" = 70-hyperpixel2r-backlight.rules || return
     [[ "$rb_backlight_rule_sha" =~ ^[0-9a-f]{64}$ ]] || return
     test "$(manifest_value "$manifest" backlight_rule_file)" = "$rb_backlight_rule_file" || return
     test "$(manifest_value "$manifest" backlight_rule_sha256)" = "$rb_backlight_rule_sha" || return
@@ -6024,7 +6024,7 @@ assert_accepted_state() {
   test "$(manifest_value "$manifest" overlay_file)" = "$(accepted_value overlay_file)" || return
   test "$(manifest_value "$manifest" overlay_sha256)" = "$(accepted_value overlay_sha256)" || return
   if test "$schema" = 3 || test "$schema" = 4; then
-    test "$(accepted_value backlight_rule_file)" = 70-planeradar-backlight.rules || return
+    test "$(accepted_value backlight_rule_file)" = 70-hyperpixel2r-backlight.rules || return
     [[ "$(accepted_value backlight_rule_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
     test "$(manifest_value "$manifest" backlight_rule_file)" = \
       "$(accepted_value backlight_rule_file)" || return
@@ -7170,7 +7170,7 @@ prepare_new_accepted() {
   test "$overlay_file" = "hyperpixel2r-kms-${revision:0:12}.dtbo" ||
     die 'unsafe candidate overlay file'
   [[ "$overlay_sha" =~ ^[0-9a-f]{64}$ ]] || die 'unsafe candidate overlay checksum'
-  test "$backlight_rule_file" = 70-planeradar-backlight.rules ||
+  test "$backlight_rule_file" = 70-hyperpixel2r-backlight.rules ||
     die 'unsafe candidate backlight rule file'
   [[ "$backlight_rule_sha" =~ ^[0-9a-f]{64}$ ]] ||
     die 'unsafe candidate backlight rule checksum'
@@ -7843,7 +7843,7 @@ assert_accepted_transition() {
   fi
   if test "$schema" = 4 || test "$schema" = 5 || test "$schema" = 6; then
     test "$(accepted_transition_value candidate_backlight_rule_file)" = \
-      70-planeradar-backlight.rules || return
+      70-hyperpixel2r-backlight.rules || return
     [[ "$(accepted_transition_value candidate_backlight_rule_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
     accepted_schema="$(accepted_value schema_version)" || return
     if test "$accepted_schema" = 3 || test "$accepted_schema" = 4; then
@@ -9015,7 +9015,7 @@ assert_accepted_uninstall() {
   fi
   if test "$schema" = 4; then
     test "$(accepted_uninstall_value backlight_rule_file)" = \
-      70-planeradar-backlight.rules || return
+      70-hyperpixel2r-backlight.rules || return
     [[ "$(accepted_uninstall_value backlight_rule_sha256)" =~ ^[0-9a-f]{64}$ ]] || return
     case "$(accepted_uninstall_value prior_backlight_rule_existed)" in
       true)

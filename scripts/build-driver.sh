@@ -150,7 +150,7 @@ for source_path in \
   kernel/Kbuild \
   kernel/hyperpixel2r_kms_main.c \
   overlays/hyperpixel2r-kms-overlay.dts \
-  packaging/70-planeradar-backlight.rules \
+  packaging/70-hyperpixel2r-backlight.rules \
   scripts/common.sh \
   scripts/prepare-kbuild-host-tools.sh
 do

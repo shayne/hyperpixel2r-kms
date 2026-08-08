@@ -23,7 +23,7 @@ becomes `hyperpixel2r-backlight-pins`, and its udev rule becomes
 `hyperpixel2r_backlight` and `hyperpixel2r_backlight_pins`.
 
 Plane Radar discovers and validates the new HyperPixel identity. Existing
-`planeradar-*` identifiers remain supported only as inputs to the bounded
+Legacy product-prefixed identifiers remain supported only as inputs to the bounded
 legacy cleanup path; they are not emitted by new driver artifacts.
 
 ## Verification Pipeline
