@@ -6921,6 +6921,8 @@ case "${HP2R_FIXTURE_CASE:-}" in
     assert_file "$root/boot/firmware/tryboot.txt"
     exit 0
     ;;
+  core)
+    ;;
   '')
     exercise_inactive_uninstall_backlight_matrix
     exercise_prior_absent_accepted_uninstall_proof_guard

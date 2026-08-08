@@ -116,9 +116,18 @@ if ci_workflow.is_file():
         "Upload the commit-bound verified release assets",
         "actions/upload-artifact@",
         "name: release-assets-${{ github.sha }}",
+        "run: mise run verify-fast",
+        "needs: [validate-release-metadata, verify-fast, lifecycle]",
+        "- core",
+        "- inactive-uninstall-backlight",
+        "- prior-absent-uninstall-proof",
+        "- inactive-kernel-recovery-phases",
+        "- inactive-kernel-finalization-interruptions",
     ):
         if required not in ci:
             failures.append(f"CI must publish one commit-bound verified artifact: {required}")
+    if "run: mise run verify\n" in ci:
+        failures.append("CI must not serialize the complete lifecycle matrix behind verify")
 
 tag_validator = root / "scripts" / "validate-release-tag.sh"
 if not tag_validator.is_file() or not tag_validator.stat().st_mode & 0o111:

@@ -96,3 +96,6 @@ HP2R_TARGET="${HP2R_TARGET:-}" \
 
 [tasks.verify]
 depends = ["test-protocol", "test-gpio", "test-backlight-contract", "test-build-contract", "test-boot-scripts", "test-release-contract"]
+
+[tasks.verify-fast]
+depends = ["test-protocol", "test-gpio", "test-backlight-contract", "test-build-contract", "test-release-contract"]
